@@ -15,7 +15,7 @@
 
 set -e
 
-ISAACLAB_VERSION="v2.1.0"
+ISAACLAB_VERSION="v5.1.0"
 ISAACLAB_DIR="${HOME}/IsaacLab"
 
 echo "=== DexGen: Isaac Lab Setup ==="
@@ -41,10 +41,10 @@ DRIVER_VERSION=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | h
 echo "  GPU Driver: ${DRIVER_VERSION}"
 
 # ------------------------------------------------------------------------------
-# 2. Install Isaac Sim via pip (Isaac Sim 4.x supports pip install)
+# 2. Install Isaac Sim via pip (Isaac Sim 5.x supports pip install)
 # ------------------------------------------------------------------------------
 echo "[2/5] Installing Isaac Sim..."
-pip install isaacsim==4.5.0 \
+pip install isaacsim==5.1.0 \
     --extra-index-url https://pypi.nvidia.com \
     isaacsim-rl \
     isaacsim-replicator \

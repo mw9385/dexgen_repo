@@ -24,8 +24,8 @@ DexterityGen (Yin et al., 2025) 파이프라인을 Isaac Lab 기반으로 구현
 ## 환경
 
 ### Isaac Lab 셋업
-- Isaac Lab v2.1.0 (~/IsaacLab)
-- Isaac Sim 4.5.0 (pip install)
+- Isaac Lab v5.1.0 (~/IsaacLab)
+- Isaac Sim 5.1.0 (pip install)
 - RL framework: rl_games (PPO)
 
 ```bash
