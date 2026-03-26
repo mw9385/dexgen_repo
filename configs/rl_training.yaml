@@ -87,3 +87,46 @@ logging:
   log_dir: logs/rl/allegro_anygrasp
   save_frequency: 1000
   print_stats: true
+
+# ==============================================================================
+# Domain Randomization
+# ==============================================================================
+# Values are injected into AnyGraspEventsCfg at training startup.
+# Edit these ranges to change what gets randomised each episode reset.
+#
+#  object_physics:
+#    mass_range        [kg]   object inertia (heavier → harder to fling)
+#    friction_range    [-]    lateral contact friction
+#    restitution_range [-]    bounciness (0 = no bounce)
+#
+#  robot_physics:
+#    damping_range     [N·m·s/rad]  per-joint velocity damping
+#    armature_range    [kg·m²]      per-joint effective inertia
+#
+#  action_delay:
+#    max_delay         [steps]  max sim-step lag injected into action stream
+#
+#  obs_noise:
+#    joint_pos_std     [rad]    Gaussian noise on joint position encoder
+#    joint_vel_std     [rad/s]  Gaussian noise on joint velocity (pre-normalise)
+#    fingertip_pos_std [m]      Gaussian noise on fingertip FK position
+# ==============================================================================
+
+domain_randomization:
+
+  object_physics:
+    mass_range:        [0.03, 0.30]   # kg
+    friction_range:    [0.30, 1.20]
+    restitution_range: [0.00, 0.40]
+
+  robot_physics:
+    damping_range:     [0.01, 0.30]   # N·m·s/rad
+    armature_range:    [0.001, 0.03]  # kg·m²
+
+  action_delay:
+    max_delay: 2                       # steps  (0 = no delay)
+
+  obs_noise:
+    joint_pos_std:     0.005           # rad
+    joint_vel_std:     0.04            # in normalised space (≈ 0.2 rad/s)
+    fingertip_pos_std: 0.003           # m

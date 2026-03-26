@@ -24,6 +24,8 @@ import os
 import sys
 from pathlib import Path
 
+import yaml
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 
@@ -44,7 +46,70 @@ def parse_args():
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--device", type=str, default="cuda",
                    choices=["cuda", "cpu"])
+    p.add_argument("--config", type=str,
+                   default=str(Path(__file__).parent.parent / "configs" / "rl_training.yaml"),
+                   help="Path to YAML config (ppo / domain_randomization settings)")
     return p.parse_args()
+
+
+def load_config(path: str) -> dict:
+    """Load YAML config, return empty dict if file not found."""
+    p = Path(path)
+    if not p.exists():
+        print(f"[WARNING] Config not found at {path}, using defaults.")
+        return {}
+    with open(p) as f:
+        return yaml.safe_load(f) or {}
+
+
+def apply_dr_config(env_cfg, dr_cfg: dict):
+    """
+    Inject domain randomisation ranges from the YAML config into the
+    environment's EventsCfg.  Only keys present in the YAML are overridden.
+
+    Example YAML section::
+
+        domain_randomization:
+          object_physics:
+            mass_range: [0.05, 0.25]
+          action_delay:
+            max_delay: 3
+    """
+    if not dr_cfg:
+        return
+
+    events = env_cfg.events
+
+    obj = dr_cfg.get("object_physics", {})
+    if obj:
+        p = events.randomize_object_physics.params
+        if "mass_range"        in obj: p["mass_range"]        = tuple(obj["mass_range"])
+        if "friction_range"    in obj: p["friction_range"]    = tuple(obj["friction_range"])
+        if "restitution_range" in obj: p["restitution_range"] = tuple(obj["restitution_range"])
+
+    rob = dr_cfg.get("robot_physics", {})
+    if rob:
+        p = events.randomize_robot_physics.params
+        if "damping_range"  in rob: p["damping_range"]  = tuple(rob["damping_range"])
+        if "armature_range" in rob: p["armature_range"] = tuple(rob["armature_range"])
+
+    delay = dr_cfg.get("action_delay", {})
+    if delay:
+        p = events.randomize_action_delay.params
+        if "max_delay" in delay: p["max_delay"] = int(delay["max_delay"])
+
+    noise = dr_cfg.get("obs_noise", {})
+    if noise:
+        obs = env_cfg.observations
+        if "joint_pos_std"     in noise:
+            obs.policy.joint_pos.noise.std     = float(noise["joint_pos_std"])
+            obs.critic.joint_pos.noise.std     = float(noise["joint_pos_std"])
+        if "joint_vel_std"     in noise:
+            obs.policy.joint_vel.noise.std     = float(noise["joint_vel_std"])
+            obs.critic.joint_vel.noise.std     = float(noise["joint_vel_std"])
+        if "fingertip_pos_std" in noise:
+            obs.policy.fingertip_pos.noise.std = float(noise["fingertip_pos_std"])
+            obs.critic.fingertip_pos.noise.std = float(noise["fingertip_pos_std"])
 
 
 def build_rl_games_config(args) -> dict:
@@ -160,6 +225,9 @@ def main():
     # Register environment
     register_anygrasp_env()
 
+    # Load YAML config
+    cfg_file = load_config(args.config)
+
     # Build environment config
     env_cfg = AnyGraspEnvCfg()
     env_cfg.scene.num_envs = args.num_envs
@@ -167,6 +235,10 @@ def main():
     if args.headless:
         env_cfg.viewer = None
 
+    # Apply domain-randomization ranges from YAML (overrides hardcoded defaults)
+    apply_dr_config(env_cfg, cfg_file.get("domain_randomization", {}))
+
+    print(f"[Stage 1] Config:   {args.config}")
     print(f"[Stage 1] Task: DexGen-AnyGrasp-Allegro-v0")
     print(f"[Stage 1] Num envs: {args.num_envs}")
     print(f"[Stage 1] Max iterations: {args.max_iterations}")
