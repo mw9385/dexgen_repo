@@ -1,0 +1,60 @@
+# ==============================================================================
+# Stage 1 – RL Training Configuration
+# ==============================================================================
+# Task: AnyGrasp-to-AnyGrasp (DexterityGen §3.2)
+# Algorithm: PPO via rl_games
+# ==============================================================================
+
+env:
+  task: DexGen-AnyGrasp-Allegro-v0
+  num_envs: 512
+  episode_length_s: 10.0         # 10 seconds per episode
+  action_scale: 0.1              # joint position delta scale (rad)
+  decimation: 4                  # control at 30 Hz (120 Hz sim / 4)
+
+  # Observation noise (domain randomisation)
+  obs_noise:
+    joint_pos: 0.01              # rad
+    fingertip_pos: 0.002         # m
+    object_pose: 0.005           # m / rad
+
+  # Reward weights
+  rewards:
+    fingertip_tracking: 10.0     # exp(-20 * dist) per fingertip
+    grasp_success: 50.0          # bonus when all tips within 1 cm
+    action_smoothness: -0.01     # penalise jerk
+    object_drop: -200.0          # heavy drop penalty
+    joint_limit: -0.1            # soft limit penalty
+
+ppo:
+  # Network
+  units: [512, 512, 256, 128]
+  activation: elu
+  fixed_sigma: true
+  sigma_init: 0.0
+
+  # Core PPO hyperparameters
+  learning_rate: 5.0e-4
+  lr_schedule: adaptive          # reduce lr when KL diverges
+  gamma: 0.99                    # discount factor
+  tau: 0.95                      # GAE lambda
+  e_clip: 0.2                    # PPO clip ratio
+  entropy_coef: 0.0
+  critic_coef: 4.0
+  grad_norm: 1.0
+  normalize_input: true
+  normalize_value: true
+  normalize_advantage: true
+
+  # Rollout
+  num_steps_per_env: 8           # T_rollout
+  mini_epochs: 5                 # K SGD epochs per update
+  minibatch_size: 16384          # batch size
+
+  # Training length
+  max_iterations: 30000
+
+logging:
+  log_dir: logs/rl/allegro_anygrasp
+  save_frequency: 1000
+  print_stats: true
