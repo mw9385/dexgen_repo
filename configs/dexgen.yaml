@@ -1,0 +1,70 @@
+# ==============================================================================
+# Stage 3 – DexGen Controller Configuration
+# ==============================================================================
+# Two components trained separately:
+#   (1) Keypoint diffusion model
+#   (2) Inverse dynamics model
+# ==============================================================================
+
+# Trajectory representation
+trajectory:
+  horizon: 50              # number of keyframes T
+  keypoint_dim: 12         # 4 fingertips × 3 coords (object frame)
+
+# ------------------------------------------------------------------------------
+# (1) Keypoint Diffusion Model
+# ------------------------------------------------------------------------------
+diffusion:
+  # Architecture
+  hidden_dim: 512
+  num_layers: 4
+  dropout: 0.1
+
+  # Noise schedule (DDPM)
+  num_train_timesteps: 100
+  num_inference_steps: 100
+  beta_schedule: cosine      # "cosine" (recommended) or "linear"
+  beta_start: 1.0e-4         # only for linear schedule
+  beta_end: 0.02             # only for linear schedule
+
+  # Training
+  epochs: 500
+  batch_size: 256
+  learning_rate: 1.0e-4
+  weight_decay: 1.0e-5
+
+  # Conditioning: [k_start (12) | k_goal (12)] = 24 dim
+  cond_dim: 24
+
+# ------------------------------------------------------------------------------
+# (2) Inverse Dynamics Model
+# ------------------------------------------------------------------------------
+inverse_dynamics:
+  # Architecture
+  hidden_dim: 256
+  num_layers: 3
+  dropout: 0.05
+
+  # I/O
+  # Input:  k_t (12) + k_{t+1} (12) + robot_state (32) = 56
+  # Output: joint_action (16)
+  robot_state_dim: 32       # joint pos (16) + joint vel (16)
+  action_dim: 16
+
+  # Training
+  epochs: 300
+  batch_size: 256
+  learning_rate: 3.0e-4
+  weight_decay: 1.0e-5
+  smooth_weight: 0.01       # smoothness regularisation
+
+# ------------------------------------------------------------------------------
+# Dataset (from Stage 2)
+# ------------------------------------------------------------------------------
+dataset:
+  path: data/dataset.h5
+  success_only: true         # only train on successful trajectories
+  val_split: 0.1
+
+# Output
+output_dir: logs/dexgen
