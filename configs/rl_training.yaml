@@ -1,33 +1,41 @@
 # ==============================================================================
 # Stage 1 – RL Training Configuration
 # ==============================================================================
-# Task: AnyGrasp-to-AnyGrasp (DexterityGen §3.2)
-# Algorithm: PPO via rl_games
+# Task:      AnyGrasp-to-AnyGrasp (DexterityGen §3.2)
+# Algorithm: Asymmetric Actor-Critic PPO via rl_games
 # ==============================================================================
 
 env:
   task: DexGen-AnyGrasp-Allegro-v0
   num_envs: 512
-  episode_length_s: 10.0         # 10 seconds per episode
+  episode_length_s: 10.0
   action_scale: 0.1              # joint position delta scale (rad)
   decimation: 4                  # control at 30 Hz (120 Hz sim / 4)
 
-  # Observation noise (domain randomisation)
-  obs_noise:
-    joint_pos: 0.01              # rad
-    fingertip_pos: 0.002         # m
-    object_pose: 0.005           # m / rad
-
-  # Reward weights
   rewards:
-    fingertip_tracking: 10.0     # exp(-20 * dist) per fingertip
-    grasp_success: 50.0          # bonus when all tips within 1 cm
-    action_smoothness: -0.01     # penalise jerk
-    object_drop: -200.0          # heavy drop penalty
-    joint_limit: -0.1            # soft limit penalty
+    fingertip_tracking:  10.0    # dense exp(-20*dist) per fingertip
+    grasp_success:       50.0    # sparse bonus: all tips within 1 cm
+    fingertip_contact:    2.0    # maintain contact during transition
+    action_rate:         -0.01   # jerk penalty
+    object_velocity:     -0.5    # penalise spinning/flinging object
+    object_drop:       -200.0    # drop penalty (also terminates episode)
+    joint_limit:         -0.1    # soft limit penalty
+    wrist_height:        -1.0    # prevent wrist-table collision
+
+# ==============================================================================
+# Asymmetric Actor-Critic PPO (rl_games)
+# ==============================================================================
+#
+#   Actor  network: MLP [512, 512, 256, 128]  input: 76-dim policy obs
+#   Critic network: MLP [512, 512, 256]       input: 104-dim privileged obs
+#
+#   The central_value_config block enables the separate critic network.
+#   rl_games reads env observations["policy"] for actor and
+#   env observations["critic"] for the central value function.
+# ==============================================================================
 
 ppo:
-  # Network
+  # Actor network
   units: [512, 512, 256, 128]
   activation: elu
   fixed_sigma: true
@@ -35,10 +43,10 @@ ppo:
 
   # Core PPO hyperparameters
   learning_rate: 5.0e-4
-  lr_schedule: adaptive          # reduce lr when KL diverges
-  gamma: 0.99                    # discount factor
+  lr_schedule: adaptive
+  gamma: 0.99
   tau: 0.95                      # GAE lambda
-  e_clip: 0.2                    # PPO clip ratio
+  e_clip: 0.2
   entropy_coef: 0.0
   critic_coef: 4.0
   grad_norm: 1.0
@@ -47,14 +55,78 @@ ppo:
   normalize_advantage: true
 
   # Rollout
-  num_steps_per_env: 8           # T_rollout
-  mini_epochs: 5                 # K SGD epochs per update
-  minibatch_size: 16384          # batch size
+  num_steps_per_env: 8
+  mini_epochs: 5
+  minibatch_size: 16384
 
   # Training length
   max_iterations: 30000
+
+# ==============================================================================
+# Central Value Function (separate critic for asymmetric AC)
+# ==============================================================================
+# Uses privileged 104-dim observations from env observations["critic"].
+# Larger network than actor since it processes more information.
+# ==============================================================================
+
+central_value:
+  # Critic network
+  units: [512, 512, 256]
+  activation: elu
+
+  # Critic-specific PPO params
+  learning_rate: 5.0e-4
+  kl_threshold: 0.016
+  clip_value: true
+  normalize_input: true
+  grad_norm: 1.0
+  mini_epochs: 4
+  minibatch_size: 16384
 
 logging:
   log_dir: logs/rl/allegro_anygrasp
   save_frequency: 1000
   print_stats: true
+
+# ==============================================================================
+# Domain Randomization
+# ==============================================================================
+# Values are injected into AnyGraspEventsCfg at training startup.
+# Edit these ranges to change what gets randomised each episode reset.
+#
+#  object_physics:
+#    mass_range        [kg]   object inertia (heavier → harder to fling)
+#    friction_range    [-]    lateral contact friction
+#    restitution_range [-]    bounciness (0 = no bounce)
+#
+#  robot_physics:
+#    damping_range     [N·m·s/rad]  per-joint velocity damping
+#    armature_range    [kg·m²]      per-joint effective inertia
+#
+#  action_delay:
+#    max_delay         [steps]  max sim-step lag injected into action stream
+#
+#  obs_noise:
+#    joint_pos_std     [rad]    Gaussian noise on joint position encoder
+#    joint_vel_std     [rad/s]  Gaussian noise on joint velocity (pre-normalise)
+#    fingertip_pos_std [m]      Gaussian noise on fingertip FK position
+# ==============================================================================
+
+domain_randomization:
+
+  object_physics:
+    mass_range:        [0.03, 0.30]   # kg
+    friction_range:    [0.30, 1.20]
+    restitution_range: [0.00, 0.40]
+
+  robot_physics:
+    damping_range:     [0.01, 0.30]   # N·m·s/rad
+    armature_range:    [0.001, 0.03]  # kg·m²
+
+  action_delay:
+    max_delay: 2                       # steps  (0 = no delay)
+
+  obs_noise:
+    joint_pos_std:     0.005           # rad
+    joint_vel_std:     0.04            # in normalised space (≈ 0.2 rad/s)
+    fingertip_pos_std: 0.003           # m

@@ -1,101 +1,138 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Isaac Lab Setup Script for DexGen
+# DexGen Setup — Docker-based (recommended)
 # ==============================================================================
-# This script installs Isaac Sim + Isaac Lab for the AllegroHand environment.
+# Direct pip installation of Isaac Sim has too many system-level dependencies.
+# Use Docker instead for a reproducible, error-free environment.
 #
-# Requirements:
-#   - Ubuntu 22.04
+# Requirements (host machine):
+#   - Ubuntu 20.04 / 22.04
 #   - NVIDIA GPU with driver >= 525.60
-#   - CUDA 12.x
-#   - Python 3.10
-#
-# Isaac Lab AllegroHand task: Isaac-Repose-Cube-Allegro-v0
+#   - Docker >= 24.x  (https://docs.docker.com/engine/install/ubuntu/)
+#   - NVIDIA Container Toolkit  (nvidia-docker2)
+#   - NGC account + API key     (https://ngc.nvidia.com)
 # ==============================================================================
 
 set -e
 
-ISAACLAB_VERSION="v5.1.0"
-ISAACLAB_DIR="${HOME}/IsaacLab"
-
-echo "=== DexGen: Isaac Lab Setup ==="
-echo "Installing Isaac Lab ${ISAACLAB_VERSION} to ${ISAACLAB_DIR}"
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
+info()  { echo -e "${GREEN}[setup]${NC} $*"; }
+warn()  { echo -e "${YELLOW}[setup]${NC} $*"; }
+error() { echo -e "${RED}[setup]${NC} $*"; exit 1; }
 
 # ------------------------------------------------------------------------------
-# 1. Check prerequisites
+# Step 1 — Install Docker (if missing)
 # ------------------------------------------------------------------------------
-echo "[1/5] Checking prerequisites..."
+install_docker() {
+    if command -v docker &>/dev/null; then
+        info "Docker already installed: $(docker --version)"
+        return
+    fi
+    info "Installing Docker..."
+    curl -fsSL https://get.docker.com | sh
+    sudo usermod -aG docker "${USER}"
+    warn "Docker installed. Log out and back in (or run 'newgrp docker') to use without sudo."
+}
 
-if ! command -v python3.10 &> /dev/null; then
-    echo "ERROR: Python 3.10 is required."
-    echo "  sudo apt install python3.10 python3.10-dev python3.10-venv"
-    exit 1
+# ------------------------------------------------------------------------------
+# Step 2 — Install NVIDIA Container Toolkit (if missing)
+# ------------------------------------------------------------------------------
+install_nvidia_container_toolkit() {
+    if dpkg -l | grep -q nvidia-container-toolkit 2>/dev/null; then
+        info "nvidia-container-toolkit already installed."
+        return
+    fi
+    info "Installing NVIDIA Container Toolkit..."
+    distribution=$(. /etc/os-release; echo "${ID}${VERSION_ID}")
+    curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
+        | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+    curl -s -L "https://nvidia.github.io/libnvidia-container/${distribution}/libnvidia-container.list" \
+        | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
+        | sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
+    sudo apt-get update
+    sudo apt-get install -y nvidia-container-toolkit
+    sudo nvidia-ctk runtime configure --runtime=docker
+    sudo systemctl restart docker
+    info "NVIDIA Container Toolkit installed."
+}
+
+# ------------------------------------------------------------------------------
+# Step 3 — NGC login for Isaac Sim image
+# ------------------------------------------------------------------------------
+ngc_login() {
+    if grep -q "nvcr.io" ~/.docker/config.json 2>/dev/null; then
+        info "NGC login already configured."
+        return
+    fi
+    info "NGC login required to pull Isaac Sim 5.1.0 image."
+    echo ""
+    echo "  1. Go to https://ngc.nvidia.com → Account → Setup → API Key"
+    echo "  2. Run: docker login nvcr.io"
+    echo "     Username: \$oauthtoken"
+    echo "     Password: <your NGC API key>"
+    echo ""
+    read -rp "Press Enter after completing NGC login, or Ctrl+C to cancel..."
+    docker login nvcr.io || error "NGC login failed."
+}
+
+# ------------------------------------------------------------------------------
+# Step 4 — Build DexGen Docker image
+# ------------------------------------------------------------------------------
+build_image() {
+    info "Building DexGen Docker image..."
+    info "Base: nvcr.io/nvidia/isaac-sim:5.1.0 + Isaac Lab v5.1.0"
+    warn "First build downloads ~20 GB from NGC. This will take 20–40 minutes."
+    echo ""
+    docker compose -f docker/docker-compose.yml build
+    info "Image built successfully: dexgen:latest"
+}
+
+# ------------------------------------------------------------------------------
+# Step 5 — Verify GPU inside container
+# ------------------------------------------------------------------------------
+verify() {
+    info "Verifying GPU access inside container..."
+    docker run --rm --gpus all dexgen:latest nvidia-smi \
+        && info "GPU OK" \
+        || error "GPU not accessible inside container. Check nvidia-container-toolkit."
+
+    info "Verifying Isaac Lab..."
+    docker run --rm --gpus all dexgen:latest \
+        python3 -c "import isaaclab; print(f'Isaac Lab: {isaaclab.__version__}')" \
+        && info "Isaac Lab OK" \
+        || warn "Isaac Lab import failed — may need DISPLAY for full init."
+}
+
+# ------------------------------------------------------------------------------
+# Main
+# ------------------------------------------------------------------------------
+echo "========================================"
+echo " DexGen Setup (Docker)"
+echo "========================================"
+echo ""
+
+# Check GPU first
+if ! command -v nvidia-smi &>/dev/null; then
+    error "NVIDIA GPU not detected. A CUDA-capable GPU is required."
 fi
+info "GPU detected: $(nvidia-smi --query-gpu=name --format=csv,noheader | head -1)"
 
-# Use python3.10 -m pip to avoid 'pip not found' issues
-PIP="python3.10 -m pip"
-
-if ! nvidia-smi &> /dev/null; then
-    echo "ERROR: NVIDIA GPU not found. Isaac Lab requires an NVIDIA GPU."
-    exit 1
-fi
-
-DRIVER_VERSION=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -1)
-echo "  GPU Driver: ${DRIVER_VERSION}"
-
-# ------------------------------------------------------------------------------
-# 2. Install Isaac Sim via pip (Isaac Sim 5.x supports pip install)
-# ------------------------------------------------------------------------------
-echo "[2/5] Installing Isaac Sim..."
-${PIP} install isaacsim==5.1.0 \
-    --extra-index-url https://pypi.nvidia.com \
-    isaacsim-rl \
-    isaacsim-replicator \
-    isaacsim-extscache-physics \
-    isaacsim-extscache-kit \
-    isaacsim-extscache-kit-sdk
-
-# ------------------------------------------------------------------------------
-# 3. Clone Isaac Lab
-# ------------------------------------------------------------------------------
-echo "[3/5] Cloning Isaac Lab ${ISAACLAB_VERSION}..."
-if [ -d "${ISAACLAB_DIR}" ]; then
-    echo "  ${ISAACLAB_DIR} already exists, pulling latest..."
-    cd "${ISAACLAB_DIR}" && git fetch origin && git checkout ${ISAACLAB_VERSION}
-else
-    git clone --branch ${ISAACLAB_VERSION} \
-        https://github.com/isaac-sim/IsaacLab.git \
-        "${ISAACLAB_DIR}"
-fi
-
-# ------------------------------------------------------------------------------
-# 4. Install Isaac Lab
-# ------------------------------------------------------------------------------
-echo "[4/5] Installing Isaac Lab..."
-cd "${ISAACLAB_DIR}"
-./isaaclab.sh --install  # installs isaaclab + all extensions
-
-# Install RL frameworks
-./isaaclab.sh --install rl_games   # RL Games (used for AllegroHand)
-./isaaclab.sh --install rsl_rl     # RSL RL (alternative)
-./isaaclab.sh --install skrl       # SKRL (alternative)
-
-# ------------------------------------------------------------------------------
-# 5. Verify installation
-# ------------------------------------------------------------------------------
-echo "[5/5] Verifying Isaac Lab installation..."
-python3.10 -c "import isaaclab; print(f'Isaac Lab version: {isaaclab.__version__}')"
+install_docker
+install_nvidia_container_toolkit
+ngc_login
+build_image
+verify
 
 echo ""
-echo "=== Setup Complete ==="
+echo "========================================"
+echo " Setup Complete!"
+echo "========================================"
 echo ""
-echo "To test AllegroHand environment:"
-echo "  cd ${ISAACLAB_DIR}"
-echo "  python scripts/reinforcement_learning/rl_games/train.py \\"
-echo "      --task Isaac-Repose-Cube-Allegro-v0 \\"
-echo "      --num_envs 512 \\"
-echo "      --headless"
+echo "Quick start:"
+echo "  ./docker/run.sh up                    # start container"
+echo "  ./docker/run.sh test_allegro          # smoke test"
+echo "  ./docker/run.sh gen_grasps            # Stage 0"
+echo "  ./docker/run.sh train_rl              # Stage 1"
+echo "  ./docker/run.sh exec bash             # open shell"
 echo ""
-echo "Or use our wrapper script:"
-echo "  python scripts/run_allegro_hand.py --mode train"
-echo "  python scripts/run_allegro_hand.py --mode play --checkpoint <path>"
+echo "Full pipeline docs: README.md"

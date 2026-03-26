@@ -18,7 +18,7 @@ from __future__ import annotations
 import pickle
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import trimesh
@@ -38,6 +38,8 @@ class Grasp:
     quality: float = 0.0
     # Object name this grasp was computed for
     object_name: str = ""
+    # Object scale at which this grasp was computed (relative to unit mesh)
+    object_scale: float = 1.0
 
     @property
     def as_vector(self) -> np.ndarray:
@@ -50,6 +52,7 @@ class Grasp:
             "contact_normals": self.contact_normals,
             "quality": self.quality,
             "object_name": self.object_name,
+            "object_scale": self.object_scale,
         }
 
     @classmethod
@@ -96,6 +99,154 @@ class GraspSet:
 
 
 # ---------------------------------------------------------------------------
+# Object Pool  (NEW)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ObjectSpec:
+    """
+    Specification for a single object variant in the pool.
+
+    Attributes:
+        name:       Unique identifier (e.g. "cube_060", "sphere_040")
+        mesh:       trimesh.Trimesh for grasp generation
+        shape_type: "cube" / "sphere" / "cylinder" / "custom"
+        size:       Characteristic size in metres (bounding-box half-extent)
+        mass:       Mass in kg
+        color:      (R, G, B) visual colour in [0, 1]
+    """
+    name: str
+    mesh: trimesh.Trimesh
+    shape_type: str
+    size: float          # metres
+    mass: float = 0.1    # kg
+    color: Tuple[float, float, float] = (0.8, 0.3, 0.2)
+
+
+class ObjectPool:
+    """
+    Pool of randomised object variants used for training.
+
+    Generates a mix of primitive shapes (cube, sphere, cylinder) at
+    different sizes so the policy and DexGen controller must generalise
+    across object geometry.
+
+    Usage:
+        pool = ObjectPool.from_config(
+            shape_types=["cube", "sphere", "cylinder"],
+            size_range=(0.04, 0.09),
+            num_sizes=3,
+            seed=42,
+        )
+        for spec in pool:
+            grasps = GraspSampler(spec.mesh, spec.name, ...).sample()
+    """
+
+    def __init__(self, objects: List[ObjectSpec]):
+        self.objects = objects
+
+    def __len__(self):
+        return len(self.objects)
+
+    def __iter__(self):
+        return iter(self.objects)
+
+    def __getitem__(self, idx):
+        return self.objects[idx]
+
+    @classmethod
+    def from_config(
+        cls,
+        shape_types: List[str] = ("cube", "sphere", "cylinder"),
+        size_range: Tuple[float, float] = (0.04, 0.09),
+        num_sizes: int = 3,
+        seed: int = 42,
+    ) -> "ObjectPool":
+        """
+        Build a pool of primitive objects by sampling sizes uniformly
+        across size_range for each shape type.
+        """
+        rng = np.random.default_rng(seed)
+        sizes = np.linspace(size_range[0], size_range[1], num_sizes)
+        objects = []
+
+        for shape in shape_types:
+            for size in sizes:
+                mesh = make_default_object_mesh(shape, float(size))
+                # Add slight random noise to mesh vertices for variety
+                noise = rng.normal(0, size * 0.02, mesh.vertices.shape)
+                mesh.vertices += noise
+                mesh = trimesh.smoothing.filter_laplacian(mesh, iterations=1)
+
+                name = f"{shape}_{int(size * 1000):03d}"
+                color = _shape_color(shape)
+                objects.append(ObjectSpec(
+                    name=name,
+                    mesh=mesh,
+                    shape_type=shape,
+                    size=float(size),
+                    mass=0.05 + (size / 0.1) * 0.15,  # heavier when larger
+                    color=color,
+                ))
+
+        print(f"[ObjectPool] Created {len(objects)} objects "
+              f"({len(shape_types)} shapes × {num_sizes} sizes)")
+        return cls(objects)
+
+    @classmethod
+    def from_mesh_dir(cls, mesh_dir: str) -> "ObjectPool":
+        """Load all .obj/.stl/.ply files from a directory as custom objects."""
+        mesh_dir = Path(mesh_dir)
+        objects = []
+        for path in sorted(mesh_dir.glob("**/*.{obj,stl,ply}")):
+            try:
+                mesh = trimesh.load(str(path), force="mesh")
+                if not isinstance(mesh, trimesh.Trimesh):
+                    continue
+                size = float(np.max(mesh.bounding_box.extents))
+                objects.append(ObjectSpec(
+                    name=path.stem,
+                    mesh=mesh,
+                    shape_type="custom",
+                    size=size,
+                ))
+            except Exception as e:
+                print(f"[ObjectPool] Warning: could not load {path}: {e}")
+        print(f"[ObjectPool] Loaded {len(objects)} meshes from {mesh_dir}")
+        return cls(objects)
+
+    def sample(self, rng: Optional[np.random.Generator] = None) -> ObjectSpec:
+        """Return a uniformly random ObjectSpec."""
+        if rng is None:
+            rng = np.random.default_rng()
+        return self.objects[rng.integers(0, len(self.objects))]
+
+    def get_isaac_lab_specs(self) -> List[dict]:
+        """
+        Return per-object shape parameters for Isaac Lab scene configuration.
+        Used by AnyGraspSceneCfg to build MultiAssetSpawnerCfg entries.
+        """
+        specs = []
+        for obj in self.objects:
+            specs.append({
+                "name": obj.name,
+                "shape_type": obj.shape_type,
+                "size": obj.size,
+                "mass": obj.mass,
+                "color": obj.color,
+            })
+        return specs
+
+
+def _shape_color(shape: str) -> Tuple[float, float, float]:
+    return {
+        "cube": (0.8, 0.2, 0.2),
+        "sphere": (0.2, 0.6, 0.9),
+        "cylinder": (0.3, 0.8, 0.3),
+    }.get(shape, (0.7, 0.7, 0.7))
+
+
+# ---------------------------------------------------------------------------
 # Grasp Sampler
 # ---------------------------------------------------------------------------
 
@@ -117,24 +268,29 @@ class GraspSampler:
     NUM_FINGERS = 4
     FINGER_NAMES = ["index", "middle", "ring", "thumb"]
 
-    # Heuristic parameters
-    MIN_FINGER_SPACING = 0.015   # metres: min distance between fingertips
-    MAX_FINGER_SPACING = 0.12    # metres: max distance between fingertips
-    PALM_NORMAL_THRESH = 0.3     # dot product threshold for opposition check
+    # Heuristic parameters (scale-adaptive, set in __init__)
+    PALM_NORMAL_THRESH = 0.3
 
     def __init__(
         self,
         mesh: trimesh.Trimesh,
         object_name: str = "object",
+        object_scale: float = 1.0,
         num_candidates: int = 5000,
         num_grasps: int = 200,
         seed: int = 42,
     ):
         self.mesh = mesh
         self.object_name = object_name
+        self.object_scale = object_scale
         self.num_candidates = num_candidates
         self.num_grasps = num_grasps
         self.rng = np.random.default_rng(seed)
+
+        # Scale finger spacing with object size
+        obj_size = float(np.max(mesh.bounding_box.extents))
+        self.MIN_FINGER_SPACING = max(0.008, obj_size * 0.15)
+        self.MAX_FINGER_SPACING = obj_size * 2.5
 
     # ------------------------------------------------------------------
     # Public API
@@ -146,7 +302,7 @@ class GraspSampler:
 
         # 1. Sample surface points + normals
         points, face_idx = trimesh.sample.sample_surface(self.mesh, self.num_candidates)
-        normals = self.mesh.face_normals[face_idx]   # outward-facing normals
+        normals = self.mesh.face_normals[face_idx]
 
         # 2. Generate finger assignments
         grasp_set = GraspSet(object_name=self.object_name)
@@ -172,41 +328,31 @@ class GraspSampler:
         points: np.ndarray,
         normals: np.ndarray,
     ) -> Optional[Grasp]:
-        """
-        Randomly select 4 surface points, check heuristic constraints,
-        and return a Grasp if valid.
-
-        Finger assignment strategy:
-          - Thumb gets the point most opposed to the average of the other 3
-          - Remaining 3 go to index, middle, ring in order of angular spread
-        """
         idx = self.rng.choice(len(points), size=self.NUM_FINGERS, replace=False)
-        pts = points[idx]        # (4, 3)
-        nrm = normals[idx]       # (4, 3)
+        pts = points[idx]
+        nrm = normals[idx]
 
         # --- constraint 1: spacing ---
-        dists = np.linalg.norm(pts[:, None] - pts[None, :], axis=-1)  # (4,4)
+        dists = np.linalg.norm(pts[:, None] - pts[None, :], axis=-1)
         np.fill_diagonal(dists, np.inf)
         if dists.min() < self.MIN_FINGER_SPACING:
             return None
         if dists.max() > self.MAX_FINGER_SPACING * 3:
             return None
 
-        # --- constraint 2: opposition (at least one pair of normals should
-        #     roughly oppose each other, i.e., dot < -THRESH) ---
-        n_dot = nrm @ nrm.T   # (4,4)
+        # --- constraint 2: opposition ---
+        n_dot = nrm @ nrm.T
         np.fill_diagonal(n_dot, 0.0)
         if n_dot.min() > -self.PALM_NORMAL_THRESH:
             return None
 
-        # --- assign thumb: the point most "opposite" to the centroid of others ---
+        # --- assign thumb ---
         centroid = pts.mean(axis=0)
         dirs = pts - centroid
         dirs /= (np.linalg.norm(dirs, axis=-1, keepdims=True) + 1e-8)
-        opposition = (dirs * nrm).sum(axis=-1)  # positive = facing away from centroid
-        thumb_idx = int(np.argmin(opposition))  # most opposed to centroid
+        opposition = (dirs * nrm).sum(axis=-1)
+        thumb_idx = int(np.argmin(opposition))
 
-        # Reorder: [index(0), middle(1), ring(2), thumb(3)]
         order = [i for i in range(4) if i != thumb_idx] + [thumb_idx]
         pts = pts[order]
         nrm = nrm[order]
@@ -214,13 +360,14 @@ class GraspSampler:
         return Grasp(
             fingertip_positions=pts.astype(np.float32),
             contact_normals=nrm.astype(np.float32),
-            quality=0.0,   # filled in by NetForceOptimizer
+            quality=0.0,
             object_name=self.object_name,
+            object_scale=self.object_scale,
         )
 
 
 # ---------------------------------------------------------------------------
-# Convenience factory
+# Convenience factories
 # ---------------------------------------------------------------------------
 
 def sample_grasps_for_mesh(
@@ -241,14 +388,11 @@ def sample_grasps_for_mesh(
 
 
 def make_default_object_mesh(object_type: str = "cube", size: float = 0.06) -> trimesh.Trimesh:
-    """
-    Create a simple default object mesh for testing
-    when no real mesh file is available.
-    """
+    """Create a simple primitive mesh."""
     if object_type == "cube":
         return trimesh.creation.box(extents=[size, size, size])
     elif object_type == "sphere":
-        return trimesh.creation.icosphere(radius=size / 2)
+        return trimesh.creation.icosphere(radius=size / 2, subdivisions=3)
     elif object_type == "cylinder":
         return trimesh.creation.cylinder(radius=size / 2, height=size)
     else:

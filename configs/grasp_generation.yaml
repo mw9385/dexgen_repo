@@ -1,34 +1,33 @@
 # ==============================================================================
-# Stage 0 – Grasp Generation Configuration
+# Stage 0 – Grasp Generation Configuration (Multi-Object Pool)
 # ==============================================================================
 
-# Object to generate grasps for
-object:
-  type: cube               # cube / sphere / cylinder  (ignored if mesh_path set)
-  size: 0.06               # bounding box size in metres (6 cm default)
-  mesh_path: null          # override with path to .obj/.stl/.ply file
+# Object pool — generates grasps for all combinations of shape × size
+object_pool:
+  shapes: [cube, sphere, cylinder]   # primitive shapes to include
+  size_min: 0.04                     # minimum object size (m)
+  size_max: 0.09                     # maximum object size (m)
+  num_sizes: 3                       # size steps per shape (total: 3×3 = 9 objects)
 
-# Grasp sampler
+  # Override with a directory of mesh files instead of primitives:
+  # mesh_dir: assets/objects/
+
+# Grasp sampler (per object)
 sampler:
-  num_seed_grasps: 300     # initial random sample before NFO filtering
-  num_candidates: 6000     # surface points sampled per attempt
-  min_finger_spacing: 0.015   # metres
-  max_finger_spacing: 0.12    # metres
-  seed: 42
+  num_seed_grasps: 300     # seed grasps per object before NFO filtering
+  # num_candidates is auto-set to num_seed_grasps × 20
 
 # Net Force Optimization (NFO)
 nfo:
   mu: 0.5                  # friction coefficient
-  num_friction_edges: 8    # linearisation edges per friction cone
-  min_quality: 0.005       # minimum NFO score to keep a grasp
-  fast_mode: false         # true = use SVD approx (faster, less accurate)
+  num_friction_edges: 8    # friction cone linearisation edges
+  min_quality: 0.005       # minimum NFO ε-metric score
+  fast_mode: false         # true = SVD approximation (faster, less accurate)
 
-# RRT expansion
+# RRT expansion (per object)
 rrt:
-  target_size: 500         # final number of grasps in GraspGraph
-  delta_pos: 0.008         # max perturbation per RRT step (m)
-  delta_max: 0.04          # max fingertip distance for graph edge (m)
-  min_quality: 0.005       # quality threshold for expanded grasps
+  target_size: 300         # target grasps per object after expansion
+  # delta_pos and delta_max are auto-scaled to object size
 
 # Output
 output_dir: data
