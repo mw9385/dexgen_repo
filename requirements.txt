@@ -1,0 +1,30 @@
+# ==============================================================================
+# DexGen Python dependencies
+# ==============================================================================
+# Isaac Sim & Isaac Lab are installed separately via the Dockerfile.
+# This file covers DexGen-specific packages only.
+# ==============================================================================
+
+# Mesh / geometry
+trimesh>=4.0.0
+scipy>=1.11.0
+numpy>=1.24.0
+
+# Deep learning (PyTorch is pre-installed in Isaac Sim image; listed for reference)
+# torch>=2.2.0         # already in Isaac Sim base image
+# torchvision>=0.17.0
+
+# Dataset storage
+h5py>=3.9.0
+
+# Experiment tracking (optional but recommended)
+tensorboard>=2.14.0
+
+# Progress bars
+tqdm>=4.66.0
+
+# YAML config loading
+pyyaml>=6.0
+
+# Plotting / debugging
+matplotlib>=3.7.0

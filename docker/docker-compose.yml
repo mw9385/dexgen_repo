@@ -1,0 +1,89 @@
+# ==============================================================================
+# DexGen docker-compose
+# ==============================================================================
+# Usage:
+#   docker compose -f docker/docker-compose.yml build
+#   docker compose -f docker/docker-compose.yml up -d
+#   docker compose -f docker/docker-compose.yml exec dexgen bash
+#   docker compose -f docker/docker-compose.yml down
+#
+# Or use the helper script:
+#   ./docker/run.sh build
+#   ./docker/run.sh up
+#   ./docker/run.sh exec bash
+#   ./docker/run.sh train_rl --num_envs 512 --headless
+# ==============================================================================
+
+services:
+  dexgen:
+    build:
+      context: ..                     # repo root
+      dockerfile: docker/Dockerfile
+      args:
+        ISAACSIM_VERSION: "5.1.0"
+        ISAACLAB_VERSION: "v5.1.0"
+    image: dexgen:latest
+    container_name: dexgen
+
+    # --------------------------------------------------------------------------
+    # GPU access (requires nvidia-container-toolkit on host)
+    # --------------------------------------------------------------------------
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+    # --------------------------------------------------------------------------
+    # Shared memory (needed by Isaac Sim for large parallel envs)
+    # --------------------------------------------------------------------------
+    shm_size: "16gb"
+    ulimits:
+      memlock: -1
+      stack: 67108864
+
+    # --------------------------------------------------------------------------
+    # Environment variables
+    # --------------------------------------------------------------------------
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all
+      # Set DISPLAY for GUI rendering (e.g. DISPLAY=:1 for virtual framebuffer)
+      # Leave empty for headless training
+      - DISPLAY=${DISPLAY:-}
+      # Isaac Sim accepts EGL for headless GPU rendering
+      - OMNI_KIT_ALLOW_ROOT=1
+      - ACCEPT_EULA=Y                 # accept NVIDIA Isaac Sim EULA
+
+    # --------------------------------------------------------------------------
+    # Volumes: mount host code & data for live editing without rebuild
+    # --------------------------------------------------------------------------
+    volumes:
+      - ..:/workspace/dexgen                   # live source mount
+      - dexgen_data:/workspace/dexgen/data     # persistent grasp data & datasets
+      - dexgen_logs:/workspace/dexgen/logs     # persistent training logs
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw       # X11 GUI (optional)
+
+    # --------------------------------------------------------------------------
+    # Network
+    # --------------------------------------------------------------------------
+    network_mode: host                          # simplest for Isaac Sim UDP
+
+    # --------------------------------------------------------------------------
+    # Keep container alive for exec commands
+    # --------------------------------------------------------------------------
+    stdin_open: true
+    tty: true
+
+    working_dir: /workspace/dexgen
+
+# ------------------------------------------------------------------------------
+# Named volumes (persist between container restarts)
+# ------------------------------------------------------------------------------
+volumes:
+  dexgen_data:
+    name: dexgen_data
+  dexgen_logs:
+    name: dexgen_logs
