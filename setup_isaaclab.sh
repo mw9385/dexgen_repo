@@ -32,6 +32,9 @@ if ! command -v python3.10 &> /dev/null; then
     exit 1
 fi
 
+# Use python3.10 -m pip to avoid 'pip not found' issues
+PIP="python3.10 -m pip"
+
 if ! nvidia-smi &> /dev/null; then
     echo "ERROR: NVIDIA GPU not found. Isaac Lab requires an NVIDIA GPU."
     exit 1
@@ -44,7 +47,7 @@ echo "  GPU Driver: ${DRIVER_VERSION}"
 # 2. Install Isaac Sim via pip (Isaac Sim 5.x supports pip install)
 # ------------------------------------------------------------------------------
 echo "[2/5] Installing Isaac Sim..."
-pip install isaacsim==5.1.0 \
+${PIP} install isaacsim==5.1.0 \
     --extra-index-url https://pypi.nvidia.com \
     isaacsim-rl \
     isaacsim-replicator \
@@ -81,7 +84,7 @@ cd "${ISAACLAB_DIR}"
 # 5. Verify installation
 # ------------------------------------------------------------------------------
 echo "[5/5] Verifying Isaac Lab installation..."
-python -c "import isaaclab; print(f'Isaac Lab version: {isaaclab.__version__}')"
+python3.10 -c "import isaaclab; print(f'Isaac Lab version: {isaaclab.__version__}')"
 
 echo ""
 echo "=== Setup Complete ==="
