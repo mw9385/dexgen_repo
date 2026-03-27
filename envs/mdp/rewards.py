@@ -37,6 +37,7 @@ from .observations import (
     fingertip_positions_in_object_frame,
     target_fingertip_positions,
     _get_fingertip_body_ids,
+    _get_num_fingers,
 )
 
 
@@ -53,23 +54,25 @@ def fingertip_tracking_reward(env, alpha: float = 20.0) -> torch.Tensor:
 
     Returns: (N,)
     """
-    current = fingertip_positions_in_object_frame(env).reshape(-1, 4, 3)
-    target  = target_fingertip_positions(env).reshape(-1, 4, 3)
-    dist    = torch.norm(current - target, dim=-1)           # (N, 4)
+    nf = _get_num_fingers(env)
+    current = fingertip_positions_in_object_frame(env).reshape(-1, nf, 3)
+    target  = target_fingertip_positions(env).reshape(-1, nf, 3)
+    dist    = torch.norm(current - target, dim=-1)           # (N, F)
     return torch.exp(-alpha * dist).mean(dim=-1)             # (N,)
 
 
 def grasp_success_reward(env, threshold: float = 0.01) -> torch.Tensor:
     """
-    Sparse success bonus: +1 when ALL 4 fingertips are within `threshold`
+    Sparse success bonus: +1 when ALL fingertips are within `threshold`
     of their targets simultaneously.
 
     threshold = 0.01 m (1 cm) by default.
     Returns: (N,) binary float
     """
-    current = fingertip_positions_in_object_frame(env).reshape(-1, 4, 3)
-    target  = target_fingertip_positions(env).reshape(-1, 4, 3)
-    dist    = torch.norm(current - target, dim=-1)           # (N, 4)
+    nf = _get_num_fingers(env)
+    current = fingertip_positions_in_object_frame(env).reshape(-1, nf, 3)
+    target  = target_fingertip_positions(env).reshape(-1, nf, 3)
+    dist    = torch.norm(current - target, dim=-1)           # (N, F)
     return (dist < threshold).all(dim=-1).float()            # (N,)
 
 
