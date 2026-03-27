@@ -257,16 +257,18 @@ class GraspSampler:
 
     Algorithm (per DexterityGen §3.1):
       1. Uniformly sample M candidate contact points on the object surface
-      2. For each candidate set of 4 points (one per finger), check:
+      2. For each candidate set of num_fingers points, check:
          - Coverage: points should spread across the object
          - Opposition: some pairs of contacts should face each other
          - Reachability: rough kinematic feasibility check
       3. Return top-K grasps sorted by coverage score
+
+    num_fingers controls how many contact points are sampled per grasp
+    (e.g. 2 for pinch, 3 for tripod, 4 for full Allegro, 5 for Shadow).
     """
 
-    # Allegro Hand: 4 fingers
-    NUM_FINGERS = 4
-    FINGER_NAMES = ["index", "middle", "ring", "thumb"]
+    # Default Allegro finger names (overridden by num_fingers at __init__)
+    _DEFAULT_FINGER_NAMES = ["index", "middle", "ring", "thumb", "pinky"]
 
     # Heuristic parameters (scale-adaptive, set in __init__)
     PALM_NORMAL_THRESH = 0.3
@@ -278,6 +280,7 @@ class GraspSampler:
         object_scale: float = 1.0,
         num_candidates: int = 5000,
         num_grasps: int = 200,
+        num_fingers: int = 4,
         seed: int = 42,
     ):
         self.mesh = mesh
@@ -285,6 +288,8 @@ class GraspSampler:
         self.object_scale = object_scale
         self.num_candidates = num_candidates
         self.num_grasps = num_grasps
+        self.num_fingers = num_fingers
+        self.finger_names = self._DEFAULT_FINGER_NAMES[:num_fingers]
         self.rng = np.random.default_rng(seed)
 
         # Scale finger spacing with object size
@@ -328,32 +333,53 @@ class GraspSampler:
         points: np.ndarray,
         normals: np.ndarray,
     ) -> Optional[Grasp]:
-        idx = self.rng.choice(len(points), size=self.NUM_FINGERS, replace=False)
-        pts = points[idx]
-        nrm = normals[idx]
+        """
+        Greedy spacing-aware finger assignment:
+          1. Pick first finger uniformly at random.
+          2. Each subsequent finger is drawn from the subset of points that
+             are >= MIN_FINGER_SPACING from ALL already-selected fingers.
+        This avoids the high failure rate of fully-random selection when the
+        surface point cloud is dense relative to finger spacing.
+        """
+        n_pts = len(points)
+        selected_idx: list = []
+        available = np.ones(n_pts, dtype=bool)
 
-        # --- constraint 1: spacing ---
-        dists = np.linalg.norm(pts[:, None] - pts[None, :], axis=-1)
-        np.fill_diagonal(dists, np.inf)
-        if dists.min() < self.MIN_FINGER_SPACING:
-            return None
-        if dists.max() > self.MAX_FINGER_SPACING * 3:
+        for f in range(self.num_fingers):
+            candidates = np.where(available)[0]
+            if len(candidates) == 0:
+                return None
+            ci = self.rng.integers(0, len(candidates))
+            chosen = candidates[ci]
+            selected_idx.append(chosen)
+
+            # Remove all points within MIN_FINGER_SPACING from next picks
+            dists = np.linalg.norm(points - points[chosen], axis=-1)
+            available &= (dists >= self.MIN_FINGER_SPACING)
+
+        pts = points[selected_idx]
+        nrm = normals[selected_idx]
+
+        # --- constraint: overall spread not absurdly large ---
+        max_dist = np.linalg.norm(pts[:, None] - pts[None, :], axis=-1).max()
+        if max_dist > self.MAX_FINGER_SPACING * 3:
             return None
 
-        # --- constraint 2: opposition ---
+        # --- constraint: opposition (at least one pair must face each other) ---
         n_dot = nrm @ nrm.T
         np.fill_diagonal(n_dot, 0.0)
         if n_dot.min() > -self.PALM_NORMAL_THRESH:
             return None
 
-        # --- assign thumb ---
+        # --- assign "thumb" as the finger most opposed to the centroid ---
+        # (placed last; for 2-finger pinch this becomes finger 1)
         centroid = pts.mean(axis=0)
         dirs = pts - centroid
         dirs /= (np.linalg.norm(dirs, axis=-1, keepdims=True) + 1e-8)
         opposition = (dirs * nrm).sum(axis=-1)
         thumb_idx = int(np.argmin(opposition))
 
-        order = [i for i in range(4) if i != thumb_idx] + [thumb_idx]
+        order = [i for i in range(self.num_fingers) if i != thumb_idx] + [thumb_idx]
         pts = pts[order]
         nrm = nrm[order]
 

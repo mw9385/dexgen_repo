@@ -415,6 +415,23 @@ if _ISAACLAB_AVAILABLE:
         object_pool_specs:   list = None   # type: ignore
         wrist_randomization: dict = None   # type: ignore
 
+        # ------------------------------------------------------------------
+        # Hand configuration
+        # ------------------------------------------------------------------
+        # Controls fingertip count, DOF, and link names used by observations,
+        # events, and domain randomization.  Override for non-Allegro hands.
+        #
+        # Example – 3-finger gripper:
+        #   hand = {
+        #     "name": "custom_3f",
+        #     "num_fingers": 3,
+        #     "num_dof": 9,
+        #     "dof_per_finger": 3,
+        #     "fingertip_links": ["finger0_tip", "finger1_tip", "finger2_tip"],
+        #   }
+        # ------------------------------------------------------------------
+        hand: dict = None   # type: ignore  (defaults set in __post_init__)
+
         episode_length_s: float = 10.0
         action_scale:     float = 0.1
         decimation:       int   = 4
@@ -435,6 +452,21 @@ if _ISAACLAB_AVAILABLE:
                     "pos_height_min": 0.08,
                     "pos_height_max": 0.20,
                     "rot_std_deg":    15.0,
+                }
+
+            # Default hand config = Allegro Hand
+            if self.hand is None:
+                self.hand = {
+                    "name":            "allegro",
+                    "num_fingers":     4,
+                    "num_dof":         16,
+                    "dof_per_finger":  4,
+                    "fingertip_links": [
+                        "link_3.0_tip",   # index
+                        "link_7.0_tip",   # middle
+                        "link_11.0_tip",  # ring
+                        "link_15.0_tip",  # thumb
+                    ],
                 }
 
     def set_object_pool(cfg: AnyGraspEnvCfg, pool) -> AnyGraspEnvCfg:

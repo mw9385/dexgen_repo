@@ -32,6 +32,8 @@ import argparse
 import sys
 from pathlib import Path
 
+import yaml
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from grasp_generation import (
@@ -72,10 +74,19 @@ def parse_args():
 
     p.add_argument("--output_dir", type=str, default="data")
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument(
+        "--config", type=str,
+        default=str(Path(__file__).parent.parent / "configs" / "grasp_generation.yaml"),
+        help="Path to grasp_generation.yaml (hand config, pool settings, etc.)",
+    )
+    p.add_argument(
+        "--num_fingers", type=int, default=None,
+        help="Number of contact points per grasp (overrides config file hand.num_fingers)",
+    )
     return p.parse_args()
 
 
-def process_one_object(spec, args, seed_offset: int) -> tuple:
+def process_one_object(spec, args, seed_offset: int, num_fingers: int = 4) -> tuple:
     """
     Run the full grasp generation pipeline for one ObjectSpec.
     Returns (GraspGraph, isaac_lab_spec) or (None, None) on failure.
@@ -83,7 +94,8 @@ def process_one_object(spec, args, seed_offset: int) -> tuple:
     from grasp_generation.grasp_sampler import GraspSampler
 
     print(f"\n{'='*55}")
-    print(f"  Object: {spec.name}  (shape={spec.shape_type}, size={spec.size:.3f}m)")
+    print(f"  Object:      {spec.name}  (shape={spec.shape_type}, size={spec.size:.3f}m)")
+    print(f"  num_fingers: {num_fingers}")
     print(f"{'='*55}")
 
     # Step 1: Sample seed grasps
@@ -93,6 +105,7 @@ def process_one_object(spec, args, seed_offset: int) -> tuple:
         object_scale=spec.size / 0.06,   # relative to 6 cm reference
         num_candidates=args.num_seed_grasps * 20,
         num_grasps=args.num_seed_grasps,
+        num_fingers=num_fingers,
         seed=args.seed + seed_offset,
     )
     seed_set = sampler.sample()
@@ -139,6 +152,28 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------------
+    # Load config file and resolve num_fingers
+    # Priority: CLI --num_fingers > config hand.num_fingers > default 4
+    # ------------------------------------------------------------------
+    cfg_file = {}
+    cfg_path = Path(args.config)
+    if cfg_path.exists():
+        with open(cfg_path) as f:
+            cfg_file = yaml.safe_load(f) or {}
+        print(f"[Stage 0] Config: {cfg_path}")
+    else:
+        print(f"[Stage 0] Config not found at {cfg_path}, using defaults.")
+
+    hand_cfg = cfg_file.get("hand", {})
+    if args.num_fingers is not None:
+        num_fingers = args.num_fingers   # CLI overrides everything
+    else:
+        num_fingers = hand_cfg.get("num_fingers", 4)
+
+    print(f"[Stage 0] Hand:       {hand_cfg.get('name', 'unknown')}  "
+          f"(num_fingers={num_fingers})")
+
+    # ------------------------------------------------------------------
     # Build object pool
     # ------------------------------------------------------------------
     if args.mesh_path:
@@ -171,7 +206,8 @@ def main():
     success_count = 0
 
     for i, spec in enumerate(pool):
-        graph, isaac_spec = process_one_object(spec, args, seed_offset=i * 100)
+        graph, isaac_spec = process_one_object(spec, args, seed_offset=i * 100,
+                                               num_fingers=num_fingers)
         if graph is not None:
             multi_graph.add(graph, isaac_spec)
             success_count += 1

@@ -99,7 +99,9 @@ def randomize_robot_physics(
 
     n     = len(env_ids)
     robot = env.scene["robot"]
-    n_dof = 16   # Allegro Hand
+    # Read num_dof from hand config; fall back to actual joint count
+    hand_cfg = getattr(env.cfg, "hand", None) or {}
+    n_dof = hand_cfg.get("num_dof", robot.data.joint_pos.shape[-1])
 
     # Per-joint randomisation
     damping  = torch.empty(n, n_dof, device=env.device).uniform_(*damping_range)
@@ -131,8 +133,10 @@ def randomize_action_delay(
 
     # Initialise delay buffer if absent
     if "action_delay_buf" not in env.extras:
+        hand_cfg = getattr(env.cfg, "hand", None) or {}
+        n_dof = hand_cfg.get("num_dof", env.scene["robot"].data.joint_pos.shape[-1])
         env.extras["action_delay_buf"] = torch.zeros(
-            env.num_envs, max_delay + 1, 16, device=env.device
+            env.num_envs, max_delay + 1, n_dof, device=env.device
         )
         env.extras["action_delay_steps"] = torch.zeros(
             env.num_envs, dtype=torch.long, device=env.device

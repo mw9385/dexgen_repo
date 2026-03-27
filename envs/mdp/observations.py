@@ -78,29 +78,30 @@ def fingertip_positions_in_object_frame(env) -> torch.Tensor:
     Object-centric representation makes the policy invariant to
     absolute object pose (key insight from DexterityGen §3.2).
 
-    Returns: (N, 12)  order: [index, middle, ring, thumb] × xyz
+    Returns: (N, num_fingers*3)  order matches hand.fingertip_links
     """
     robot = env.scene["robot"]
     obj   = env.scene["object"]
 
-    ft_ids   = _get_fingertip_body_ids(robot)
-    ft_world = robot.data.body_pos_w[:, ft_ids, :]      # (N, 4, 3)
+    ft_ids   = _get_fingertip_body_ids(robot, env)
+    ft_world = robot.data.body_pos_w[:, ft_ids, :]      # (N, F, 3)
 
     obj_pos  = obj.data.root_pos_w                       # (N, 3)
     obj_quat = obj.data.root_quat_w                      # (N, 4) w,x,y,z
 
     ft_obj = _transform_points_to_local_frame(ft_world, obj_pos, obj_quat)
-    return ft_obj.reshape(env.num_envs, -1)              # (N, 12)
+    return ft_obj.reshape(env.num_envs, -1)              # (N, F*3)
 
 
 def target_fingertip_positions(env) -> torch.Tensor:
     """
     Goal fingertip positions in object frame (set by reset event).
-    Returns: (N, 12)
+    Returns: (N, num_fingers*3)
     """
     target = env.extras.get("target_fingertip_pos")
     if target is None:
-        return torch.zeros(env.num_envs, 12, device=env.device)
+        num_fingers = _get_num_fingers(env)
+        return torch.zeros(env.num_envs, num_fingers * 3, device=env.device)
     return target
 
 
@@ -113,15 +114,16 @@ def fingertip_contact_binary(env) -> torch.Tensor:
 
     At sim-to-real, replace with actual tactile sensor signal.
 
-    Returns: (N, 4)
+    Returns: (N, num_fingers)
     """
+    num_fingers = _get_num_fingers(env)
     sensor = env.scene.sensors.get("fingertip_contact_sensor")
     if sensor is None:
-        return torch.zeros(env.num_envs, 4, device=env.device)
+        return torch.zeros(env.num_envs, num_fingers, device=env.device)
 
     # net_forces_w_history: (N, num_bodies, history, 3)
-    forces    = sensor.data.net_forces_w_history[:, :, 0, :]   # (N, 4, 3)
-    force_mag = torch.norm(forces, dim=-1)                       # (N, 4)
+    forces    = sensor.data.net_forces_w_history[:, :, 0, :]   # (N, F, 3)
+    force_mag = torch.norm(forces, dim=-1)                       # (N, F)
     return (force_mag > 0.5).float()
 
 
@@ -165,13 +167,14 @@ def fingertip_contact_forces(env) -> torch.Tensor:
     This is privileged info — not available on most real robots.
     Added to critic obs to help value function learn contact dynamics.
 
-    Returns: (N, 12)  [fx, fy, fz] × 4 tips
+    Returns: (N, num_fingers*3)  [fx, fy, fz] × num_fingers tips
     """
+    num_fingers = _get_num_fingers(env)
     sensor = env.scene.sensors.get("fingertip_contact_sensor")
     if sensor is None:
-        return torch.zeros(env.num_envs, 12, device=env.device)
+        return torch.zeros(env.num_envs, num_fingers * 3, device=env.device)
 
-    forces = sensor.data.net_forces_w_history[:, :, 0, :]   # (N, 4, 3)
+    forces = sensor.data.net_forces_w_history[:, :, 0, :]   # (N, F, 3)
     return (forces / 10.0).clamp(-3.0, 3.0).reshape(env.num_envs, -1)
 
 
@@ -198,25 +201,41 @@ def domain_randomization_params(env) -> torch.Tensor:
 # Helpers
 # ---------------------------------------------------------------------------
 
-# Cached fingertip body ID lookup
+# Fallback fingertip link names for Allegro Hand
+_ALLEGRO_TIP_NAMES = [
+    "link_3.0_tip",   # index
+    "link_7.0_tip",   # middle
+    "link_11.0_tip",  # ring
+    "link_15.0_tip",  # thumb
+]
+
+# Cached fingertip body ID lookup  (keyed by robot object id)
 _FT_IDS_CACHE: dict = {}
 
-def _get_fingertip_body_ids(robot) -> list:
+
+def _get_hand_cfg(env) -> dict:
+    """Return the hand config dict from env.cfg, or empty dict if absent."""
+    return getattr(env.cfg, "hand", None) or {}
+
+
+def _get_num_fingers(env) -> int:
+    """Number of fingers from env cfg (defaults to 4 for Allegro)."""
+    return _get_hand_cfg(env).get("num_fingers", 4)
+
+
+def _get_fingertip_body_ids(robot, env=None) -> list:
     """
-    Body indices for the 4 Allegro fingertip links.
-      index  → link_3.0_tip
-      middle → link_7.0_tip
-      ring   → link_11.0_tip
-      thumb  → link_15.0_tip
+    Body indices for fingertip links.
+
+    Link names are read from env.cfg.hand["fingertip_links"] when available,
+    falling back to the Allegro defaults so existing code keeps working.
     """
     key = id(robot)
     if key not in _FT_IDS_CACHE:
-        tip_names = [
-            "link_3.0_tip",
-            "link_7.0_tip",
-            "link_11.0_tip",
-            "link_15.0_tip",
-        ]
+        if env is not None:
+            tip_names = _get_hand_cfg(env).get("fingertip_links", _ALLEGRO_TIP_NAMES)
+        else:
+            tip_names = _ALLEGRO_TIP_NAMES
         _FT_IDS_CACHE[key] = [robot.find_bodies(n)[0][0] for n in tip_names]
     return _FT_IDS_CACHE[key]
 
