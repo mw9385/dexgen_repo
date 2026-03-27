@@ -19,9 +19,10 @@ services:
     build:
       context: ..                     # repo root
       dockerfile: docker/Dockerfile
+      network: host
       args:
         ISAACSIM_VERSION: "5.1.0"
-        ISAACLAB_VERSION: "v5.1.0"
+        ISAACLAB_VERSION: "v2.3.2"    # [수정됨] Isaac Sim 5.1.0과 호환되는 Isaac Lab 버전
     image: dexgen:latest
     container_name: dexgen
 
