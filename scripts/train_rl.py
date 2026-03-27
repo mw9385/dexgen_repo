@@ -184,22 +184,19 @@ def main():
         print(f"ERROR: GraspGraph not found at {args.grasp_graph}")
         print("Run Stage 0 first:")
         print("  python scripts/run_grasp_generation.py")
-        sim_app.close()
         sys.exit(1)
 
-    # Import Isaac Lab dependencies (런타임 초기화가 완료된 이후에 import)
+    # Import Isaac Lab dependencies
     try:
         import isaaclab  # noqa: F401
     except ImportError:
         print("ERROR: Isaac Lab not found. Run ./setup_isaaclab.sh first.")
-        sim_app.close()
         sys.exit(1)
 
     try:
         import rl_games  # noqa: F401
     except ImportError:
         print("ERROR: rl_games not found. Run: pip install rl_games")
-        sim_app.close()
         sys.exit(1)
 
     from isaaclab.envs import ManagerBasedRLEnv
@@ -262,9 +259,6 @@ def main():
     print(f"Checkpoints saved to: {args.log_dir}")
     print(f"\nNext: collect dataset")
     print(f"  python scripts/collect_data.py --log_dir {args.log_dir}")
-    
-    # 런타임 종료
-    sim_app.close()
 
 
 def _to_rl_obs(obs):
