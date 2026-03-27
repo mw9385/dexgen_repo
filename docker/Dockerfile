@@ -43,6 +43,9 @@ RUN ./isaaclab.sh --install rl_games
 RUN ./isaaclab.sh --install rsl_rl
 RUN ./isaaclab.sh --install skrl
 
+# warp is bundled with Isaac Sim but must be pip-installed so isaaclab.sh -p can find it
+RUN ${ISAACSIM_PTYHON_EXE} -m pip install --no-cache-dir warp-lang
+
 # ------------------------------------------------------------------------------
 # DexGen Python dependencies
 # ------------------------------------------------------------------------------
@@ -59,7 +62,7 @@ RUN python3 -m pip install --no-cache-dir -r requirements.txt
 # ------------------------------------------------------------------------------
 COPY . .
 
-ENV PYTHONPATH=/workspace/dexgen:${ISAACLAB_DIR}/source/isaaclab:${PYTHONPATH}
+ENV PYTHONPATH=/workspace/dexgen:${ISAACLAB_DIR}/source/isaaclab:${ISAACLAB_DIR}/source/isaaclab_assets:${PYTHONPATH}
 ENV ISAACLAB_DIR=${ISAACLAB_DIR}
 
 # Headless rendering (EGL)
