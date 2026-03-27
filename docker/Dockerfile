@@ -49,7 +49,10 @@ RUN ./isaaclab.sh --install skrl
 WORKDIR /workspace/dexgen
 
 COPY requirements.txt .
+# Install into Isaac Sim Python (needed when running inside Isaac Lab scripts)
 RUN ${ISAACSIM_PTYHON_EXE} -m pip install --no-cache-dir -r requirements.txt
+# Also install into system python3 (Stage 0/3 use python3 directly, no Isaac Lab)
+RUN python3 -m pip install --no-cache-dir -r requirements.txt
 
 # ------------------------------------------------------------------------------
 # Copy DexGen source & Set Environment
