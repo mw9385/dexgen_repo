@@ -32,9 +32,9 @@ WORKDIR ${ISAACLAB_DIR}
 
 ENV TERM=xterm
 
-# isaac sim path
+# isaac sim path (오타 수정: PTYHON -> PYTHON)
 ENV ISAACSIM_PATH=/isaac-sim
-ENV ISAACSIM_PTYHON_EXE=${ISAACSIM_PATH}/python.sh
+ENV ISAACSIM_PYTHON_EXE=${ISAACSIM_PATH}/python.sh
 RUN ln -s ${ISAACSIM_PATH} ${ISAACLAB_DIR}/_isaac_sim
 
 # Install Isaac Lab core + RL frameworks
@@ -43,8 +43,11 @@ RUN ./isaaclab.sh --install rl_games
 RUN ./isaaclab.sh --install rsl_rl
 RUN ./isaaclab.sh --install skrl
 
+# pip, setuptools, wheel 사전 업데이트 (의존성 충돌 및 빌드 에러 방지)
+RUN ${ISAACSIM_PYTHON_EXE} -m pip install --upgrade pip setuptools wheel
+
 # warp is bundled with Isaac Sim but must be pip-installed so isaaclab.sh -p can find it
-RUN ${ISAACSIM_PTYHON_EXE} -m pip install --no-cache-dir warp-lang
+RUN ${ISAACSIM_PYTHON_EXE} -m pip install --no-cache-dir warp-lang
 
 # ------------------------------------------------------------------------------
 # DexGen Python dependencies
@@ -53,7 +56,7 @@ WORKDIR /workspace/dexgen
 
 COPY requirements.txt .
 # Install into Isaac Sim Python
-RUN ${ISAACSIM_PTYHON_EXE} -m pip install --no-cache-dir -r requirements.txt
+RUN ${ISAACSIM_PYTHON_EXE} -m pip install --no-cache-dir -r requirements.txt
 
 # ------------------------------------------------------------------------------
 # Copy DexGen source & Set Environment
