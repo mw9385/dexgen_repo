@@ -195,6 +195,27 @@ def build_rl_games_config(args) -> dict:
 def main():
     args = parse_args()
 
+    # ── MUST set Isaac Sim cloud asset root BEFORE any isaaclab import ──────
+    # isaaclab/utils/assets.py computes NUCLEUS_ASSET_ROOT_DIR at module-
+    # import time via  carb.settings.get("/persistent/isaac/asset_root/cloud").
+    # In a headless container this setting is unset (None), which makes every
+    # asset USD path resolve to "None/Isaac/..." → FileNotFoundError.
+    # Setting it here (before `import isaaclab`) ensures the first lazy import
+    # of isaaclab.utils.assets picks up the correct S3 URL.
+    try:
+        import carb as _carb
+        _cs = _carb.settings.get_settings()
+        if not _cs.get("/persistent/isaac/asset_root/cloud"):
+            _cs.set(
+                "/persistent/isaac/asset_root/cloud",
+                "https://omniverse-content-production.s3-us-west-2.amazonaws.com"
+                "/Assets/Isaac/5.0",
+            )
+            print("[train_rl] Set Isaac Sim cloud asset root to S3 (5.0).")
+    except Exception as _e:
+        print(f"[train_rl] WARNING: could not set carb asset root: {_e}")
+    # ────────────────────────────────────────────────────────────────────────
+
     # Validate grasp graph exists
     if not Path(args.grasp_graph).exists():
         print(f"ERROR: GraspGraph not found at {args.grasp_graph}")
