@@ -59,10 +59,28 @@ from typing import List, Optional
 import torch
 
 try:
+    # MUST set Isaac Sim cloud asset root BEFORE any isaaclab / isaaclab_assets
+    # import.  NUCLEUS_ASSET_ROOT_DIR is evaluated at module-import time from
+    # carb settings.  In a headless container without a running Nucleus server
+    # the setting /persistent/isaac/asset_root/cloud is unset (None), which
+    # causes every USD path to resolve to "None/Isaac/Robots/...".
+    try:
+        import carb as _carb
+        _cs = _carb.settings.get_settings()
+        if not _cs.get("/persistent/isaac/asset_root/cloud"):
+            _cs.set(
+                "/persistent/isaac/asset_root/cloud",
+                "https://omniverse-content-production.s3-us-west-2.amazonaws.com"
+                "/Assets/Isaac/5.0",
+            )
+    except Exception:
+        pass
+
     import isaaclab.sim as sim_utils
     from isaaclab.assets import ArticulationCfg, RigidObjectCfg
     from isaaclab.envs import ManagerBasedRLEnvCfg
     from isaaclab.managers import (
+        ActionTermCfg as ActionTerm,
         EventTermCfg as EventTerm,
         ObservationGroupCfg as ObsGroup,
         ObservationTermCfg as ObsTerm,
@@ -73,6 +91,11 @@ try:
     from isaaclab.sensors import ContactSensorCfg
     from isaaclab.utils import configclass
     from isaaclab.utils.noise import AdditiveGaussianNoiseCfg as GaussianNoise
+
+    try:
+        from isaaclab.envs.mdp import JointPositionActionCfg
+    except ImportError:
+        from isaaclab.envs.mdp.actions import JointPositionActionCfg
 
     try:
         from isaaclab_assets.robots.allegro_hand import ALLEGRO_HAND_CFG
@@ -282,6 +305,22 @@ if _ISAACLAB_AVAILABLE:
 
 
 # ---------------------------------------------------------------------------
+# Action configuration
+# ---------------------------------------------------------------------------
+
+if _ISAACLAB_AVAILABLE:
+    @configclass
+    class AnyGraspActionsCfg:
+        """Joint-position targets for the Allegro Hand (16 DOF)."""
+        joint_pos: ActionTerm = JointPositionActionCfg(
+            asset_name="robot",
+            joint_names=[".*"],
+            scale=0.1,
+            use_default_offset=True,
+        )
+
+
+# ---------------------------------------------------------------------------
 # Reward configuration
 # ---------------------------------------------------------------------------
 
@@ -407,6 +446,7 @@ if _ISAACLAB_AVAILABLE:
 
         scene:        AnyGraspSceneCfg        = AnyGraspSceneCfg(num_envs=MISSING, env_spacing=0.6)
         observations: AnyGraspObservationsCfg = AnyGraspObservationsCfg()
+        actions:      AnyGraspActionsCfg      = AnyGraspActionsCfg()
         rewards:      AnyGraspRewardsCfg      = AnyGraspRewardsCfg()
         terminations: AnyGraspTerminationsCfg = AnyGraspTerminationsCfg()
         events:       AnyGraspEventsCfg       = AnyGraspEventsCfg()

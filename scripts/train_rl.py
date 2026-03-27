@@ -277,8 +277,25 @@ def main():
     print(f"  python scripts/collect_data.py --log_dir {args.log_dir}")
 
 
+def _to_rl_obs(obs):
+    """
+    Convert Isaac Lab observation output to rl_games format.
+
+    Isaac Lab returns a dict keyed by obs-group name, e.g.
+      {"policy": Tensor(N, 76), "critic": Tensor(N, 104)}
+
+    rl_games expects:
+      {"obs": Tensor(N, obs_dim)}          — actor observations
+      (asymmetric-AC also uses "states", but we use a shared network here)
+    """
+    if isinstance(obs, dict):
+        policy_obs = obs.get("policy", next(iter(obs.values())))
+        return {"obs": policy_obs}
+    return {"obs": obs}
+
+
 class _IsaacLabVecEnv:
-    """Thin wrapper to make Isaac Lab env compatible with rl_games VecEnv API."""
+    """Thin wrapper to make Isaac Lab ManagerBasedRLEnv compatible with rl_games."""
 
     def __init__(self, env, num_envs: int):
         self.env = env
@@ -287,19 +304,34 @@ class _IsaacLabVecEnv:
     def step(self, actions):
         obs, rew, terminated, truncated, info = self.env.step(actions)
         done = terminated | truncated
-        return obs, rew, done, info
+        return _to_rl_obs(obs), rew, done, info
 
     def reset(self):
         obs, _ = self.env.reset()
-        return obs
+        return _to_rl_obs(obs)
 
     def get_number_of_agents(self):
         return self.num_envs
 
     def get_env_info(self):
+        import gymnasium as gym
+
+        action_space = self.env.action_space
+
+        # Isaac Lab may return a Dict obs space (one Box per obs group).
+        # rl_games needs a flat Box for the policy group.
+        raw_obs_space = self.env.observation_space
+        if isinstance(raw_obs_space, gym.spaces.Dict):
+            obs_space = raw_obs_space.spaces.get(
+                "policy",
+                next(iter(raw_obs_space.spaces.values())),
+            )
+        else:
+            obs_space = raw_obs_space
+
         return {
-            "action_space": self.env.action_space,
-            "observation_space": self.env.observation_space,
+            "action_space": action_space,
+            "observation_space": obs_space,
         }
 
 
