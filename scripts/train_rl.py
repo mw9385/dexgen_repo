@@ -11,12 +11,11 @@ Usage:
     python scripts/train_rl.py \
         --grasp_graph data/grasp_graph.pkl \
         --num_envs 512 \
-        --max_iterations 30000 \
         --headless
 
     # Resume from checkpoint
     python scripts/train_rl.py \
-        --resume logs/rl/allegro_anygrasp/checkpoints/model_10000.pt
+        --resume logs/rl/allegro_anygrasp_v2/checkpoints/model_10000.pt
 """
 
 import argparse
@@ -25,6 +24,7 @@ import sys
 from pathlib import Path
 
 import yaml
+import torch
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -42,7 +42,8 @@ def parse_args():
                    
     p.add_argument("--resume", type=str, default=None,
                    help="Resume from checkpoint path")
-    p.add_argument("--log_dir", type=str, default="logs/rl/allegro_anygrasp",
+    # [핵심] 오염된 기존 체크포인트를 피하기 위해 v2 폴더로 경로 변경
+    p.add_argument("--log_dir", type=str, default="logs/rl/allegro_anygrasp_v2",
                    help="Training log / checkpoint directory")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--config", type=str,
@@ -124,7 +125,7 @@ def build_rl_games_config(args) -> dict:
                         "mu_activation": "None",
                         "sigma_activation": "None",
                         "mu_init": {"name": "default"},
-                        "sigma_init": {"name": "const_initializer", "val": 0.0},
+                        "sigma_init": {"name": "const_initializer", "val": -1.0},
                         "fixed_sigma": True,
                     }
                 },
@@ -146,11 +147,8 @@ def build_rl_games_config(args) -> dict:
                 "multi_gpu": False,
                 "ppo": True,
                 "mixed_precision": False,
-                
-                # [핵심 수정] 관측치 정규화 완전 비활성화 (Division by zero 방지)
                 "normalize_input": False,
                 "normalize_value": False,
-                
                 "num_actors": args.num_envs,
                 "reward_shaper": {
                     "scale_value": 0.01,
@@ -181,7 +179,7 @@ def build_rl_games_config(args) -> dict:
                 "bounds_loss_coef": 0.0001,
                 "log_dir": args.log_dir,
                 
-                # [유지] Asymmetric Actor-Critic 설정
+                # Asymmetric Actor-Critic
                 "use_central_value": True,
                 "central_value_config": {
                     "minibatch_size": 4096,
@@ -190,10 +188,7 @@ def build_rl_games_config(args) -> dict:
                     "lr_schedule": "adaptive",
                     "lr_threshold": 0.008,
                     "clip_value": True,
-                    
-                    # [핵심 수정] Critic 네트워크도 정규화 비활성화
                     "normalize_input": False,
-                    
                     "truncate_grads": True,
                     "network": {
                         "name": "actor_critic",
@@ -313,21 +308,20 @@ def main():
 def _to_rl_obs(obs):
     """
     Convert Isaac Lab observation output to rl_games format.
-    Asymmetric AC expects policy obs in 'obs' and critic obs in 'states'.
+    Adds a safety net to prevent ANY NaN/Inf from reaching the network.
     """
     if isinstance(obs, dict):
         res = {}
-        if "policy" in obs:
-            res["obs"] = obs["policy"]
-        else:
-            res["obs"] = next(iter(obs.values()))
+        # 안전망: NaN 강제 0 치환
+        p_tensor = obs.get("policy", next(iter(obs.values())))
+        res["obs"] = torch.nan_to_num(p_tensor, nan=0.0, posinf=100.0, neginf=-100.0)
             
         if "critic" in obs:
-            res["states"] = obs["critic"]
+            res["states"] = torch.nan_to_num(obs["critic"], nan=0.0, posinf=100.0, neginf=-100.0)
             
         return res
         
-    return {"obs": obs}
+    return {"obs": torch.nan_to_num(obs, nan=0.0, posinf=100.0, neginf=-100.0)}
 
 
 class _IsaacLabVecEnv:
@@ -350,6 +344,12 @@ class _IsaacLabVecEnv:
         return self.num_envs
 
     def set_train_info(self, frame, self_agent):
+        pass
+
+    def get_env_state(self):
+        return None
+
+    def set_env_state(self, state):
         pass
 
     def get_env_info(self):
@@ -380,8 +380,10 @@ class _IsaacLabVecEnv:
         obs_space_old = old_gym.spaces.Box(
             low=-np.inf, high=np.inf, shape=obs_shape, dtype=np.float32
         )
+        
+        # [핵심] 행동 공간(Action Space)의 바운드를 무한대에서 [-1, 1]로 제한하여 에러 방지
         action_space_old = old_gym.spaces.Box(
-            low=-np.inf, high=np.inf, shape=act_shape, dtype=np.float32
+            low=-1.0, high=1.0, shape=act_shape, dtype=np.float32
         )
 
         info = {
