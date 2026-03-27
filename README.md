@@ -14,18 +14,11 @@ Stage 2: Dataset Collection →  data/dataset.h5
 Stage 3: DexGen Controller  →  logs/dexgen/
 ```
 
-### Key Insight (from paper)
-The DexGen controller operates in **object-centric fingertip space**:
-1. A *diffusion model* plans a keypoint trajectory k_{0:T} from start to goal grasp
-2. An *inverse dynamics model* maps (k_t, k_{t+1}) → joint actions at runtime
-3. This allows generalisation to **new objects** never seen during training
-
 ---
 
 ## Environment Setup (Docker)
 
-Direct pip installation of Isaac Sim produces dependency conflicts.
-**Use Docker** for a reproducible environment.
+**Base image**: `nvcr.io/nvidia/isaac-sim:5.1.0` + Isaac Lab `v2.3.2`
 
 ### Host Requirements
 
@@ -37,109 +30,159 @@ Direct pip installation of Isaac Sim produces dependency conflicts.
 | NVIDIA Container Toolkit | latest |
 | NGC account + API key | [ngc.nvidia.com](https://ngc.nvidia.com) |
 
-### One-time Setup
+### 최초 설정 (1회)
 
 ```bash
-# Installs Docker, nvidia-container-toolkit, logs in to NGC, builds image
+# Docker + nvidia-container-toolkit 설치, NGC 로그인, 이미지 빌드
 ./setup_isaaclab.sh
 ```
 
-This script:
-1. Installs Docker (if missing)
-2. Installs `nvidia-container-toolkit`
-3. Guides you through NGC login (needed to pull Isaac Sim 5.1.0)
-4. Builds the `dexgen:latest` Docker image (~20 GB, takes 20–40 min first time)
+또는 수동으로:
 
-Base image: `nvcr.io/nvidia/isaac-sim:5.1.0` + Isaac Lab `v2.3.2`
+```bash
+# NGC 로그인
+docker login nvcr.io
+#   Username: $oauthtoken
+#   Password: <NGC API key>
+
+# 이미지 빌드
+./docker/run.sh build
+```
 
 ---
 
-## Quick Start
+## 사용 방법 — 컨테이너 내부에서 실행
+
+모든 파이프라인 작업은 **컨테이너 안에서** 수행합니다.
+
+### 1. 컨테이너 시작 및 진입
 
 ```bash
-# Build image (first time only)
-./docker/run.sh build
-
-# Start container
-./docker/run.sh up
-
-# Verify Isaac Lab + GPU
-./docker/run.sh test_allegro
+./docker/run.sh up     # 컨테이너 백그라운드 시작
+./docker/run.sh exec   # bash로 진입
 ```
 
-### Full Pipeline
+이후 모든 명령은 컨테이너 내부(`/workspace/dexgen`)에서 실행합니다.
+
+---
+
+### Stage 0 – Grasp Generation
 
 ```bash
-# Stage 0 — Generate grasp set
-./docker/run.sh gen_grasps
-
-# Stage 1 — Train RL policy
-./docker/run.sh train_rl -- --num_envs 512 --headless
-
-# Stage 2 — Collect dataset
-./docker/run.sh collect_data
-
-# Stage 3 — Train DexGen controller
-./docker/run.sh train_dexgen
-```
-
-Or run manually inside the container:
-
-```bash
-./docker/run.sh exec bash
-
-# Inside container — use isaaclab.sh -p (standard Isaac Lab way)
 /workspace/IsaacLab/isaaclab.sh -p scripts/run_grasp_generation.py
+```
+
+옵션:
+
+```bash
+# 물체 종류/크기 지정
+/workspace/IsaacLab/isaaclab.sh -p scripts/run_grasp_generation.py \
+    --shapes cube sphere cylinder \
+    --num_sizes 3 \
+    --num_grasps 300
+
+# 손가락 수 변경 (config 파일 또는 CLI)
+/workspace/IsaacLab/isaaclab.sh -p scripts/run_grasp_generation.py \
+    --num_fingers 3
+
+# 빠른 테스트 (물체 1개, grasp 50개)
+/workspace/IsaacLab/isaaclab.sh -p scripts/run_grasp_generation.py \
+    --shapes cube --num_sizes 1 --num_grasps 50 --fast_nfo
+```
+
+출력: `data/grasp_graph.pkl`
+
+---
+
+### Stage 1 – RL Training
+
+```bash
 /workspace/IsaacLab/isaaclab.sh -p scripts/train_rl.py \
-    --grasp_graph data/grasp_graph.pkl --num_envs 512 --headless
+    --grasp_graph data/grasp_graph.pkl \
+    --num_envs 512 \
+    --headless
+```
+
+옵션:
+
+```bash
+# 환경 수 조절 (GPU 메모리에 따라)
+--num_envs 64        # 테스트용
+--num_envs 512       # 본 학습
+
+# 학습 재개
+--resume logs/rl/allegro_anygrasp/checkpoints/model_10000.pt
+
+# 최대 iteration
+--max_iterations 30000
+```
+
+출력: `logs/rl/allegro_anygrasp/`
+
+---
+
+### Stage 2 – Dataset Collection
+
+```bash
 /workspace/IsaacLab/isaaclab.sh -p scripts/collect_data.py \
-    --checkpoint logs/rl/allegro_anygrasp/checkpoints/model_30000.pt
+    --checkpoint logs/rl/allegro_anygrasp/checkpoints/model_30000.pt \
+    --num_episodes 50000
+```
+
+출력: `data/dataset.h5`
+
+---
+
+### Stage 3 – DexGen Controller Training
+
+```bash
 /workspace/IsaacLab/isaaclab.sh -p scripts/train_dexgen.py \
     --data data/dataset.h5
 ```
 
-Output files appear directly on the host:
-- `data/grasp_graph.pkl` — Stage 0 output
-- `logs/rl/` — Stage 1 checkpoints & tensorboard logs
-- `data/dataset.h5` — Stage 2 dataset
-- `logs/dexgen/` — Stage 3 model weights
+출력: `logs/dexgen/`
 
 ---
 
-## Project Structure
+## 컨테이너 관리 (host에서)
+
+```bash
+./docker/run.sh build    # 이미지 빌드
+./docker/run.sh up       # 컨테이너 시작
+./docker/run.sh exec     # bash 진입
+./docker/run.sh down     # 컨테이너 중지
+./docker/run.sh logs     # 로그 확인
+./docker/run.sh status   # 상태 확인
+```
+
+---
+
+## 파일 구조
 
 ```
 dexgen_repo/
-├── setup_isaaclab.sh          # Host setup (Docker + NGC + build)
-├── requirements.txt           # DexGen Python deps (installed in Docker)
+├── setup_isaaclab.sh          # 최초 설정 스크립트
+├── requirements.txt           # Python 의존성
 ├── docker/
-│   ├── Dockerfile             # Isaac Sim 5.1.0 + Isaac Lab v2.3.2 + DexGen
-│   ├── docker-compose.yml     # GPU passthrough, bind mount
-│   └── run.sh                 # Helper: build / up / exec / pipeline shortcuts
+│   ├── Dockerfile             # Isaac Sim 5.1.0 + Isaac Lab v2.3.2
+│   ├── docker-compose.yml     # GPU passthrough, 볼륨 마운트
+│   └── run.sh                 # 컨테이너 관리 (build/up/down/exec)
 ├── configs/
-│   ├── grasp_generation.yaml  # Hand config (num_fingers, links), NFO, RRT
-│   ├── rl_training.yaml       # PPO hyperparameters + Domain Randomization ranges
-│   └── dexgen.yaml            # Diffusion + inverse dynamics model settings
-├── grasp_generation/          # Stage 0: NFO-based grasp sampling + RRT expansion
-├── envs/                      # Stage 1: Isaac Lab AnyGrasp RL environment
+│   ├── grasp_generation.yaml  # Hand 설정 (num_fingers, links), NFO, RRT
+│   ├── rl_training.yaml       # PPO 하이퍼파라미터 + DR 범위
+│   └── dexgen.yaml            # Diffusion + Inverse Dynamics 설정
+├── grasp_generation/          # Stage 0: 파지 샘플링 + RRT 확장
+├── envs/                      # Stage 1: Isaac Lab RL 환경
 │   └── mdp/                   #   observations, rewards, events, domain_rand
-├── models/                    # Stage 3: diffusion + inverse dynamics
-└── scripts/                   # Entry-point scripts for all stages
+├── models/                    # Stage 3: Diffusion + Inverse Dynamics
+└── scripts/                   # 각 Stage 실행 스크립트
 ```
 
 ---
 
-## Stage Details
+## Configuration
 
-### Stage 0 – Grasp Generation
-
-- Surface-sample candidate grasps on object mesh (greedy spacing-aware)
-- Score with **Net Force Optimization** (ε-metric, force-closure LP)
-- Expand with **RRT** to build a connected `GraspGraph` per object
-- Merge all per-object graphs → `MultiObjectGraspGraph`
-- Grasp representation: `num_fingers` fingertip positions in object frame
-
-**Hand / finger count** is set in `configs/grasp_generation.yaml`:
+### Hand / 손가락 수 설정 (`configs/grasp_generation.yaml`)
 
 ```yaml
 hand:
@@ -154,65 +197,49 @@ hand:
     - link_15.0_tip
 ```
 
-Or override at runtime:
-```bash
-./docker/run.sh gen_grasps -- --num_fingers 3
-```
-
-### Stage 1 – RL Training
-
-- Task: transition between arbitrary grasps in the GraspGraph
-- Environment: Isaac Lab `ManagerBasedRLEnv`, Allegro Hand (16 DoF)
-- Algorithm: PPO via `rl_games`
-- **Asymmetric Actor-Critic**:
-  - Actor (76 dims): joint pos/vel, fingertip pos, target, contact binary, last action
-  - Critic (104 dims): actor obs + true object state, full contact forces, DR params
-- **Domain Randomization** (configurable in `configs/rl_training.yaml`):
-  - Object mass, friction, restitution
-  - Joint damping, armature
-  - Action delay (0–N steps)
-  - Observation noise (joint pos/vel, fingertip pos)
-- **Tactile sensing**: ContactSensorCfg on fingertip links → binary contact (actor) + full 3D forces (critic)
-- **Random object pool**: cube / sphere / cylinder at multiple sizes
-- **Random wrist pose**: hemisphere sampling per episode
-
-### Stage 2 – Dataset Collection
-
-- Roll out trained RL policy on all grasp pairs in the GraspGraph
-- Record `(keypoint_traj, joint_traj, action_traj, robot_state)` per episode
-- Save as HDF5
-
-### Stage 3 – DexGen Controller
-
-- **Diffusion model** (DDPM): plans k_{0:T} conditioned on (k_start, k_goal)
-- **Inverse dynamics** (MLP): maps (k_t, k_{t+1}, robot_state) → joint action
-- `DexGenController` class for deployment on new objects
-
----
-
-## Configuration
-
 ### Domain Randomization (`configs/rl_training.yaml`)
 
 ```yaml
 domain_randomization:
   object_physics:
-    mass_range:        [0.03, 0.30]   # kg
+    mass_range:        [0.03, 0.30]
     friction_range:    [0.30, 1.20]
     restitution_range: [0.00, 0.40]
   robot_physics:
     damping_range:     [0.01, 0.30]
     armature_range:    [0.001, 0.03]
   action_delay:
-    max_delay: 2                       # steps
+    max_delay: 2
   obs_noise:
-    joint_pos_std:     0.005           # rad
+    joint_pos_std:     0.005
     joint_vel_std:     0.04
-    fingertip_pos_std: 0.003           # m
+    fingertip_pos_std: 0.003
 ```
 
-### Hand Configuration (`configs/grasp_generation.yaml`)
+---
 
-Supports any dexterous hand — change `num_fingers`, `num_dof`, `dof_per_finger`,
-and `fingertip_links` to adapt to Shadow, LEAP, or custom hands.
-The env automatically reads `hand` config from `AnyGraspEnvCfg.hand`.
+## Stage 상세
+
+### Stage 0 – Grasp Generation
+- 물체 표면에서 후보 파지점 샘플링 (greedy spacing-aware)
+- **Net Force Optimization** (ε-metric, force-closure LP)으로 품질 평가
+- **RRT**로 확장 → 물체별 `GraspGraph` 생성
+- 전체 물체 통합 → `MultiObjectGraspGraph`
+
+### Stage 1 – RL Training
+- Task: GraspGraph 내 임의의 두 grasp 사이를 전환
+- **Asymmetric Actor-Critic**:
+  - Actor (76 dims): joint pos/vel, fingertip pos, target pos, contact binary, last action
+  - Critic (104 dims): actor obs + 실제 물체 상태, 완전 contact force, DR params
+- **Domain Randomization**: 물체 물리, 관절 동역학, 액션 딜레이, 관측 노이즈
+- **Tactile**: ContactSensorCfg → binary contact (actor) / 3D force (critic)
+- 매 에피소드: 랜덤 물체 + 랜덤 wrist 위치
+
+### Stage 2 – Dataset Collection
+- 학습된 RL 정책으로 GraspGraph의 모든 grasp 쌍 롤아웃
+- `(keypoint_traj, joint_traj, action_traj, robot_state)` 기록 → HDF5
+
+### Stage 3 – DexGen Controller
+- **Diffusion model** (DDPM): (k_start, k_goal) 조건부 키포인트 궤적 생성
+- **Inverse dynamics** (MLP): (k_t, k_{t+1}, robot_state) → joint action
+- `DexGenController`: 새 물체에 바로 배포 가능
