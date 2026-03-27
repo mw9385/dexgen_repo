@@ -119,26 +119,20 @@ cmd_status() {
 # ------------------------------------------------------------------------------
 # DexGen pipeline shortcuts
 # ------------------------------------------------------------------------------
-cmd_test_allegro() {
-    info "Running AllegroHand smoke test..."
-    is_running || error "Container not running. Run './docker/run.sh up' first."
-    docker exec -it "${CONTAINER_NAME}" \
-        python scripts/run_allegro_hand.py --mode test
-}
-
 cmd_gen_grasps() {
     info "Stage 0: Generating grasp set..."
     is_running || error "Container not running."
-    # Pass any extra args through (e.g. --num_grasps 1000)
+    # Grasp generation only needs trimesh/scipy — use python3 (no Isaac Lab needed)
     docker exec -it "${CONTAINER_NAME}" \
-        python scripts/run_grasp_generation.py "$@"
+        python3 scripts/run_grasp_generation.py "$@"
 }
 
 cmd_train_rl() {
     info "Stage 1: Training RL policy..."
     is_running || error "Container not running."
+    # Isaac Lab scripts must use the Isaac Sim python interpreter
     docker exec -it "${CONTAINER_NAME}" \
-        python scripts/train_rl.py \
+        /isaac-sim/python.sh scripts/train_rl.py \
             --grasp_graph data/grasp_graph.pkl \
             --num_envs 512 \
             --headless \
@@ -153,7 +147,7 @@ cmd_collect_data() {
         bash -c "ls logs/rl/allegro_anygrasp/checkpoints/*.pt 2>/dev/null | sort | tail -1")
     [ -z "${ckpt}" ] && error "No checkpoint found. Train RL first."
     docker exec -it "${CONTAINER_NAME}" \
-        python scripts/collect_data.py \
+        /isaac-sim/python.sh scripts/collect_data.py \
             --checkpoint "${ckpt}" \
             --num_episodes 50000 \
             "$@"
@@ -163,9 +157,16 @@ cmd_train_dexgen() {
     info "Stage 3: Training DexGen controller..."
     is_running || error "Container not running."
     docker exec -it "${CONTAINER_NAME}" \
-        python scripts/train_dexgen.py \
+        python3 scripts/train_dexgen.py \
             --data data/dataset.h5 \
             "$@"
+}
+
+cmd_test_allegro() {
+    info "Running AllegroHand smoke test..."
+    is_running || error "Container not running. Run './docker/run.sh up' first."
+    docker exec -it "${CONTAINER_NAME}" \
+        /isaac-sim/python.sh scripts/run_allegro_hand.py --mode test
 }
 
 # ------------------------------------------------------------------------------
