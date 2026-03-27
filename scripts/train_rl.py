@@ -182,54 +182,24 @@ def build_rl_games_config(args) -> dict:
 def main():
     args = parse_args()
 
-    # [수정] ── MUST initialize SimulationApp FIRST ──────────────────────────
-    # omni, pxr, carb, warp 등의 경로는 엔진이 구동되어야 sys.path에 주입됩니다.
-    app_launcher = AppLauncher(args)
-    sim_app = app_launcher.app
-    # ────────────────────────────────────────────────────────────────────────
-
-    # ── MUST set Isaac Sim cloud asset root AFTER app starts ────────────────
-    # isaaclab/utils/assets.py computes NUCLEUS_ASSET_ROOT_DIR at module-
-    # import time via  carb.settings.get("/persistent/isaac/asset_root/cloud").
-    # In a headless container this setting is unset (None), which makes every
-    # asset USD path resolve to "None/Isaac/..." → FileNotFoundError.
-    # Setting it here (before `import isaaclab`) ensures the first lazy import
-    # of isaaclab.utils.assets picks up the correct S3 URL.
-    try:
-        import carb as _carb
-        _cs = _carb.settings.get_settings()
-        if not _cs.get("/persistent/isaac/asset_root/cloud"):
-            _cs.set(
-                "/persistent/isaac/asset_root/cloud",
-                "https://omniverse-content-production.s3-us-west-2.amazonaws.com"
-                "/Assets/Isaac/5.0",
-            )
-            print("[train_rl] Set Isaac Sim cloud asset root to S3 (5.0).")
-    except Exception as _e:
-        print(f"[train_rl] WARNING: could not set carb asset root: {_e}")
-    # ────────────────────────────────────────────────────────────────────────
-
     # Validate grasp graph exists
     if not Path(args.grasp_graph).exists():
         print(f"ERROR: GraspGraph not found at {args.grasp_graph}")
         print("Run Stage 0 first:")
         print("  python scripts/run_grasp_generation.py")
-        sim_app.close()
         sys.exit(1)
 
-    # Import Isaac Lab dependencies (런타임 초기화가 완료된 이후에 import)
+    # Import Isaac Lab dependencies
     try:
         import isaaclab  # noqa: F401
     except ImportError:
         print("ERROR: Isaac Lab not found. Run ./setup_isaaclab.sh first.")
-        sim_app.close()
         sys.exit(1)
 
     try:
         import rl_games  # noqa: F401
     except ImportError:
         print("ERROR: rl_games not found. Run: pip install rl_games")
-        sim_app.close()
         sys.exit(1)
 
     from isaaclab.envs import ManagerBasedRLEnv
@@ -292,9 +262,6 @@ def main():
     print(f"Checkpoints saved to: {args.log_dir}")
     print(f"\nNext: collect dataset")
     print(f"  python scripts/collect_data.py --log_dir {args.log_dir}")
-    
-    # 런타임 종료
-    sim_app.close()
 
 
 def _to_rl_obs(obs):

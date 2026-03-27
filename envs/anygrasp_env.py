@@ -58,23 +58,6 @@ from typing import List, Optional
 import torch
 
 try:
-    # MUST set Isaac Sim cloud asset root BEFORE any isaaclab / isaaclab_assets
-    # import.  NUCLEUS_ASSET_ROOT_DIR is evaluated at module-import time from
-    # carb settings.  In a headless container without a running Nucleus server
-    # the setting /persistent/isaac/asset_root/cloud is unset (None), which
-    # causes every USD path to resolve to "None/Isaac/Robots/...".
-    try:
-        import carb as _carb
-        _cs = _carb.settings.get_settings()
-        if not _cs.get("/persistent/isaac/asset_root/cloud"):
-            _cs.set(
-                "/persistent/isaac/asset_root/cloud",
-                "https://omniverse-content-production.s3-us-west-2.amazonaws.com"
-                "/Assets/Isaac/5.0",
-            )
-    except Exception:
-        pass
-
     import isaaclab.sim as sim_utils
     from isaaclab.assets import ArticulationCfg, RigidObjectCfg, AssetBaseCfg
     from isaaclab.envs import ManagerBasedRLEnvCfg
@@ -103,6 +86,25 @@ try:
         from isaaclab_assets.robots.allegro_hand import ALLEGRO_HAND_CFG
     except ImportError:
         from isaaclab_assets import ALLEGRO_HAND_CFG
+
+    # Patch USD path if the nucleus asset root resolved to None.
+    # This happens in headless containers without a running Nucleus server;
+    # NUCLEUS_ASSET_ROOT_DIR in isaaclab/utils/assets.py is read from a carb
+    # setting that defaults to None in that environment.
+    _allegro_usd = ALLEGRO_HAND_CFG.spawn.usd_path
+    if str(_allegro_usd).startswith("None"):
+        _S3_ROOT = (
+            "https://omniverse-content-production.s3-us-west-2.amazonaws.com"
+            "/Assets/Isaac/5.0"
+        )
+        ALLEGRO_HAND_CFG = ALLEGRO_HAND_CFG.replace(
+            spawn=ALLEGRO_HAND_CFG.spawn.replace(
+                usd_path=(
+                    f"{_S3_ROOT}/Isaac/Robots/WonikRobotics/AllegroHand/"
+                    "allegro_hand_instanceable.usd"
+                )
+            )
+        )
 
     _ISAACLAB_AVAILABLE = True
 
@@ -383,10 +385,6 @@ if _ISAACLAB_AVAILABLE:
     @configclass
     class AnyGraspEnvCfg(ManagerBasedRLEnvCfg):
         scene:        AnyGraspSceneCfg        = AnyGraspSceneCfg(num_envs=MISSING, env_spacing=0.6)
-        
-        # [Fix] Added missing actions field
-        actions:      AnyGraspActionsCfg      = AnyGraspActionsCfg()
-        
         observations: AnyGraspObservationsCfg = AnyGraspObservationsCfg()
         actions:      AnyGraspActionsCfg      = AnyGraspActionsCfg()
         rewards:      AnyGraspRewardsCfg      = AnyGraspRewardsCfg()
