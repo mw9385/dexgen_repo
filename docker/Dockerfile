@@ -1,76 +1,60 @@
-# Base: NVIDIA Isaac Sim 5.1.0 (Ubuntu 24.04 Base)
-FROM nvcr.io/nvidia/isaac-sim:5.1.0
+# syntax=docker/dockerfile:1.6
+
+ARG ISAACSIM_BASE_IMAGE=nvcr.io/nvidia/isaac-sim
+ARG ISAACSIM_VERSION=5.1.0
+FROM ${ISAACSIM_BASE_IMAGE}:${ISAACSIM_VERSION}
+
+SHELL ["/bin/bash", "-lc"]
+
+# Isaac Lab 및 프로젝트 설정
+ARG ISAACLAB_TAG=v2.3.2
+ENV ISAACSIM_PATH=/isaac-sim \
+    ISAACSIM_PYTHON_EXE=/isaac-sim/python.sh \
+    ISAACLAB_DIR=/workspace/IsaacLab \
+    DEXGEN_DIR=/workspace/dexgen \
+    PYTHONUNBUFFERED=1 \
+    TERM=xterm \
+    DISPLAY=""
 
 USER root
 
-# 필수 시스템 패키지 설치 (libgl1 적용)
+# 필수 시스템 패키지
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    git \
-    git-lfs \
-    curl \
-    wget \
-    vim \
-    htop \
-    tmux \
-    libgl1 \
-    libglib2.0-0 \
-    libsm6 \
-    libxext6 \
-    libxrender-dev \
+    git git-lfs curl ca-certificates unzip rsync vim \
+    libglib2.0-0 libsm6 libxext6 libxrender1 libgl1 build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# ------------------------------------------------------------------------------
-# Isaac Lab (Isaac Sim 5.1.0과 호환되는 v2.3.2 브랜치 명시)
-# ------------------------------------------------------------------------------
-ARG ISAACLAB_VERSION=v2.3.2
-ENV ISAACLAB_DIR=/workspace/IsaacLab
+WORKDIR /workspace
 
-RUN git clone --depth 1 --branch ${ISAACLAB_VERSION} \
-    https://github.com/isaac-sim/IsaacLab.git ${ISAACLAB_DIR}
-
+# Isaac Lab 설치
+RUN git clone --depth 1 --branch ${ISAACLAB_TAG} https://github.com/isaac-sim/IsaacLab.git ${ISAACLAB_DIR}
 WORKDIR ${ISAACLAB_DIR}
-
-ENV TERM=xterm
-
-# isaac sim path (오타 수정: PTYHON -> PYTHON)
-ENV ISAACSIM_PATH=/isaac-sim
-ENV ISAACSIM_PYTHON_EXE=${ISAACSIM_PATH}/python.sh
-RUN ln -s ${ISAACSIM_PATH} ${ISAACLAB_DIR}/_isaac_sim
-
-# Install Isaac Lab core + RL frameworks
-RUN ./isaaclab.sh --install
-RUN ./isaaclab.sh --install rl_games
-RUN ./isaaclab.sh --install rsl_rl
-RUN ./isaaclab.sh --install skrl
-
-# pip, setuptools, wheel 사전 업데이트 (의존성 충돌 및 빌드 에러 방지)
-RUN ${ISAACSIM_PYTHON_EXE} -m pip install --upgrade pip setuptools wheel
-
-# warp is bundled with Isaac Sim but must be pip-installed so isaaclab.sh -p can find it
-RUN ${ISAACSIM_PYTHON_EXE} -m pip install --no-cache-dir warp-lang
+RUN ln -sfn /isaac-sim _isaac_sim \
+    && ./isaaclab.sh --install
 
 # ------------------------------------------------------------------------------
-# DexGen Python dependencies
+# DexGen 의존성 주입 (작동이 확인된 구조 유지)
 # ------------------------------------------------------------------------------
-WORKDIR /workspace/dexgen
-
+WORKDIR ${DEXGEN_DIR}
 COPY requirements.txt .
-# Install into Isaac Sim Python
+
+# 1. Isaac Sim 내장 패키지 보호를 위해 pip 업데이트를 생략하고 의존성만 설치
+# flatdict 4.0.1의 pkg_resources 종속성을 해결하기 위해 빌드 격리 해제 옵션 사용
+RUN ${ISAACSIM_PYTHON_EXE} -m pip install --no-cache-dir \
+    pyyaml pyzmq einops flaky junitparser pytest pytest-mock \
+    && ${ISAACSIM_PYTHON_EXE} -m pip install --no-cache-dir --no-build-isolation flatdict==4.0.1
+
+# 2. 나머지 프로젝트 요구사항 설치
 RUN ${ISAACSIM_PYTHON_EXE} -m pip install --no-cache-dir -r requirements.txt
 
-# ------------------------------------------------------------------------------
-# Copy DexGen source & Set Environment
-# ------------------------------------------------------------------------------
+# 소스 복사 및 환경 변수 설정
 COPY . .
+ENV PYTHONPATH="${DEXGEN_DIR}:${ISAACLAB_DIR}/source/isaaclab:${ISAACLAB_DIR}/source/isaaclab_assets:${PYTHONPATH}"
 
-ENV PYTHONPATH=/workspace/dexgen:${ISAACLAB_DIR}/source/isaaclab:${ISAACLAB_DIR}/source/isaaclab_assets:${PYTHONPATH}
-ENV ISAACLAB_DIR=${ISAACLAB_DIR}
+# 편리성을 위한 Alias 설정
+RUN printf 'alias isaacpy="/isaac-sim/python.sh"\n' >> /root/.bashrc \
+    && printf 'alias islab="cd /workspace/IsaacLab"\n' >> /root/.bashrc \
+    && printf 'alias proj="cd /workspace/dexgen"\n' >> /root/.bashrc
 
-# Headless rendering (EGL)
-ENV DISPLAY=""
-ENV NVIDIA_DRIVER_CAPABILITIES=all
-ENV NVIDIA_VISIBLE_DEVICES=all
-
-WORKDIR /workspace/dexgen
-
-CMD ["/bin/bash"]
+WORKDIR ${DEXGEN_DIR}
+CMD ["bash"]
