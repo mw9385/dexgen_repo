@@ -40,6 +40,10 @@ class Grasp:
     object_name: str = ""
     # Object scale at which this grasp was computed (relative to unit mesh)
     object_scale: float = 1.0
+    # (num_dof,) robot joint angles corresponding to this grasp (IK solution).
+    # None if IK was not solved during grasp generation.
+    # When stored, events.py uses these directly instead of the heuristic IK.
+    joint_angles: Optional[np.ndarray] = None
 
     @property
     def as_vector(self) -> np.ndarray:
@@ -53,6 +57,7 @@ class Grasp:
             "quality": self.quality,
             "object_name": self.object_name,
             "object_scale": self.object_scale,
+            "joint_angles": self.joint_angles,
         }
 
     @classmethod

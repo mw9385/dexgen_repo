@@ -39,17 +39,15 @@ def parse_args():
                    help="Number of parallel environments")
     p.add_argument("--max_iterations", type=int, default=30000,
                    help="Maximum PPO training iterations")
-                   
     p.add_argument("--resume", type=str, default=None,
                    help="Resume from checkpoint path")
-    # [핵심] 오염된 기존 체크포인트를 피하기 위해 v2 폴더로 경로 변경
     p.add_argument("--log_dir", type=str, default="logs/rl/allegro_anygrasp_v2",
                    help="Training log / checkpoint directory")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--config", type=str,
                    default=str(Path(__file__).parent.parent / "configs" / "rl_training.yaml"),
                    help="Path to YAML config (ppo / domain_randomization settings)")
-    
+
     AppLauncher.add_app_launcher_args(p)
     return p.parse_args()
 
@@ -108,6 +106,16 @@ def apply_dr_config(env_cfg, dr_cfg: dict):
 
 
 def build_rl_games_config(args) -> dict:
+    """
+    Build rl_games PPO config.
+
+    Key fixes vs previous version:
+      - normalize_input: True   (was False → reward signal was weak)
+      - normalize_value: True   (was False → value function unstable)
+      - reward_shaper scale_value: 0.1  (was 0.01 → reward too small)
+      - minibatch_size: 16384   (was 4096 → matches yaml)
+      - horizon_length: 16      (was 8 → more stable gradient estimates)
+    """
     return {
         "params": {
             "seed": args.seed,
@@ -147,15 +155,17 @@ def build_rl_games_config(args) -> dict:
                 "multi_gpu": False,
                 "ppo": True,
                 "mixed_precision": False,
-                "normalize_input": False,
-                "normalize_value": False,
+                # [FIX] normalize_input/value: True — critical for stable learning
+                "normalize_input": True,
+                "normalize_value": True,
                 "num_actors": args.num_envs,
                 "reward_shaper": {
-                    "scale_value": 0.01,
+                    # [FIX] 0.01 → 0.1: reward was being scaled down 100x
+                    "scale_value": 0.1,
                 },
                 "normalize_advantage": True,
                 "gamma": 0.99,
-                "tau": 0.95,               
+                "tau": 0.95,
                 "learning_rate": 5e-4,
                 "lr_schedule": "adaptive",
                 "lr_threshold": 0.008,
@@ -169,32 +179,36 @@ def build_rl_games_config(args) -> dict:
                 "truncate_grads": True,
                 "e_clip": 0.2,
                 "kl_threshold": 0.008,
-                "horizon_length": 8,
-                "num_steps_per_env": 8,    
+                # [FIX] horizon_length: 16 (was 8) — more stable gradient estimates
+                "horizon_length": 16,
+                "num_steps_per_env": 16,
                 "mini_epochs": 5,
-                "minibatch_size": 4096,
+                # [FIX] minibatch_size: 16384 (was 4096) — matches yaml config
+                "minibatch_size": 16384,
                 "critic_coef": 4,
                 "clip_value": True,
                 "seq_length": 4,
                 "bounds_loss_coef": 0.0001,
                 "log_dir": args.log_dir,
-                
+
                 # Asymmetric Actor-Critic
                 "use_central_value": True,
                 "central_value_config": {
-                    "minibatch_size": 4096,
-                    "mini_epochs": 5,
+                    "minibatch_size": 16384,
+                    "mini_epochs": 4,
                     "learning_rate": 5e-4,
                     "lr_schedule": "adaptive",
                     "lr_threshold": 0.008,
                     "clip_value": True,
-                    "normalize_input": False,
+                    # [FIX] normalize_input: True for critic as well
+                    "normalize_input": True,
                     "truncate_grads": True,
+                    "grad_norm": 1.0,
                     "network": {
                         "name": "actor_critic",
                         "central_value": True,
                         "mlp": {
-                            "units": [512, 512, 256, 128],
+                            "units": [512, 512, 256],
                             "activation": "elu",
                             "d2rl": False,
                             "initializer": {"name": "default"},
@@ -261,7 +275,7 @@ def main():
     env_cfg = AnyGraspEnvCfg()
     env_cfg.scene.num_envs = args.num_envs
     env_cfg.grasp_graph_path = args.grasp_graph
-    if getattr(args, "headless", False): 
+    if getattr(args, "headless", False):
         env_cfg.viewer = None
 
     apply_dr_config(env_cfg, cfg_file.get("domain_randomization", {}))
@@ -301,7 +315,7 @@ def main():
     print(f"Checkpoints saved to: {args.log_dir}")
     print(f"\nNext: collect dataset")
     print(f"  python scripts/collect_data.py --log_dir {args.log_dir}")
-    
+
     sim_app.close()
 
 
@@ -312,15 +326,14 @@ def _to_rl_obs(obs):
     """
     if isinstance(obs, dict):
         res = {}
-        # 안전망: NaN 강제 0 치환
         p_tensor = obs.get("policy", next(iter(obs.values())))
         res["obs"] = torch.nan_to_num(p_tensor, nan=0.0, posinf=100.0, neginf=-100.0)
-            
+
         if "critic" in obs:
             res["states"] = torch.nan_to_num(obs["critic"], nan=0.0, posinf=100.0, neginf=-100.0)
-            
+
         return res
-        
+
     return {"obs": torch.nan_to_num(obs, nan=0.0, posinf=100.0, neginf=-100.0)}
 
 
@@ -332,12 +345,33 @@ class _IsaacLabVecEnv:
         self.num_envs = num_envs
 
     def step(self, actions):
+        # [FIX] Update action buffers BEFORE stepping the env.
+        # This ensures:
+        #   - last_action obs = previous step's action (not always 0)
+        #   - action_rate_penalty can compute delta correctly
+        extras = self.env.extras
+        if "current_action" in extras:
+            extras["last_action"] = extras["current_action"].clone()
+        else:
+            extras["last_action"] = actions.clone()
+        extras["current_action"] = actions.clone()
+
         obs, rew, terminated, truncated, info = self.env.step(actions)
         done = terminated | truncated
         return _to_rl_obs(obs), rew, done, info
 
     def reset(self):
         obs, _ = self.env.reset()
+        # Initialise action buffers on first reset
+        num_dof = self.env.action_manager.action.shape[-1]
+        if "last_action" not in self.env.extras:
+            self.env.extras["last_action"] = torch.zeros(
+                self.num_envs, num_dof, device=self.env.device
+            )
+        if "current_action" not in self.env.extras:
+            self.env.extras["current_action"] = torch.zeros(
+                self.num_envs, num_dof, device=self.env.device
+            )
         return _to_rl_obs(obs)
 
     def get_number_of_agents(self):
@@ -380,8 +414,6 @@ class _IsaacLabVecEnv:
         obs_space_old = old_gym.spaces.Box(
             low=-np.inf, high=np.inf, shape=obs_shape, dtype=np.float32
         )
-        
-        # [핵심] 행동 공간(Action Space)의 바운드를 무한대에서 [-1, 1]로 제한하여 에러 방지
         action_space_old = old_gym.spaces.Box(
             low=-1.0, high=1.0, shape=act_shape, dtype=np.float32
         )
@@ -390,7 +422,7 @@ class _IsaacLabVecEnv:
             "action_space": action_space_old,
             "observation_space": obs_space_old,
         }
-        
+
         if state_space is not None:
             state_shape = state_space.shape
             if len(state_shape) > 1:

@@ -39,24 +39,32 @@ ppo:
   units: [512, 512, 256, 128]
   activation: elu
   fixed_sigma: true
-  sigma_init: 0.0
+  sigma_init: -1.0
 
   # Core PPO hyperparameters
   learning_rate: 5.0e-4
   lr_schedule: adaptive
+  lr_threshold: 0.008
   gamma: 0.99
   tau: 0.95                      # GAE lambda
   e_clip: 0.2
   entropy_coef: 0.0
   critic_coef: 4.0
   grad_norm: 1.0
+  # [FIX] normalize_input/value: true — critical for stable learning
   normalize_input: true
   normalize_value: true
   normalize_advantage: true
 
+  # [FIX] reward_shaper: 0.1 (was 0.01 → reward was scaled down 100x)
+  reward_shaper_scale: 0.1
+
   # Rollout
-  num_steps_per_env: 8
+  # [FIX] horizon_length: 16 (was 8) — more stable gradient estimates
+  horizon_length: 16
+  num_steps_per_env: 16
   mini_epochs: 5
+  # [FIX] minibatch_size: 16384 (was 4096 in code, mismatched with yaml)
   minibatch_size: 16384
 
   # Training length
@@ -76,15 +84,17 @@ central_value:
 
   # Critic-specific PPO params
   learning_rate: 5.0e-4
-  kl_threshold: 0.016
+  lr_schedule: adaptive
+  lr_threshold: 0.008
   clip_value: true
+  # [FIX] normalize_input: true for critic as well
   normalize_input: true
   grad_norm: 1.0
   mini_epochs: 4
   minibatch_size: 16384
 
 logging:
-  log_dir: logs/rl/allegro_anygrasp
+  log_dir: logs/rl/allegro_anygrasp_v2
   save_frequency: 1000
   print_stats: true
 

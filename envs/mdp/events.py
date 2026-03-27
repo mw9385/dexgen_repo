@@ -2,12 +2,18 @@
 Event (reset / randomisation) functions for the AnyGrasp-to-AnyGrasp env.
 
 Reset logic per episode:
-  1. Sample a random object name from MultiObjectGraspGraph
-  2. Sample a random edge (g_start, g_goal) for that object
-  3. Randomise Allegro Hand wrist position (hemisphere above object)
-  4. Set hand joint positions to approximate g_start
-  5. Store g_goal as target in env.extras
-  6. Randomise object pose (small noise around default)
+  1. Sample a random start grasp from GraspGraph
+  2. Find the NEAREST NEIGHBOR grasp as the goal (paper §3.2)
+  3. Randomise object pose (small noise around default)
+  4. Set hand joint positions using stored joint angles (or IK fallback)
+  5. Store goal fingertip positions in env.extras
+
+Key fix: Nearest Neighbor goal selection
+  - Paper: "the goal grasp is the nearest grasp in the GraspGraph
+    to the current start grasp position"
+  - Implementation: compute L2 distance in fingertip-position space
+    between start and all other grasps, pick the closest one
+    (excluding self). Optionally sample from top-K nearest for diversity.
 """
 
 from __future__ import annotations
@@ -18,6 +24,7 @@ from pathlib import Path
 from typing import Optional
 
 import torch
+import numpy as np
 
 
 # ---------------------------------------------------------------------------
@@ -42,12 +49,14 @@ def reset_to_random_grasp(
     env_ids: torch.Tensor,
 ):
     """
-    Full episode reset:
-      1. Sample random object + grasp edge from MultiObjectGraspGraph
-      2. Randomise wrist pose (position + orientation)
-      3. Set robot joints to approximate start grasp
-      4. Store goal fingertip positions
-      5. Randomise object pose
+    Full episode reset implementing DexterityGen §3.2:
+
+      1. Sample random start grasp g_start from GraspGraph
+      2. Find nearest neighbor g_goal using L2 distance in fingertip space
+         (Nearest Neighbor — paper's key design choice for curriculum)
+      3. Randomise object pose
+      4. Set robot joints to approximate g_start
+      5. Store g_goal fingertip positions as target
     """
     graph = _load_grasp_graph(env)
     if graph is None:
@@ -55,21 +64,22 @@ def reset_to_random_grasp(
         return
 
     n = len(env_ids)
-    import numpy as np
-
-    # num_fingers from graph (robust) or env cfg fallback
     num_fingers = getattr(graph, "num_fingers", 4)
 
     # ------------------------------------------------------------------
-    # 1. Sample random object + (start, goal) grasp pair per env
+    # 1 & 2. Sample start grasp + find nearest neighbor goal
     # ------------------------------------------------------------------
     rng = np.random.default_rng()
     start_fps_list, goal_fps_list = [], []
+    start_joints_list = []
 
     for _ in range(n):
-        obj_name, (si, gi) = graph.sample_edge(rng=rng)
-        start_fps_list.append(graph.get_grasp(obj_name, si).fingertip_positions)
-        goal_fps_list.append(graph.get_grasp(obj_name, gi).fingertip_positions)
+        obj_name, start_fp, goal_fp, start_joints = _sample_start_and_nn_goal(
+            graph, rng
+        )
+        start_fps_list.append(start_fp)
+        goal_fps_list.append(goal_fp)
+        start_joints_list.append(start_joints)
 
     start_fps = torch.tensor(
         np.stack(start_fps_list), device=env.device, dtype=torch.float32
@@ -79,7 +89,8 @@ def reset_to_random_grasp(
     )   # (n, num_fingers, 3)
 
     fp_dim = num_fingers * 3
-    # Store goal
+
+    # Store goal fingertip positions (object frame)
     if "target_fingertip_pos" not in env.extras:
         env.extras["target_fingertip_pos"] = torch.zeros(
             env.num_envs, fp_dim, device=env.device
@@ -87,23 +98,157 @@ def reset_to_random_grasp(
     env.extras["target_fingertip_pos"][env_ids] = goal_fps.reshape(n, fp_dim)
 
     # ------------------------------------------------------------------
-    # 2. Randomise object pose first (wrist will be placed relative to it)
+    # 3. Randomise object pose first (wrist placed relative to it)
     # ------------------------------------------------------------------
     _randomise_object_pose(env, env_ids)
 
     # ------------------------------------------------------------------
-    # 3. Randomise wrist position
+    # 4. Randomise wrist position
     # ------------------------------------------------------------------
     _randomise_wrist_pose(env, env_ids)
 
     # ------------------------------------------------------------------
-    # 4. Set robot joints to approximate start grasp
+    # 5. Set robot joints
+    #    Priority: stored joint angles > IK approximation
     # ------------------------------------------------------------------
-    _set_robot_to_fingertip_config(env, env_ids, start_fps)
+    has_joints = any(j is not None for j in start_joints_list)
+    if has_joints:
+        _set_robot_joints_direct(env, env_ids, start_joints_list)
+    else:
+        _set_robot_to_fingertip_config(env, env_ids, start_fps)
+
+    # ------------------------------------------------------------------
+    # 6. Initialise action buffers (fixes last_action always being 0)
+    # ------------------------------------------------------------------
+    robot = env.scene["robot"]
+    current_q = robot.data.joint_pos[env_ids]  # (n, num_dof)
+    if "last_action" not in env.extras:
+        env.extras["last_action"] = torch.zeros(
+            env.num_envs, current_q.shape[-1], device=env.device
+        )
+    if "current_action" not in env.extras:
+        env.extras["current_action"] = torch.zeros(
+            env.num_envs, current_q.shape[-1], device=env.device
+        )
+    # Reset action buffers to current joint positions for reset envs
+    env.extras["last_action"][env_ids] = current_q
+    env.extras["current_action"][env_ids] = current_q
 
 
 # ---------------------------------------------------------------------------
-# Wrist randomization  (NEW)
+# Nearest Neighbor goal selection  (CORE FIX)
+# ---------------------------------------------------------------------------
+
+def _sample_start_and_nn_goal(
+    graph,
+    rng: np.random.Generator,
+    top_k: int = 5,
+):
+    """
+    Sample a start grasp and find its nearest neighbor as the goal.
+
+    Algorithm (DexterityGen §3.2):
+      1. Uniformly sample a start grasp index from the GraspGraph
+      2. Compute L2 distance in flattened fingertip-position space
+         between start and ALL other grasps in the same object's graph
+      3. Select the nearest neighbor (or sample from top-K for diversity)
+
+    Args:
+        graph:  MultiObjectGraspGraph or GraspGraph
+        rng:    numpy random generator
+        top_k:  sample goal from top-K nearest neighbors (diversity)
+
+    Returns:
+        obj_name:     str
+        start_fp:     (num_fingers, 3) ndarray  — start fingertip positions
+        goal_fp:      (num_fingers, 3) ndarray  — goal fingertip positions
+        start_joints: (num_dof,) ndarray or None — joint angles if stored
+    """
+    from grasp_generation.rrt_expansion import MultiObjectGraspGraph, GraspGraph
+
+    # Handle both MultiObjectGraspGraph and single GraspGraph
+    if isinstance(graph, MultiObjectGraspGraph):
+        obj_name = graph.sample_object(rng)
+        g = graph.graphs[obj_name]
+    else:
+        obj_name = graph.object_name
+        g = graph
+
+    N = len(g)
+    if N < 2:
+        # Degenerate: only one grasp, use it for both start and goal
+        grasp = g.grasp_set[0]
+        return (
+            obj_name,
+            grasp.fingertip_positions.copy(),
+            grasp.fingertip_positions.copy(),
+            getattr(grasp, "joint_angles", None),
+        )
+
+    # All fingertip positions as flat array: (N, num_fingers*3)
+    all_fps = g.grasp_set.as_array()   # (N, F*3)
+
+    # 1. Sample start index uniformly
+    start_idx = int(rng.integers(0, N))
+    start_flat = all_fps[start_idx]    # (F*3,)
+
+    # 2. Compute L2 distances to all other grasps
+    diffs = all_fps - start_flat       # (N, F*3)
+    dists = np.linalg.norm(diffs, axis=-1)  # (N,)
+    dists[start_idx] = np.inf          # exclude self
+
+    # 3. Select goal from top-K nearest neighbors
+    k = min(top_k, N - 1)
+    top_k_indices = np.argpartition(dists, k)[:k]  # indices of k smallest
+    goal_idx = int(rng.choice(top_k_indices))
+
+    start_grasp = g.grasp_set[start_idx]
+    goal_grasp  = g.grasp_set[goal_idx]
+
+    start_joints = getattr(start_grasp, "joint_angles", None)
+
+    return (
+        obj_name,
+        start_grasp.fingertip_positions.copy(),
+        goal_grasp.fingertip_positions.copy(),
+        start_joints,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Robot joint setting — direct (when joint angles are stored in grasp)
+# ---------------------------------------------------------------------------
+
+def _set_robot_joints_direct(
+    env,
+    env_ids: torch.Tensor,
+    joints_list: list,
+):
+    """
+    Set robot joints directly from stored joint angles in the Grasp object.
+    This is the correct approach when grasp generation also solves IK.
+    """
+    robot = env.scene["robot"]
+    n = len(env_ids)
+    num_dof = robot.data.default_joint_pos.shape[-1]
+
+    joint_pos = robot.data.default_joint_pos[env_ids].clone()
+
+    for i, joints in enumerate(joints_list):
+        if joints is not None:
+            j = torch.tensor(joints, device=env.device, dtype=torch.float32)
+            if j.shape[0] == num_dof:
+                joint_pos[i] = j
+
+    robot.write_joint_state_to_sim(
+        joint_pos,
+        torch.zeros_like(joint_pos),
+        env_ids=env_ids,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Wrist randomization
 # ---------------------------------------------------------------------------
 
 def _randomise_wrist_pose(env, env_ids: torch.Tensor):
@@ -114,8 +259,6 @@ def _randomise_wrist_pose(env, env_ids: torch.Tensor):
       - Sample a point on a hemisphere of radius [r_min, r_max] above the object
       - The wrist z-axis points roughly toward the object centre
       - Add small random rotation noise around that pointing direction
-
-    Config is read from env.cfg.wrist_randomization (set in AnyGraspEnvCfg).
     """
     robot = env.scene["robot"]
     obj   = env.scene["object"]
@@ -130,27 +273,20 @@ def _randomise_wrist_pose(env, env_ids: torch.Tensor):
 
     obj_pos = obj.data.root_pos_w[env_ids]   # (n, 3)
 
-    # Sample horizontal offset in a ring of radius [r_min, r_max]
     radius = torch.empty(n, device=env.device).uniform_(r_min, r_max)
     angle  = torch.empty(n, device=env.device).uniform_(-math.pi, math.pi)
     x_off  = radius * torch.cos(angle)
     y_off  = radius * torch.sin(angle)
-
-    # Sample height above object
-    z_off = torch.empty(n, device=env.device).uniform_(h_min, h_max)
+    z_off  = torch.empty(n, device=env.device).uniform_(h_min, h_max)
 
     wrist_pos = obj_pos + torch.stack([x_off, y_off, z_off], dim=-1)  # (n, 3)
 
-    # Orientation: wrist z-axis points from wrist toward object (palm-down)
-    to_obj = obj_pos - wrist_pos                              # (n, 3)
+    to_obj = obj_pos - wrist_pos
     to_obj = to_obj / (torch.norm(to_obj, dim=-1, keepdim=True) + 1e-8)
 
-    # Build quaternion that aligns +z → to_obj direction, then add noise
-    wrist_quat = _look_at_quat(to_obj)                        # (n, 4)
+    wrist_quat = _look_at_quat(to_obj)
     wrist_quat = _add_rotation_noise(wrist_quat, rot_std, env.device, n)
 
-    # Write root pose to sim
-    # Isaac Lab API: write_root_pose_to_sim(pos, quat, env_ids)
     robot.write_root_pose_to_sim(
         torch.cat([wrist_pos, wrist_quat], dim=-1),
         env_ids=env_ids,
@@ -158,29 +294,17 @@ def _randomise_wrist_pose(env, env_ids: torch.Tensor):
 
 
 def _look_at_quat(direction: torch.Tensor) -> torch.Tensor:
-    """
-    Compute quaternion (w, x, y, z) that rotates the canonical +Z axis
-    to point along `direction`.
-
-    direction: (N, 3) unit vectors
-    Returns:   (N, 4) quaternions
-    """
+    """Quaternion (w,x,y,z) that rotates +Z to point along `direction`."""
     N = direction.shape[0]
     device = direction.device
 
     z_axis = torch.tensor([0.0, 0.0, 1.0], device=device).expand(N, 3)
-
-    # Rotation axis = z_axis × direction
-    axis = torch.cross(z_axis, direction, dim=-1)           # (N, 3)
+    axis = torch.cross(z_axis, direction, dim=-1)
     axis_norm = torch.norm(axis, dim=-1, keepdim=True)
-
-    # cos(angle) = dot(z_axis, direction)
-    cos_a = (z_axis * direction).sum(dim=-1)                # (N,)
-
-    # Handle near-parallel case (angle ≈ 0 or π)
     parallel = axis_norm.squeeze(-1) < 1e-6
     axis = axis / (axis_norm + 1e-8)
 
+    cos_a = (z_axis * direction).sum(dim=-1)
     sin_half = torch.sqrt(((1.0 - cos_a) / 2.0).clamp(0, 1))
     cos_half = torch.sqrt(((1.0 + cos_a) / 2.0).clamp(0, 1))
 
@@ -189,22 +313,14 @@ def _look_at_quat(direction: torch.Tensor) -> torch.Tensor:
         axis[:, 0] * sin_half,
         axis[:, 1] * sin_half,
         axis[:, 2] * sin_half,
-    ], dim=-1)                                               # (N, 4)
+    ], dim=-1)
 
-    # For exactly-parallel cases, use identity quaternion
     identity = torch.tensor([1.0, 0.0, 0.0, 0.0], device=device).expand(N, 4)
     quat = torch.where(parallel.unsqueeze(-1), identity, quat)
-
     return quat / (torch.norm(quat, dim=-1, keepdim=True) + 1e-8)
 
 
-def _add_rotation_noise(
-    quat: torch.Tensor,      # (N, 4) w, x, y, z
-    std_rad: float,
-    device: torch.device,
-    n: int,
-) -> torch.Tensor:
-    """Perturb quaternions by a small random rotation (axis-angle noise)."""
+def _add_rotation_noise(quat, std_rad, device, n):
     axis  = torch.randn(n, 3, device=device)
     axis  = axis / (torch.norm(axis, dim=-1, keepdim=True) + 1e-8)
     angle = torch.randn(n, device=device) * std_rad
@@ -212,8 +328,7 @@ def _add_rotation_noise(
     return _quat_multiply(quat, noise_quat)
 
 
-def _quat_multiply(q1: torch.Tensor, q2: torch.Tensor) -> torch.Tensor:
-    """Hamilton product of two quaternion tensors (w, x, y, z)."""
+def _quat_multiply(q1, q2):
     w1, x1, y1, z1 = q1.unbind(-1)
     w2, x2, y2, z2 = q2.unbind(-1)
     return torch.stack([
@@ -225,20 +340,8 @@ def _quat_multiply(q1: torch.Tensor, q2: torch.Tensor) -> torch.Tensor:
 
 
 # ---------------------------------------------------------------------------
-# Existing helpers (updated)
+# IK fallback: set robot joints to approximate fingertip config
 # ---------------------------------------------------------------------------
-
-def _reset_to_default_pose(env, env_ids: torch.Tensor):
-    robot = env.scene["robot"]
-    joint_pos = robot.data.default_joint_pos[env_ids]
-    joint_vel = torch.zeros_like(joint_pos)
-    robot.write_joint_state_to_sim(joint_pos, joint_vel, env_ids=env_ids)
-    hand_cfg = getattr(env.cfg, "hand", None) or {}
-    num_fingers = hand_cfg.get("num_fingers", 4)
-    env.extras["target_fingertip_pos"] = torch.zeros(
-        env.num_envs, num_fingers * 3, device=env.device
-    )
-
 
 def _set_robot_to_fingertip_config(
     env,
@@ -246,37 +349,15 @@ def _set_robot_to_fingertip_config(
     fingertip_positions: torch.Tensor,   # (n, num_fingers, 3) object frame
 ):
     """
-    Approximate IK: scale joint angles to reach fingertip targets.
+    Approximate IK fallback when joint angles are not stored in the grasp.
 
-    [Fix] Previous code computed ft_world = fingertip_positions + obj_pos,
-    which is correct (object frame → world frame). However palm_pos was
-    taken from body_pos_w[env_ids, 0, :] which is the BASE LINK position,
-    not the palm/wrist position. For Allegro Hand, body index 0 is the
-    base link which may be at the wrist mount point, not the palm center.
+    Maps fingertip distance from object centroid to joint opening angle.
+    This is a heuristic — for accurate results, store joint angles during
+    grasp generation (see grasp_sampler.py Grasp.joint_angles field).
 
-    More critically: the distance-based IK scaling was computing distance
-    from the palm to the fingertip TARGET positions, but the wrist pose
-    had already been randomised by _randomise_wrist_pose() BEFORE this
-    function is called. So palm_pos reflects the new randomised wrist
-    position — this is actually correct.
-
-    The real bug: fingertip_positions are in OBJECT frame (centred at
-    object origin), but the distance to palm should account for the
-    object's position in world frame. The previous code did:
-        ft_world = fingertip_positions + obj_pos  ← correct
-        ft_dist = ||ft_world - palm_pos||          ← correct
-
-    However, after _randomise_wrist_pose(), the robot's body_pos_w may
-    not yet be updated in the data buffer (Isaac Lab updates body poses
-    after physics step, not immediately after write_root_pose_to_sim).
-    We should use the wrist position we just set, not the stale buffer.
-
-    Fix: read the wrist position from the root state we just wrote,
-    or use a fixed reference distance based on the object size.
-    Since we don't have easy access to the just-written pose here,
-    we use a robust fallback: compute distance from object center to
-    fingertip (in object frame) and use that as the IK scale proxy.
-    This is more stable than using the palm position.
+    Mapping:
+      dist from object center → how "open" the hand is
+      [0.02 m, 0.12 m] → joint scale [0.1, 0.9]
     """
     robot = env.scene["robot"]
     n     = len(env_ids)
@@ -285,25 +366,19 @@ def _set_robot_to_fingertip_config(
     num_fingers    = hand_cfg.get("num_fingers",    fingertip_positions.shape[1])
     dof_per_finger = hand_cfg.get("dof_per_finger", 4)
 
-    default_q = robot.data.default_joint_pos[env_ids].clone()   # (n, num_dof)
+    default_q = robot.data.default_joint_pos[env_ids].clone()
 
-    # Distance from object centroid (origin in object frame) to each fingertip.
-    # This is a stable proxy for how "open" the hand needs to be.
-    # fingertip_positions: (n, F, 3) in object frame
+    # Distance from object centroid (origin in object frame) to each fingertip
     ft_dist_from_obj = torch.norm(fingertip_positions, dim=-1)   # (n, F)
 
-    # Typical fingertip-to-object-center distances for Allegro:
-    #   close grasp: ~0.03–0.05 m (fingertips near object surface)
-    #   open grasp:  ~0.08–0.12 m (fingertips further out)
-    # Map [0.02, 0.12] → joint scale [0.1, 0.9]
-    scale = ((ft_dist_from_obj - 0.02) / 0.10).clamp(0.0, 1.0) * 0.8 + 0.1  # (n, F)
+    # Map [0.02, 0.12] → scale [0.1, 0.9]
+    scale = ((ft_dist_from_obj - 0.02) / 0.10).clamp(0.0, 1.0) * 0.8 + 0.1
 
     for f in range(num_fingers):
-        s = scale[:, f:f+1]                                      # (n, 1)
+        s = scale[:, f:f+1]
         jrange = slice(f * dof_per_finger, f * dof_per_finger + dof_per_finger)
         q_low  = robot.data.soft_joint_pos_limits[env_ids, jrange, 0]
         q_high = robot.data.soft_joint_pos_limits[env_ids, jrange, 1]
-        # Interpolate between low and high limits based on scale
         default_q[:, jrange] = q_low + s * (q_high - q_low)
 
     robot.write_joint_state_to_sim(
@@ -313,16 +388,35 @@ def _set_robot_to_fingertip_config(
     )
 
 
+def _reset_to_default_pose(env, env_ids: torch.Tensor):
+    robot = env.scene["robot"]
+    joint_pos = robot.data.default_joint_pos[env_ids]
+    joint_vel = torch.zeros_like(joint_pos)
+    robot.write_joint_state_to_sim(joint_pos, joint_vel, env_ids=env_ids)
+    hand_cfg = getattr(env.cfg, "hand", None) or {}
+    num_fingers = hand_cfg.get("num_fingers", 4)
+    num_dof = joint_pos.shape[-1]
+    env.extras["target_fingertip_pos"] = torch.zeros(
+        env.num_envs, num_fingers * 3, device=env.device
+    )
+    env.extras["last_action"] = torch.zeros(
+        env.num_envs, num_dof, device=env.device
+    )
+    env.extras["current_action"] = torch.zeros(
+        env.num_envs, num_dof, device=env.device
+    )
+
+
 def _randomise_object_pose(env, env_ids: torch.Tensor):
     """Small random perturbation to object position and orientation."""
     obj = env.scene["object"]
     n   = len(env_ids)
 
     default_pos  = obj.data.default_root_state[env_ids, :3].clone()
-    pos_noise    = torch.randn(n, 3, device=env.device) * 0.015  # ±1.5 cm
+    pos_noise    = torch.randn(n, 3, device=env.device) * 0.015
     default_pos += pos_noise
 
-    angle = torch.randn(n, device=env.device) * 0.10             # ~6° std
+    angle = torch.randn(n, device=env.device) * 0.10
     axis  = torch.randn(n, 3, device=env.device)
     axis  = axis / (torch.norm(axis, dim=-1, keepdim=True) + 1e-8)
     quat  = _axis_angle_to_quat(axis, angle)
@@ -336,9 +430,9 @@ def _randomise_object_pose(env, env_ids: torch.Tensor):
 
 
 def _axis_angle_to_quat(axis: torch.Tensor, angle: torch.Tensor) -> torch.Tensor:
-    half    = angle / 2.0
-    sin_h   = torch.sin(half).unsqueeze(-1)
-    cos_h   = torch.cos(half).unsqueeze(-1)
+    half  = angle / 2.0
+    sin_h = torch.sin(half).unsqueeze(-1)
+    cos_h = torch.cos(half).unsqueeze(-1)
     return torch.cat([cos_h, axis * sin_h], dim=-1)
 
 
@@ -366,7 +460,6 @@ def _load_grasp_graph(env):
     with open(p, "rb") as f:
         graph = pickle.load(f)
 
-    # Wrap legacy single-object GraspGraph in a MultiObjectGraspGraph
     from grasp_generation.rrt_expansion import GraspGraph, MultiObjectGraspGraph
     if isinstance(graph, GraspGraph):
         multi = MultiObjectGraspGraph()
