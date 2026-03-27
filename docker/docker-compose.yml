@@ -62,9 +62,7 @@ services:
     # Volumes: mount host code & data for live editing without rebuild
     # --------------------------------------------------------------------------
     volumes:
-      - ..:/workspace/dexgen                   # live source mount
-      - dexgen_data:/workspace/dexgen/data     # persistent grasp data & datasets
-      - dexgen_logs:/workspace/dexgen/logs     # persistent training logs
+      - ..:/workspace/dexgen                   # live source mount (data/ and logs/ included)
       - /tmp/.X11-unix:/tmp/.X11-unix:rw       # X11 GUI (optional)
 
     # --------------------------------------------------------------------------
@@ -80,11 +78,5 @@ services:
 
     working_dir: /workspace/dexgen
 
-# ------------------------------------------------------------------------------
-# Named volumes (persist between container restarts)
-# ------------------------------------------------------------------------------
-volumes:
-  dexgen_data:
-    name: dexgen_data
-  dexgen_logs:
-    name: dexgen_logs
+# Named volumes removed: ..:/workspace/dexgen bind mount already covers
+# data/ and logs/ on the host filesystem directly.
