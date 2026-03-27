@@ -28,7 +28,7 @@
 #   ./docker/run.sh up
 #   ./docker/run.sh exec bash
 #   ./docker/run.sh train_rl -- --num_envs 512 --headless
-#   ./docker/run.sh exec /isaac-sim/python.sh scripts/run_allegro_hand.py --mode test
+#   ./docker/run.sh exec bash -c "/workspace/IsaacLab/isaaclab.sh -p scripts/run_allegro_hand.py --mode test"
 # ==============================================================================
 
 set -e
@@ -37,7 +37,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 COMPOSE_FILE="${SCRIPT_DIR}/docker-compose.yml"
 CONTAINER_NAME="dexgen"
-PYTHON_EXE="/isaac-sim/python.sh"
+ISAACLAB_SH="/workspace/IsaacLab/isaaclab.sh"
 
 # Colour helpers
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
@@ -124,7 +124,7 @@ cmd_test_allegro() {
     info "Running AllegroHand smoke test..."
     is_running || error "Container not running. Run './docker/run.sh up' first."
     docker exec -it "${CONTAINER_NAME}" \
-        ${PYTHON_EXE} scripts/run_allegro_hand.py --mode test
+        ${ISAACLAB_SH} -p scripts/run_allegro_hand.py --mode test
 }
 
 cmd_gen_grasps() {
@@ -132,14 +132,14 @@ cmd_gen_grasps() {
     is_running || error "Container not running."
     # Pass any extra args through (e.g. --num_grasps 1000)
     docker exec -it "${CONTAINER_NAME}" \
-        ${PYTHON_EXE} scripts/run_grasp_generation.py "$@"
+        ${ISAACLAB_SH} -p scripts/run_grasp_generation.py "$@"
 }
 
 cmd_train_rl() {
     info "Stage 1: Training RL policy..."
     is_running || error "Container not running."
     docker exec -it "${CONTAINER_NAME}" \
-        ${PYTHON_EXE} scripts/train_rl.py \
+        ${ISAACLAB_SH} -p scripts/train_rl.py \
             --grasp_graph data/grasp_graph.pkl \
             --num_envs 512 \
             --headless \
@@ -154,7 +154,7 @@ cmd_collect_data() {
         bash -c "ls logs/rl/allegro_anygrasp/checkpoints/*.pt 2>/dev/null | sort | tail -1")
     [ -z "${ckpt}" ] && error "No checkpoint found. Train RL first."
     docker exec -it "${CONTAINER_NAME}" \
-        ${PYTHON_EXE} scripts/collect_data.py \
+        ${ISAACLAB_SH} -p scripts/collect_data.py \
             --checkpoint "${ckpt}" \
             --num_episodes 50000 \
             "$@"
@@ -164,7 +164,7 @@ cmd_train_dexgen() {
     info "Stage 3: Training DexGen controller..."
     is_running || error "Container not running."
     docker exec -it "${CONTAINER_NAME}" \
-        ${PYTHON_EXE} scripts/train_dexgen.py \
+        ${ISAACLAB_SH} -p scripts/train_dexgen.py \
             --data data/dataset.h5 \
             "$@"
 }
