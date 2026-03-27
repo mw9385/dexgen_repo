@@ -25,6 +25,8 @@ services:
         ISAACLAB_VERSION: "v2.3.2"    # [수정됨] Isaac Sim 5.1.0과 호환되는 Isaac Lab 버전
     image: dexgen:latest
     container_name: dexgen
+    entrypoint: ["/bin/bash", "-lc"]
+    command: ["sleep infinity"]
 
     # --------------------------------------------------------------------------
     # GPU access (requires nvidia-container-toolkit on host)
@@ -54,6 +56,8 @@ services:
       # Set DISPLAY for GUI rendering (e.g. DISPLAY=:1 for virtual framebuffer)
       # Leave empty for headless training
       - DISPLAY=${DISPLAY:-}
+      # Forward X11 authorization so non-headless Isaac Sim can open a window.
+      - XAUTHORITY=${XAUTHORITY:-/run/user/1000/gdm/Xauthority}
       # Isaac Sim accepts EGL for headless GPU rendering
       - OMNI_KIT_ALLOW_ROOT=1
       - ACCEPT_EULA=Y                 # accept NVIDIA Isaac Sim EULA
@@ -64,6 +68,7 @@ services:
     volumes:
       - ..:/workspace/dexgen                   # live source mount (data/ and logs/ included)
       - /tmp/.X11-unix:/tmp/.X11-unix:rw       # X11 GUI (optional)
+      - ${XAUTHORITY:-/run/user/1000/gdm/Xauthority}:${XAUTHORITY:-/run/user/1000/gdm/Xauthority}:ro
 
     # --------------------------------------------------------------------------
     # Network
