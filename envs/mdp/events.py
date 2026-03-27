@@ -147,6 +147,8 @@ def reset_to_random_grasp(
     env.extras["last_action"][env_ids] = current_q
     env.extras["current_action"][env_ids] = current_q
 
+    _log_reset_debug(env, env_ids, start_fps)
+
 
 # ---------------------------------------------------------------------------
 # Start grasp sampling + nearest-neighbor goal selection
@@ -307,6 +309,59 @@ def _place_object_in_hand(
     obj.write_root_state_to_sim(root_state, env_ids=env_ids)
 
 
+def _log_reset_debug(
+    env,
+    env_ids: torch.Tensor,
+    start_fps_obj: torch.Tensor,   # (n, F, 3)
+):
+    """
+    Print high-signal reset diagnostics for the first few resets so we can see
+    whether the object is actually being placed into the sampled start grasp.
+    """
+    debug_cfg = getattr(env.cfg, "reset_debug", {}) or {}
+    if not bool(debug_cfg.get("enabled", True)):
+        return
+
+    limit = int(debug_cfg.get("max_prints", 8))
+    counter = int(env.extras.get("_reset_debug_counter", 0))
+    if counter >= limit:
+        return
+
+    robot = env.scene["robot"]
+    obj = env.scene["object"]
+    ft_ids = _get_fingertip_body_ids_from_env(robot, env)
+
+    ft_world = robot.data.body_pos_w[env_ids][:, ft_ids, :].clone()
+    obj_pos = obj.data.root_pos_w[env_ids].clone()
+    obj_quat = obj.data.root_quat_w[env_ids].clone()
+    ft_obj = _world_to_local_points(ft_world, obj_pos, obj_quat)
+
+    err = torch.norm(ft_obj - start_fps_obj, dim=-1)
+    mean_err = err.mean(dim=-1)
+    max_err = err.max(dim=-1).values
+
+    start_idx = env.extras.get("start_grasp_idx")
+    goal_idx = env.extras.get("goal_grasp_idx")
+
+    num_to_print = min(len(env_ids), max(limit - counter, 0))
+    for local_i in range(num_to_print):
+        env_i = int(env_ids[local_i].item())
+        start_i = int(start_idx[env_i].item()) if start_idx is not None else -1
+        goal_i = int(goal_idx[env_i].item()) if goal_idx is not None else -1
+        pos = obj_pos[local_i].detach().cpu().tolist()
+        quat = obj_quat[local_i].detach().cpu().tolist()
+        print(
+            "[reset-debug] "
+            f"env={env_i} start={start_i} goal={goal_i} "
+            f"obj_pos={[round(v, 4) for v in pos]} "
+            f"obj_quat={[round(v, 4) for v in quat]} "
+            f"mean_contact_err={mean_err[local_i].item():.5f} "
+            f"max_contact_err={max_err[local_i].item():.5f}"
+        )
+
+    env.extras["_reset_debug_counter"] = counter + num_to_print
+
+
 def _look_at_quat(direction: torch.Tensor) -> torch.Tensor:
     """Quaternion (w,x,y,z) that rotates +Z to point along `direction`."""
     N = direction.shape[0]
@@ -432,6 +487,27 @@ def _solve_object_pose_from_contacts(
     ).squeeze(-1)
     quat = _quat_from_rotmat(rot)
     return pos, quat
+
+
+def _world_to_local_points(
+    points_world: torch.Tensor,   # (n, F, 3)
+    frame_pos: torch.Tensor,      # (n, 3)
+    frame_quat: torch.Tensor,     # (n, 4)
+) -> torch.Tensor:
+    points_rel = points_world - frame_pos.unsqueeze(1)
+    quat_inv = torch.cat([frame_quat[:, :1], -frame_quat[:, 1:]], dim=-1)
+    return _quat_rotate_points(quat_inv, points_rel)
+
+
+def _quat_rotate_points(
+    quat: torch.Tensor,    # (n, 4)
+    points: torch.Tensor,  # (n, F, 3)
+) -> torch.Tensor:
+    quat = quat / (torch.norm(quat, dim=-1, keepdim=True) + 1e-8)
+    w = quat[:, 0:1].unsqueeze(-1)
+    xyz = quat[:, 1:].unsqueeze(1)
+    t = 2.0 * torch.cross(xyz.expand_as(points), points, dim=-1)
+    return points + w * t + torch.cross(xyz.expand_as(t), t, dim=-1)
 
 
 # ---------------------------------------------------------------------------
