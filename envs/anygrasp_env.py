@@ -384,10 +384,6 @@ if _ISAACLAB_AVAILABLE:
     @configclass
     class AnyGraspEnvCfg(ManagerBasedRLEnvCfg):
         scene:        AnyGraspSceneCfg        = AnyGraspSceneCfg(num_envs=MISSING, env_spacing=0.6)
-        
-        # [Fix] Added missing actions field
-        actions:      AnyGraspActionsCfg      = AnyGraspActionsCfg()
-        
         observations: AnyGraspObservationsCfg = AnyGraspObservationsCfg()
         actions:      AnyGraspActionsCfg      = AnyGraspActionsCfg()
         rewards:      AnyGraspRewardsCfg      = AnyGraspRewardsCfg()

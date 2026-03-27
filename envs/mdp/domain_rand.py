@@ -36,19 +36,17 @@ import torch
 # Reset-time DR events
 # ---------------------------------------------------------------------------
 
-def randomize_object_physics(
-    env,
-    env_ids: Optional[torch.Tensor] = None,
-    mass_range:        tuple = (0.03, 0.30),
-    friction_range:    tuple = (0.30, 1.20),
-    restitution_range: tuple = (0.00, 0.40),
-):
+def randomize_object_physics(env, env_ids: Optional[torch.Tensor] = None, **kwargs):
     """
     Randomise object mass and contact properties at episode reset.
 
     Uses Isaac Lab's physics material and body properties API.
     Values are stored to env.extras["dr_params"] for the critic.
     """
+    mass_range        = kwargs.get("mass_range",        (0.03, 0.30))
+    friction_range    = kwargs.get("friction_range",    (0.30, 1.20))
+    restitution_range = kwargs.get("restitution_range", (0.00, 0.40))
+
     if env_ids is None:
         env_ids = torch.arange(env.num_envs, device=env.device)
 
@@ -81,12 +79,7 @@ def randomize_object_physics(
                       damping_mean=None)   # damping updated separately
 
 
-def randomize_robot_physics(
-    env,
-    env_ids: Optional[torch.Tensor] = None,
-    damping_range:  tuple = (0.01, 0.30),
-    armature_range: tuple = (0.001, 0.03),
-):
+def randomize_robot_physics(env, env_ids: Optional[torch.Tensor] = None, **kwargs):
     """
     Randomise Allegro Hand joint damping and armature at episode reset.
 
@@ -94,16 +87,17 @@ def randomize_robot_physics(
     Armature: effective rotational inertia at each joint
     Both affect how quickly the joints respond to torque commands.
     """
+    damping_range  = kwargs.get("damping_range",  (0.01, 0.30))
+    armature_range = kwargs.get("armature_range", (0.001, 0.03))
+
     if env_ids is None:
         env_ids = torch.arange(env.num_envs, device=env.device)
 
     n     = len(env_ids)
     robot = env.scene["robot"]
-    # Read num_dof from hand config; fall back to actual joint count
     hand_cfg = getattr(env.cfg, "hand", None) or {}
     n_dof = hand_cfg.get("num_dof", robot.data.joint_pos.shape[-1])
 
-    # Per-joint randomisation
     damping  = torch.empty(n, n_dof, device=env.device).uniform_(*damping_range)
     armature = torch.empty(n, n_dof, device=env.device).uniform_(*armature_range)
 
@@ -115,17 +109,15 @@ def randomize_robot_physics(
     _update_dr_params(env, env_ids, damping_mean=damping_mean)
 
 
-def randomize_action_delay(
-    env,
-    env_ids: Optional[torch.Tensor] = None,
-    max_delay: int = 2,
-):
+def randomize_action_delay(env, env_ids: Optional[torch.Tensor] = None, **kwargs):
     """
     Randomise per-env action delay (0–max_delay steps).
 
     The delay buffer is initialised to zeros so the first actions are
     replayed from a neutral (zero-delta) start.
     """
+    max_delay = kwargs.get("max_delay", 2)
+
     if env_ids is None:
         env_ids = torch.arange(env.num_envs, device=env.device)
 
