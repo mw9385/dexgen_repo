@@ -87,6 +87,9 @@ try:
         RewardTermCfg as RewTerm,
         TerminationTermCfg as DoneTerm,
     )
+    # Isaac Lab v2.x Action Configuration
+    from isaaclab.envs.mdp import JointPositionActionCfg
+    
     from isaaclab.scene import InteractiveSceneCfg
     from isaaclab.sensors import ContactSensorCfg
     from isaaclab.utils import configclass
@@ -164,14 +167,8 @@ def _build_object_spawner(object_pool_specs: Optional[List[dict]] = None):
 if _ISAACLAB_AVAILABLE:
     @configclass
     class AnyGraspSceneCfg(InteractiveSceneCfg):
-        """
-        Scene: ground + Allegro Hand + randomised object pool
-               + ContactSensors on 4 fingertip links.
-        """
-
         ground = sim_utils.GroundPlaneCfg()
 
-        # Allegro Hand (wrist pose randomised per episode in events.py)
         robot: ArticulationCfg = ALLEGRO_HAND_CFG.replace(
             prim_path="{ENV_REGEX_NS}/AllegroHand",
             init_state=ArticulationCfg.InitialStateCfg(
@@ -180,7 +177,6 @@ if _ISAACLAB_AVAILABLE:
             ),
         )
 
-        # Manipulated object (spawner replaced by pool at cfg build time)
         object: RigidObjectCfg = RigidObjectCfg(
             prim_path="{ENV_REGEX_NS}/Object",
             spawn=sim_utils.CuboidCfg(
@@ -197,24 +193,10 @@ if _ISAACLAB_AVAILABLE:
             ),
         )
 
-        # -----------------------------------------------------------------------
-        # Tactile ContactSensors on 4 fingertip links
-        # -----------------------------------------------------------------------
-        # The standard Allegro Hand has no real tactile sensors.
-        # We attach ContactSensors to the 4 fingertip links to get physics-based
-        # contact force measurements.
-        #
-        # The sensor pattern matches all four fingertip links:
-        #   link_3.0_tip, link_7.0_tip, link_11.0_tip, link_15.0_tip
-        #
-        # From this we derive:
-        #   - Binary contact indicator  → actor obs (4 dims)
-        #   - Full 3-D contact forces   → critic privileged obs (12 dims)
-        # -----------------------------------------------------------------------
         fingertip_contact_sensor: ContactSensorCfg = ContactSensorCfg(
             prim_path="{ENV_REGEX_NS}/AllegroHand/.*_tip",
-            update_period=0.0,       # update every physics step
-            history_length=1,        # only need current forces
+            update_period=0.0,
+            history_length=1,
             debug_vis=False,
             filter_prim_paths_expr=["{ENV_REGEX_NS}/Object"],
         )
@@ -224,50 +206,29 @@ if _ISAACLAB_AVAILABLE:
 
 
 # ---------------------------------------------------------------------------
+# [Fix] Action Configuration
+# ---------------------------------------------------------------------------
+
+if _ISAACLAB_AVAILABLE:
+    @configclass
+    class AnyGraspActionsCfg:
+        """Action Manager: Allegro Hand 16 DoF Joint Position Control."""
+        joint_pos = JointPositionActionCfg(
+            asset_name="robot", 
+            joint_names=[".*"], 
+            use_default_offset=True
+        )
+
+
+# ---------------------------------------------------------------------------
 # Asymmetric Actor-Critic Observation groups
 # ---------------------------------------------------------------------------
 
 if _ISAACLAB_AVAILABLE:
     @configclass
     class AnyGraspObservationsCfg:
-        """
-        Two separate observation groups:
-          policy  → actor  (76 dims, available at deployment)
-          critic  → critic (104 dims, privileged, training only)
-        """
-
         @configclass
         class PolicyObs(ObsGroup):
-            """Actor observation — what the real robot can sense."""
-
-            joint_pos = ObsTerm(
-                func=mdp_obs.joint_positions_normalized,
-                noise=GaussianNoise(std=0.005),   # encoder noise ±0.005 rad
-            )
-            joint_vel = ObsTerm(
-                func=mdp_obs.joint_velocities_normalized,
-                noise=GaussianNoise(std=0.04),    # 0.04 in normalised space ≈ 0.2 rad/s
-            )
-            fingertip_pos = ObsTerm(
-                func=mdp_obs.fingertip_positions_in_object_frame,
-                noise=GaussianNoise(std=0.003),   # FK position uncertainty ±3 mm
-            )
-            target_fingertip_pos = ObsTerm(func=mdp_obs.target_fingertip_positions)
-            fingertip_contact    = ObsTerm(func=mdp_obs.fingertip_contact_binary)
-            last_action          = ObsTerm(func=mdp_obs.last_action)
-
-            def __post_init__(self):
-                self.enable_corruption  = True   # apply noise above
-                self.concatenate_terms  = True
-
-        @configclass
-        class CriticObs(ObsGroup):
-            """
-            Critic (privileged) observation — includes simulation-only info.
-            No noise applied to privileged terms.
-            """
-
-            # Re-use actor terms (with noise for consistency)
             joint_pos = ObsTerm(
                 func=mdp_obs.joint_positions_normalized,
                 noise=GaussianNoise(std=0.005),
@@ -284,16 +245,33 @@ if _ISAACLAB_AVAILABLE:
             fingertip_contact    = ObsTerm(func=mdp_obs.fingertip_contact_binary)
             last_action          = ObsTerm(func=mdp_obs.last_action)
 
-            # Privileged: true object state
+            def __post_init__(self):
+                self.enable_corruption  = True
+                self.concatenate_terms  = True
+
+        @configclass
+        class CriticObs(ObsGroup):
+            joint_pos = ObsTerm(
+                func=mdp_obs.joint_positions_normalized,
+                noise=GaussianNoise(std=0.005),
+            )
+            joint_vel = ObsTerm(
+                func=mdp_obs.joint_velocities_normalized,
+                noise=GaussianNoise(std=0.04),
+            )
+            fingertip_pos = ObsTerm(
+                func=mdp_obs.fingertip_positions_in_object_frame,
+                noise=GaussianNoise(std=0.003),
+            )
+            target_fingertip_pos = ObsTerm(func=mdp_obs.target_fingertip_positions)
+            fingertip_contact    = ObsTerm(func=mdp_obs.fingertip_contact_binary)
+            last_action          = ObsTerm(func=mdp_obs.last_action)
+
             object_pos   = ObsTerm(func=mdp_obs.object_position_world)
             object_quat  = ObsTerm(func=mdp_obs.object_orientation_world)
             object_linvel = ObsTerm(func=mdp_obs.object_linear_velocity)
             object_angvel = ObsTerm(func=mdp_obs.object_angular_velocity)
-
-            # Privileged: full contact forces from sensor
             contact_forces = ObsTerm(func=mdp_obs.fingertip_contact_forces)
-
-            # Privileged: DR parameters
             dr_params = ObsTerm(func=mdp_obs.domain_randomization_params)
 
             def __post_init__(self):
@@ -327,8 +305,6 @@ if _ISAACLAB_AVAILABLE:
 if _ISAACLAB_AVAILABLE:
     @configclass
     class AnyGraspRewardsCfg:
-
-        # --- Positive ---
         fingertip_tracking = RewTerm(
             func=mdp_rewards.fingertip_tracking_reward,
             weight=10.0,
@@ -343,8 +319,6 @@ if _ISAACLAB_AVAILABLE:
             func=mdp_rewards.fingertip_contact_reward,
             weight=2.0,
         )
-
-        # --- Negative ---
         action_rate = RewTerm(
             func=mdp_rewards.action_rate_penalty,
             weight=-0.01,
@@ -371,64 +345,33 @@ if _ISAACLAB_AVAILABLE:
 
 
 # ---------------------------------------------------------------------------
-# Terminations
+# Terminations & Events
 # ---------------------------------------------------------------------------
 
 if _ISAACLAB_AVAILABLE:
     @configclass
     class AnyGraspTerminationsCfg:
         time_out = DoneTerm(func=mdp_events.time_out, time_out=True)
-        object_drop = DoneTerm(
-            func=mdp_events.object_dropped,
-            params={"min_height": 0.2},
-        )
+        object_drop = DoneTerm(func=mdp_events.object_dropped, params={"min_height": 0.2})
 
-
-# ---------------------------------------------------------------------------
-# Events (reset + domain randomization)
-# ---------------------------------------------------------------------------
-
-if _ISAACLAB_AVAILABLE:
     @configclass
     class AnyGraspEventsCfg:
-        """
-        Reset events fire at every episode reset (mode="reset").
-        The order matters: randomise physics first, then set poses.
-        """
-
-        # 1. Randomise object physics (mass, friction, restitution)
         randomize_object_physics = EventTerm(
             func=mdp_dr.randomize_object_physics,
             mode="reset",
-            params={
-                "mass_range":        (0.03, 0.30),
-                "friction_range":    (0.30, 1.20),
-                "restitution_range": (0.00, 0.40),
-            },
+            params={"mass_range": (0.03, 0.30), "friction_range": (0.30, 1.20), "restitution_range": (0.00, 0.40)},
         )
-
-        # 2. Randomise robot joint dynamics (damping, armature)
         randomize_robot_physics = EventTerm(
             func=mdp_dr.randomize_robot_physics,
             mode="reset",
-            params={
-                "damping_range":  (0.01, 0.30),
-                "armature_range": (0.001, 0.03),
-            },
+            params={"damping_range": (0.01, 0.30), "armature_range": (0.001, 0.03)},
         )
-
-        # 3. Randomise action delay (0–2 steps)
         randomize_action_delay = EventTerm(
             func=mdp_dr.randomize_action_delay,
             mode="reset",
             params={"max_delay": 2},
         )
-
-        # 4. Randomise wrist position + set start/goal grasps
-        reset_to_random_grasp = EventTerm(
-            func=mdp_events.reset_to_random_grasp,
-            mode="reset",
-        )
+        reset_to_random_grasp = EventTerm(func=mdp_events.reset_to_random_grasp, mode="reset")
 
 
 # ---------------------------------------------------------------------------
@@ -438,13 +381,11 @@ if _ISAACLAB_AVAILABLE:
 if _ISAACLAB_AVAILABLE:
     @configclass
     class AnyGraspEnvCfg(ManagerBasedRLEnvCfg):
-        """
-        Full environment config for asymmetric-AC AnyGrasp-to-AnyGrasp.
-
-        Actor sees 76-dim obs; critic sees 104-dim privileged obs.
-        """
-
         scene:        AnyGraspSceneCfg        = AnyGraspSceneCfg(num_envs=MISSING, env_spacing=0.6)
+        
+        # [Fix] Added missing actions field
+        actions:      AnyGraspActionsCfg      = AnyGraspActionsCfg()
+        
         observations: AnyGraspObservationsCfg = AnyGraspObservationsCfg()
         actions:      AnyGraspActionsCfg      = AnyGraspActionsCfg()
         rewards:      AnyGraspRewardsCfg      = AnyGraspRewardsCfg()
@@ -454,23 +395,7 @@ if _ISAACLAB_AVAILABLE:
         grasp_graph_path:    str  = "data/grasp_graph.pkl"
         object_pool_specs:   list = None   # type: ignore
         wrist_randomization: dict = None   # type: ignore
-
-        # ------------------------------------------------------------------
-        # Hand configuration
-        # ------------------------------------------------------------------
-        # Controls fingertip count, DOF, and link names used by observations,
-        # events, and domain randomization.  Override for non-Allegro hands.
-        #
-        # Example – 3-finger gripper:
-        #   hand = {
-        #     "name": "custom_3f",
-        #     "num_fingers": 3,
-        #     "num_dof": 9,
-        #     "dof_per_finger": 3,
-        #     "fingertip_links": ["finger0_tip", "finger1_tip", "finger2_tip"],
-        #   }
-        # ------------------------------------------------------------------
-        hand: dict = None   # type: ignore  (defaults set in __post_init__)
+        hand:                dict = None   # type: ignore
 
         episode_length_s: float = 10.0
         action_scale:     float = 0.1
@@ -487,39 +412,20 @@ if _ISAACLAB_AVAILABLE:
 
             if self.wrist_randomization is None:
                 self.wrist_randomization = {
-                    "pos_radius_min": 0.12,
-                    "pos_radius_max": 0.22,
-                    "pos_height_min": 0.08,
-                    "pos_height_max": 0.20,
-                    "rot_std_deg":    15.0,
+                    "pos_radius_min": 0.12, "pos_radius_max": 0.22,
+                    "pos_height_min": 0.08, "pos_height_max": 0.20,
+                    "rot_std_deg": 15.0,
                 }
 
-            # Default hand config = Allegro Hand
             if self.hand is None:
                 self.hand = {
-                    "name":            "allegro",
-                    "num_fingers":     4,
-                    "num_dof":         16,
-                    "dof_per_finger":  4,
-                    "fingertip_links": [
-                        "link_3.0_tip",   # index
-                        "link_7.0_tip",   # middle
-                        "link_11.0_tip",  # ring
-                        "link_15.0_tip",  # thumb
-                    ],
+                    "name": "allegro", "num_fingers": 4, "num_dof": 16, "dof_per_finger": 4,
+                    "fingertip_links": ["link_3.0_tip", "link_7.0_tip", "link_11.0_tip", "link_15.0_tip"],
                 }
+            
+            # [Fix] Apply action_scale to the joint position action term
+            self.actions.joint_pos.scale = self.action_scale
 
-    def set_object_pool(cfg: AnyGraspEnvCfg, pool) -> AnyGraspEnvCfg:
-        """Attach an ObjectPool to the env config."""
-        cfg.object_pool_specs = pool.get_isaac_lab_specs()
-        spawner = _build_object_spawner(cfg.object_pool_specs)
-        cfg.scene.object = cfg.scene.object.replace(spawn=spawner)
-        return cfg
-
-
-# ---------------------------------------------------------------------------
-# Gymnasium registration
-# ---------------------------------------------------------------------------
 
 def register_anygrasp_env():
     if not _ISAACLAB_AVAILABLE:

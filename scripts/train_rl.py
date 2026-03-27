@@ -8,14 +8,14 @@ The trained policy is used in Stage 2 to collect a dataset of
 successful grasp transitions for DexGen controller training.
 
 Usage:
-    python scripts/train_rl.py \\
-        --grasp_graph data/grasp_graph.pkl \\
-        --num_envs 512 \\
-        --max_iterations 30000 \\
+    python scripts/train_rl.py \
+        --grasp_graph data/grasp_graph.pkl \
+        --num_envs 512 \
+        --max_iterations 30000 \
         --headless
 
     # Resume from checkpoint
-    python scripts/train_rl.py \\
+    python scripts/train_rl.py \
         --resume logs/rl/allegro_anygrasp/checkpoints/model_10000.pt
 """
 
@@ -63,18 +63,7 @@ def load_config(path: str) -> dict:
 
 
 def apply_dr_config(env_cfg, dr_cfg: dict):
-    """
-    Inject domain randomisation ranges from the YAML config into the
-    environment's EventsCfg.  Only keys present in the YAML are overridden.
-
-    Example YAML section::
-
-        domain_randomization:
-          object_physics:
-            mass_range: [0.05, 0.25]
-          action_delay:
-            max_delay: 3
-    """
+    # (기존 코드와 동일)
     if not dr_cfg:
         return
 
@@ -113,10 +102,7 @@ def apply_dr_config(env_cfg, dr_cfg: dict):
 
 
 def build_rl_games_config(args) -> dict:
-    """
-    Build rl_games PPO config dict for the AnyGrasp-to-AnyGrasp task.
-    Based on Isaac Lab's AllegroHand config with tuned hyperparameters.
-    """
+    # (기존 코드와 동일)
     return {
         "params": {
             "seed": args.seed,
@@ -154,7 +140,6 @@ def build_rl_games_config(args) -> dict:
                 "device": args.device,
                 "device_name": args.device,
                 "multi_gpu": False,
-                # PPO hyperparameters (tuned for dexterous manipulation)
                 "ppo": True,
                 "mixed_precision": False,
                 "normalize_input": True,
@@ -165,7 +150,7 @@ def build_rl_games_config(args) -> dict:
                 },
                 "normalize_advantage": True,
                 "gamma": 0.99,
-                "tau": 0.95,               # GAE lambda
+                "tau": 0.95,               
                 "learning_rate": 5e-4,
                 "lr_schedule": "adaptive",
                 "lr_threshold": 0.008,
@@ -177,15 +162,14 @@ def build_rl_games_config(args) -> dict:
                 "grad_norm": 1.0,
                 "entropy_coef": 0.0,
                 "truncate_grads": True,
-                "e_clip": 0.2,             # PPO clip ratio
-                "num_steps_per_env": 8,    # rollout horizon
+                "e_clip": 0.2,             
+                "num_steps_per_env": 8,    
                 "mini_epochs": 5,
                 "minibatch_size": 16384,
                 "critic_coef": 4,
                 "clip_value": True,
                 "seq_length": 4,
                 "bounds_loss_coef": 0.0001,
-                # Logging
                 "log_dir": args.log_dir,
             },
         }
@@ -221,19 +205,22 @@ def main():
         print(f"ERROR: GraspGraph not found at {args.grasp_graph}")
         print("Run Stage 0 first:")
         print("  python scripts/run_grasp_generation.py")
+        sim_app.close()
         sys.exit(1)
 
-    # Import Isaac Lab (must be installed)
+    # Import Isaac Lab dependencies (런타임 초기화가 완료된 이후에 import)
     try:
         import isaaclab  # noqa: F401
     except ImportError:
         print("ERROR: Isaac Lab not found. Run ./setup_isaaclab.sh first.")
+        sim_app.close()
         sys.exit(1)
 
     try:
         import rl_games  # noqa: F401
     except ImportError:
         print("ERROR: rl_games not found. Run: pip install rl_games")
+        sim_app.close()
         sys.exit(1)
 
     from isaaclab.envs import ManagerBasedRLEnv
@@ -256,7 +243,7 @@ def main():
     if args.headless:
         env_cfg.viewer = None
 
-    # Apply domain-randomization ranges from YAML (overrides hardcoded defaults)
+    # Apply domain-randomization
     apply_dr_config(env_cfg, cfg_file.get("domain_randomization", {}))
 
     print(f"[Stage 1] Config:   {args.config}")
@@ -296,6 +283,9 @@ def main():
     print(f"Checkpoints saved to: {args.log_dir}")
     print(f"\nNext: collect dataset")
     print(f"  python scripts/collect_data.py --log_dir {args.log_dir}")
+    
+    # 런타임 종료
+    sim_app.close()
 
 
 def _to_rl_obs(obs):
