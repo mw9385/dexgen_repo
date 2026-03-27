@@ -387,6 +387,7 @@ if _ISAACLAB_AVAILABLE:
         grasp_graph_path:    str  = "data/grasp_graph.pkl"
         object_pool_specs:   list = None   # type: ignore
         wrist_randomization: dict = None   # type: ignore
+        reset_randomization: dict = None   # type: ignore
         hand:                dict = None   # type: ignore
 
         episode_length_s: float = 10.0
@@ -407,6 +408,18 @@ if _ISAACLAB_AVAILABLE:
                     "pos_radius_min": 0.12, "pos_radius_max": 0.22,
                     "pos_height_min": 0.08, "pos_height_max": 0.20,
                     "rot_std_deg": 15.0,
+                }
+
+            if self.reset_randomization is None:
+                # Keep resets close to the Stage 0 grasp-generation frame.
+                # The start grasp should come from grasp_set; reset-time
+                # randomization is intentionally small so it does not destroy
+                # that initial configuration before RL begins.
+                self.reset_randomization = {
+                    "object_pos_jitter_std": 0.0,
+                    "object_rot_jitter_deg": 0.0,
+                    "wrist_pos_jitter_std": 0.0,
+                    "wrist_rot_std_deg": 0.0,
                 }
 
             if self.hand is None:
