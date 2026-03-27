@@ -92,12 +92,14 @@ build_image() {
 # ------------------------------------------------------------------------------
 verify() {
     info "Verifying GPU access inside container..."
-    docker run --rm --gpus all dexgen:latest nvidia-smi \
+    # 핵심 수정 사항: -e "ACCEPT_EULA=Y" 추가
+    docker run --rm --gpus all -e "ACCEPT_EULA=Y" dexgen:latest nvidia-smi \
         && info "GPU OK" \
         || error "GPU not accessible inside container. Check nvidia-container-toolkit."
 
     info "Verifying Isaac Lab..."
-    docker run --rm --gpus all dexgen:latest \
+    # 핵심 수정 사항: -e "ACCEPT_EULA=Y" 추가
+    docker run --rm --gpus all -e "ACCEPT_EULA=Y" dexgen:latest \
         python3 -c "import isaaclab; print(f'Isaac Lab: {isaaclab.__version__}')" \
         && info "Isaac Lab OK" \
         || warn "Isaac Lab import failed — may need DISPLAY for full init."
@@ -129,10 +131,10 @@ echo " Setup Complete!"
 echo "========================================"
 echo ""
 echo "Quick start:"
-echo "  ./docker/run.sh up                    # start container"
-echo "  ./docker/run.sh test_allegro          # smoke test"
-echo "  ./docker/run.sh gen_grasps            # Stage 0"
-echo "  ./docker/run.sh train_rl              # Stage 1"
-echo "  ./docker/run.sh exec bash             # open shell"
+echo "  ./docker/run.sh up                 # start container"
+echo "  ./docker/run.sh test_allegro       # smoke test"
+echo "  ./docker/run.sh gen_grasps         # Stage 0"
+echo "  ./docker/run.sh train_rl           # Stage 1"
+echo "  ./docker/run.sh exec bash          # open shell"
 echo ""
 echo "Full pipeline docs: README.md"

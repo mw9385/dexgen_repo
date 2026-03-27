@@ -28,6 +28,9 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+# [수정] AppLauncher는 엔진 구동을 위해 최상단에서 import 가능합니다.
+from isaaclab.app import AppLauncher
+
 
 def parse_args():
     p = argparse.ArgumentParser(description="DexGen Stage 1: RL Training")
@@ -37,18 +40,18 @@ def parse_args():
                    help="Number of parallel environments")
     p.add_argument("--max_iterations", type=int, default=30000,
                    help="Maximum PPO training iterations")
-    p.add_argument("--headless", action="store_true", default=False,
-                   help="Run without rendering")
+                   
     p.add_argument("--resume", type=str, default=None,
                    help="Resume from checkpoint path")
     p.add_argument("--log_dir", type=str, default="logs/rl/allegro_anygrasp",
                    help="Training log / checkpoint directory")
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--device", type=str, default="cuda",
-                   choices=["cuda", "cpu"])
     p.add_argument("--config", type=str,
                    default=str(Path(__file__).parent.parent / "configs" / "rl_training.yaml"),
                    help="Path to YAML config (ppo / domain_randomization settings)")
+    
+    # AppLauncher가 --headless를 포함한 필수 인자들을 자동으로 덮어씌웁니다.
+    AppLauncher.add_app_launcher_args(p)
     return p.parse_args()
 
 
