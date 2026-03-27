@@ -105,7 +105,43 @@ def apply_dr_config(env_cfg, dr_cfg: dict):
             obs.critic.fingertip_pos.noise.std = float(noise["fingertip_pos_std"])
 
 
-def build_rl_games_config(args) -> dict:
+def _resolve_valid_minibatch_size(batch_size: int, requested_minibatch: int, seq_length: int) -> int:
+    """Return the largest valid minibatch not exceeding the requested size."""
+    # rl_games requires batch_size % minibatch_size == 0.
+    # When sequence training is enabled, minibatch_size should also align with seq_length.
+    max_candidate = min(requested_minibatch, batch_size)
+    alignment = max(seq_length, 1)
+
+    minibatch_size = None
+    for candidate in range(max_candidate, 0, -alignment):
+        if candidate % alignment == 0 and batch_size % candidate == 0:
+            minibatch_size = candidate
+            break
+
+    if minibatch_size is None:
+        raise ValueError(
+            f"Could not find a valid minibatch size for batch_size={batch_size}, "
+            f"requested_minibatch={requested_minibatch}, seq_length={seq_length}."
+        )
+
+    return minibatch_size
+
+
+def _resolve_ppo_sizes(args, cfg_file: dict) -> tuple[int, int, int]:
+    """Resolve PPO rollout sizes so rl_games batch constraints always hold."""
+    ppo_cfg = cfg_file.get("ppo", {})
+
+    horizon_length = int(ppo_cfg.get("horizon_length", 16))
+    seq_length = int(ppo_cfg.get("seq_length", 4))
+    requested_minibatch = int(ppo_cfg.get("minibatch_size", 16384))
+
+    batch_size = args.num_envs * horizon_length
+    minibatch_size = _resolve_valid_minibatch_size(batch_size, requested_minibatch, seq_length)
+
+    return horizon_length, seq_length, minibatch_size
+
+
+def build_rl_games_config(args, cfg_file: dict) -> dict:
     """
     Build rl_games PPO config.
 
@@ -116,6 +152,17 @@ def build_rl_games_config(args) -> dict:
       - minibatch_size: 16384   (was 4096 → matches yaml)
       - horizon_length: 16      (was 8 → more stable gradient estimates)
     """
+    ppo_cfg = cfg_file.get("ppo", {})
+    cv_cfg = cfg_file.get("central_value", {})
+
+    horizon_length, seq_length, minibatch_size = _resolve_ppo_sizes(args, cfg_file)
+    batch_size = args.num_envs * horizon_length
+    cv_minibatch_size = _resolve_valid_minibatch_size(
+        batch_size,
+        int(cv_cfg.get("minibatch_size", minibatch_size)),
+        seq_length,
+    )
+
     return {
         "params": {
             "seed": args.seed,
@@ -166,50 +213,48 @@ def build_rl_games_config(args) -> dict:
                 "normalize_advantage": True,
                 "gamma": 0.99,
                 "tau": 0.95,
-                "learning_rate": 5e-4,
-                "lr_schedule": "adaptive",
-                "lr_threshold": 0.008,
+                "learning_rate": float(ppo_cfg.get("learning_rate", 5e-4)),
+                "lr_schedule": ppo_cfg.get("lr_schedule", "adaptive"),
+                "lr_threshold": float(ppo_cfg.get("lr_threshold", 0.008)),
                 "score_to_win": 20000,
                 "max_epochs": args.max_iterations,
                 "save_best_after": 100,
                 "save_frequency": 1000,
                 "print_stats": True,
-                "grad_norm": 1.0,
-                "entropy_coef": 0.0,
+                "grad_norm": float(ppo_cfg.get("grad_norm", 1.0)),
+                "entropy_coef": float(ppo_cfg.get("entropy_coef", 0.0)),
                 "truncate_grads": True,
-                "e_clip": 0.2,
-                "kl_threshold": 0.008,
-                # [FIX] horizon_length: 16 (was 8) — more stable gradient estimates
-                "horizon_length": 16,
-                "num_steps_per_env": 16,
-                "mini_epochs": 5,
-                # [FIX] minibatch_size: 16384 (was 4096) — matches yaml config
-                "minibatch_size": 16384,
-                "critic_coef": 4,
+                "e_clip": float(ppo_cfg.get("e_clip", 0.2)),
+                "kl_threshold": float(ppo_cfg.get("kl_threshold", 0.008)),
+                "horizon_length": horizon_length,
+                "num_steps_per_env": int(ppo_cfg.get("num_steps_per_env", horizon_length)),
+                "mini_epochs": int(ppo_cfg.get("mini_epochs", 5)),
+                "minibatch_size": minibatch_size,
+                "critic_coef": float(ppo_cfg.get("critic_coef", 4)),
                 "clip_value": True,
-                "seq_length": 4,
+                "seq_length": seq_length,
                 "bounds_loss_coef": 0.0001,
                 "log_dir": args.log_dir,
 
                 # Asymmetric Actor-Critic
                 "use_central_value": True,
                 "central_value_config": {
-                    "minibatch_size": 16384,
-                    "mini_epochs": 4,
-                    "learning_rate": 5e-4,
-                    "lr_schedule": "adaptive",
-                    "lr_threshold": 0.008,
+                    "minibatch_size": cv_minibatch_size,
+                    "mini_epochs": int(cv_cfg.get("mini_epochs", 4)),
+                    "learning_rate": float(cv_cfg.get("learning_rate", 5e-4)),
+                    "lr_schedule": cv_cfg.get("lr_schedule", "adaptive"),
+                    "lr_threshold": float(cv_cfg.get("lr_threshold", 0.008)),
                     "clip_value": True,
                     # [FIX] normalize_input: True for critic as well
-                    "normalize_input": True,
+                    "normalize_input": bool(cv_cfg.get("normalize_input", True)),
                     "truncate_grads": True,
-                    "grad_norm": 1.0,
+                    "grad_norm": float(cv_cfg.get("grad_norm", 1.0)),
                     "network": {
                         "name": "actor_critic",
                         "central_value": True,
                         "mlp": {
-                            "units": [512, 512, 256],
-                            "activation": "elu",
+                            "units": cv_cfg.get("units", [512, 512, 256]),
+                            "activation": cv_cfg.get("activation", "elu"),
                             "d2rl": False,
                             "initializer": {"name": "default"},
                             "regularizer": {"name": "None"},
@@ -305,7 +350,12 @@ def main():
         ),
     )
 
-    cfg = build_rl_games_config(args)
+    cfg = build_rl_games_config(args, cfg_file)
+    ppo_runtime_cfg = cfg["params"]["config"]
+    print(f"[Stage 1] Horizon length: {ppo_runtime_cfg['horizon_length']}")
+    print(f"[Stage 1] Seq length: {ppo_runtime_cfg['seq_length']}")
+    print(f"[Stage 1] Batch size: {args.num_envs * ppo_runtime_cfg['horizon_length']}")
+    print(f"[Stage 1] Minibatch size: {ppo_runtime_cfg['minibatch_size']}")
     runner = Runner(IsaacAlgoObserver())
     runner.load(cfg)
     runner.reset()
