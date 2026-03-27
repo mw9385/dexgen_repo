@@ -2,6 +2,32 @@
 # Stage 0 – Grasp Generation Configuration (Multi-Object Pool)
 # ==============================================================================
 
+# ==============================================================================
+# Hand configuration
+# ==============================================================================
+# num_fingers    : how many fingertip contact points to use (2 / 3 / 4 / 5)
+# num_dof        : total controllable DOF (used by DR and obs dimension)
+# dof_per_finger : joints per finger (num_dof = num_fingers × dof_per_finger)
+# fingertip_links: URDF link names in the same order as finger indices
+#                  (used by Isaac Lab ContactSensor & FK lookup)
+#
+# Pre-configured hands:
+#   allegro  : num_fingers=4, num_dof=16, dof_per_finger=4
+#   shadow   : num_fingers=5, num_dof=20, dof_per_finger=4
+#   leap     : num_fingers=4, num_dof=16, dof_per_finger=4
+# ==============================================================================
+
+hand:
+  name: allegro
+  num_fingers: 4
+  num_dof: 16
+  dof_per_finger: 4
+  fingertip_links:
+    - link_3.0_tip    # index
+    - link_7.0_tip    # middle
+    - link_11.0_tip   # ring
+    - link_15.0_tip   # thumb
+
 # Object pool — generates grasps for all combinations of shape × size
 object_pool:
   shapes: [cube, sphere, cylinder]   # primitive shapes to include

@@ -46,10 +46,14 @@ class GraspGraph:
 
     Nodes: grasp configurations (GraspSet)
     Edges: (i, j) pairs reachable by continuous fingertip motion
+
+    num_fingers is stored explicitly so downstream code (env, obs, events)
+    can adapt without inspecting grasp data shapes.
     """
     grasp_set: GraspSet
     edges: List[Tuple[int, int]] = field(default_factory=list)
     object_name: str = ""
+    num_fingers: int = 4
 
     def __len__(self):
         return len(self.grasp_set)
@@ -121,6 +125,13 @@ class MultiObjectGraspGraph:
     @property
     def object_names(self) -> List[str]:
         return list(self.graphs.keys())
+
+    @property
+    def num_fingers(self) -> int:
+        """Number of contact points per grasp (consistent across all objects)."""
+        if not self.graphs:
+            return 4
+        return next(iter(self.graphs.values())).num_fingers
 
     def add(self, graph: GraspGraph, spec: dict):
         """Add a per-object GraspGraph with its Isaac Lab spawn spec."""
@@ -253,16 +264,21 @@ class RRTGraspExpander:
         return new_normals / (norms + 1e-8)
 
     def _build_graph(self, grasp_set: GraspSet) -> GraspGraph:
-        positions = grasp_set.as_array()   # (N, 12)
+        positions = grasp_set.as_array()   # (N, num_fingers*3)
         N = len(grasp_set)
+        # Infer num_fingers from actual grasp data (robust to any hand)
+        num_fingers = grasp_set.grasps[0].fingertip_positions.shape[0] if N > 0 else 4
         edges = []
         for i in range(N):
             diffs = positions[i + 1:] - positions[i]
-            dists = np.linalg.norm(diffs.reshape(-1, 4, 3), axis=-1).mean(axis=-1)
+            dists = np.linalg.norm(
+                diffs.reshape(-1, num_fingers, 3), axis=-1
+            ).mean(axis=-1)
             for k in np.where(dists < self.delta_max)[0]:
                 edges.append((i, i + 1 + k))
         return GraspGraph(
             grasp_set=grasp_set,
             edges=edges,
             object_name=grasp_set.object_name,
+            num_fingers=num_fingers,
         )

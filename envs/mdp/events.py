@@ -60,6 +60,9 @@ def reset_to_random_grasp(
     n = len(env_ids)
     import numpy as np
 
+    # num_fingers from graph (robust) or env cfg fallback
+    num_fingers = getattr(graph, "num_fingers", 4)
+
     # ------------------------------------------------------------------
     # 1. Sample random object + (start, goal) grasp pair per env
     # ------------------------------------------------------------------
@@ -73,17 +76,18 @@ def reset_to_random_grasp(
 
     start_fps = torch.tensor(
         np.stack(start_fps_list), device=env.device, dtype=torch.float32
-    )   # (n, 4, 3)
+    )   # (n, num_fingers, 3)
     goal_fps = torch.tensor(
         np.stack(goal_fps_list), device=env.device, dtype=torch.float32
-    )   # (n, 4, 3)
+    )   # (n, num_fingers, 3)
 
+    fp_dim = num_fingers * 3
     # Store goal
     if "target_fingertip_pos" not in env.extras:
         env.extras["target_fingertip_pos"] = torch.zeros(
-            env.num_envs, 12, device=env.device
+            env.num_envs, fp_dim, device=env.device
         )
-    env.extras["target_fingertip_pos"][env_ids] = goal_fps.reshape(n, 12)
+    env.extras["target_fingertip_pos"][env_ids] = goal_fps.reshape(n, fp_dim)
 
     # ------------------------------------------------------------------
     # 2. Randomise object pose first (wrist will be placed relative to it)
@@ -232,33 +236,39 @@ def _reset_to_default_pose(env, env_ids: torch.Tensor):
     joint_pos = robot.data.default_joint_pos[env_ids]
     joint_vel = torch.zeros_like(joint_pos)
     robot.write_joint_state_to_sim(joint_pos, joint_vel, env_ids=env_ids)
+    hand_cfg = getattr(env.cfg, "hand", None) or {}
+    num_fingers = hand_cfg.get("num_fingers", 4)
     env.extras["target_fingertip_pos"] = torch.zeros(
-        env.num_envs, 12, device=env.device
+        env.num_envs, num_fingers * 3, device=env.device
     )
 
 
 def _set_robot_to_fingertip_config(
     env,
     env_ids: torch.Tensor,
-    fingertip_positions: torch.Tensor,   # (n, 4, 3) object frame
+    fingertip_positions: torch.Tensor,   # (n, num_fingers, 3) object frame
 ):
     """Approximate IK: scale joint angles to reach fingertip targets."""
     robot = env.scene["robot"]
     obj   = env.scene["object"]
     n     = len(env_ids)
 
-    default_q = robot.data.default_joint_pos[env_ids].clone()   # (n, 16)
+    hand_cfg      = getattr(env.cfg, "hand", None) or {}
+    num_fingers   = hand_cfg.get("num_fingers",    fingertip_positions.shape[1])
+    dof_per_finger = hand_cfg.get("dof_per_finger", 4)
+
+    default_q = robot.data.default_joint_pos[env_ids].clone()   # (n, num_dof)
     obj_pos   = obj.data.root_pos_w[env_ids]                    # (n, 3)
-    ft_world  = fingertip_positions + obj_pos.unsqueeze(1)      # (n, 4, 3)
+    ft_world  = fingertip_positions + obj_pos.unsqueeze(1)      # (n, F, 3)
     palm_pos  = robot.data.body_pos_w[env_ids, 0, :]            # (n, 3) base link
-    ft_dist   = torch.norm(ft_world - palm_pos.unsqueeze(1), dim=-1)  # (n, 4)
+    ft_dist   = torch.norm(ft_world - palm_pos.unsqueeze(1), dim=-1)  # (n, F)
 
     # Map distance [0.05, 0.18] → joint scale [0.2, 1.0]
-    scale = ((ft_dist - 0.05) / 0.13).clamp(0, 1) * 0.8 + 0.2   # (n, 4)
+    scale = ((ft_dist - 0.05) / 0.13).clamp(0, 1) * 0.8 + 0.2   # (n, F)
 
-    for f in range(4):
+    for f in range(num_fingers):
         s = scale[:, f:f+1]
-        jrange = slice(f * 4, f * 4 + 4)
+        jrange = slice(f * dof_per_finger, f * dof_per_finger + dof_per_finger)
         q_upper = robot.data.soft_joint_pos_limits[env_ids, jrange, 1]
         default_q[:, jrange] = q_upper * s
 
