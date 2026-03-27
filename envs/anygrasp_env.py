@@ -50,7 +50,6 @@ Implements the core RL environment from DexterityGen §3.2 with:
     - fingertip pos noise: N(0, 0.003) m
 =======================================================================
 """
-
 from __future__ import annotations
 
 from dataclasses import MISSING
@@ -77,7 +76,7 @@ try:
         pass
 
     import isaaclab.sim as sim_utils
-    from isaaclab.assets import ArticulationCfg, RigidObjectCfg
+    from isaaclab.assets import ArticulationCfg, RigidObjectCfg, AssetBaseCfg
     from isaaclab.envs import ManagerBasedRLEnvCfg
     from isaaclab.managers import (
         ActionTermCfg as ActionTerm,
@@ -167,8 +166,10 @@ def _build_object_spawner(object_pool_specs: Optional[List[dict]] = None):
 if _ISAACLAB_AVAILABLE:
     @configclass
     class AnyGraspSceneCfg(InteractiveSceneCfg):
-        ground = sim_utils.GroundPlaneCfg()
-
+        ground = AssetBaseCfg(
+                    prim_path="/World/ground",
+                    spawn=sim_utils.GroundPlaneCfg()
+                )
         robot: ArticulationCfg = ALLEGRO_HAND_CFG.replace(
             prim_path="{ENV_REGEX_NS}/AllegroHand",
             init_state=ArticulationCfg.InitialStateCfg(
