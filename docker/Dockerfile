@@ -21,6 +21,9 @@ FROM nvcr.io/nvidia/isaac-sim:${ISAACSIM_VERSION}
 # ------------------------------------------------------------------------------
 # System dependencies
 # ------------------------------------------------------------------------------
+# Isaac Sim 5.1.0 runs as a non-root user by default — switch to root for apt.
+USER root
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     git-lfs \
