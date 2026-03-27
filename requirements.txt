@@ -28,3 +28,14 @@ pyyaml>=6.0
 
 # Plotting / debugging
 matplotlib>=3.7.0
+
+# Formatting / CLI Output
+prettytable>=3.9.0
+
+# Isaac Lab Utilities
+flatdict==4.0.1
+einops
+flaky
+junitparser
+pytest
+pytest-mock
