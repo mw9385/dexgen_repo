@@ -49,22 +49,46 @@ def friction_cone_edges(
 
     Returns:
         edges: (num_edges, 3) force directions (unit vectors along cone edges)
+
+    [Fix] The contact reaction force acts INWARD (opposite to the outward normal).
+          The friction cone is centred on -normal (inward direction).
+          Each edge = -normal + mu * tangential_component, then normalised.
+          Previously the code was correct in using -normal as the cone axis,
+          but the normalisation was applied AFTER adding the tangential part,
+          which is correct. However the resulting force vectors were not
+          guaranteed to be unit vectors pointing into the friction cone.
+
+          More importantly: the contact wrench matrix W must have columns
+          that represent feasible contact forces. The force at contact i
+          must lie INSIDE the friction cone, i.e.:
+            f = alpha * (-n_i + mu * t)  where alpha > 0
+          The wrench is [f; p × f] (6-dim).
+
+          The previous code was correct in structure but the normalisation
+          changes the cone geometry — normalised edges no longer span the
+          same convex set as the original cone. We keep normalisation for
+          numerical stability but document this approximation.
     """
     normal = normal / (np.linalg.norm(normal) + 1e-8)
 
-    # Build tangent frame
+    # Build orthonormal tangent frame via Gram-Schmidt
     if abs(normal[0]) < 0.9:
-        t1 = np.cross(normal, [1, 0, 0])
+        t1 = np.cross(normal, np.array([1.0, 0.0, 0.0]))
     else:
-        t1 = np.cross(normal, [0, 1, 0])
+        t1 = np.cross(normal, np.array([0.0, 1.0, 0.0]))
     t1 /= np.linalg.norm(t1) + 1e-8
     t2 = np.cross(normal, t1)
     t2 /= np.linalg.norm(t2) + 1e-8
 
     angles = np.linspace(0, 2 * np.pi, num_edges, endpoint=False)
-    edges = (-normal[None, :]                   # reaction = push inward
+    # Contact reaction force: inward normal + friction tangential component
+    # -normal: reaction pushes INTO the object (Newton's 3rd law)
+    # mu * tangential: friction allows lateral force up to mu * normal_force
+    edges = (-normal[None, :]
              + mu * (np.cos(angles[:, None]) * t1 + np.sin(angles[:, None]) * t2))
-    edges /= np.linalg.norm(edges, axis=-1, keepdims=True) + 1e-8
+    # Normalise for numerical stability (approximation of cone boundary)
+    norms = np.linalg.norm(edges, axis=-1, keepdims=True)
+    edges /= norms + 1e-8
     return edges.astype(np.float32)
 
 

@@ -28,7 +28,6 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-# [수정] AppLauncher는 엔진 구동을 위해 최상단에서 import 가능합니다.
 from isaaclab.app import AppLauncher
 
 
@@ -50,13 +49,11 @@ def parse_args():
                    default=str(Path(__file__).parent.parent / "configs" / "rl_training.yaml"),
                    help="Path to YAML config (ppo / domain_randomization settings)")
     
-    # AppLauncher가 --headless를 포함한 필수 인자들을 자동으로 덮어씌웁니다.
     AppLauncher.add_app_launcher_args(p)
     return p.parse_args()
 
 
 def load_config(path: str) -> dict:
-    """Load YAML config, return empty dict if file not found."""
     p = Path(path)
     if not p.exists():
         print(f"[WARNING] Config not found at {path}, using defaults.")
@@ -66,29 +63,34 @@ def load_config(path: str) -> dict:
 
 
 def apply_dr_config(env_cfg, dr_cfg: dict):
-    # (기존 코드와 동일)
     if not dr_cfg:
         return
 
     events = env_cfg.events
 
     obj = dr_cfg.get("object_physics", {})
-    if obj:
+    if obj and hasattr(events, "randomize_object_physics"):
         p = events.randomize_object_physics.params
-        if "mass_range"        in obj: p["mass_range"]        = tuple(obj["mass_range"])
-        if "friction_range"    in obj: p["friction_range"]    = tuple(obj["friction_range"])
-        if "restitution_range" in obj: p["restitution_range"] = tuple(obj["restitution_range"])
+        new_params = {}
+        if "mass_range"        in obj: new_params["mass_range"]        = tuple(obj["mass_range"])
+        if "friction_range"    in obj: new_params["friction_range"]    = tuple(obj["friction_range"])
+        if "restitution_range" in obj: new_params["restitution_range"] = tuple(obj["restitution_range"])
+        p.update(new_params)
 
     rob = dr_cfg.get("robot_physics", {})
-    if rob:
+    if rob and hasattr(events, "randomize_robot_physics"):
         p = events.randomize_robot_physics.params
-        if "damping_range"  in rob: p["damping_range"]  = tuple(rob["damping_range"])
-        if "armature_range" in rob: p["armature_range"] = tuple(rob["armature_range"])
+        new_params = {}
+        if "damping_range"  in rob: new_params["damping_range"]  = tuple(rob["damping_range"])
+        if "armature_range" in rob: new_params["armature_range"] = tuple(rob["armature_range"])
+        p.update(new_params)
 
     delay = dr_cfg.get("action_delay", {})
-    if delay:
+    if delay and hasattr(events, "randomize_action_delay"):
         p = events.randomize_action_delay.params
-        if "max_delay" in delay: p["max_delay"] = int(delay["max_delay"])
+        new_params = {}
+        if "max_delay" in delay: new_params["max_delay"] = int(delay["max_delay"])
+        p.update(new_params)
 
     noise = dr_cfg.get("obs_noise", {})
     if noise:
@@ -105,7 +107,6 @@ def apply_dr_config(env_cfg, dr_cfg: dict):
 
 
 def build_rl_games_config(args) -> dict:
-    # (기존 코드와 동일)
     return {
         "params": {
             "seed": args.seed,
@@ -123,7 +124,7 @@ def build_rl_games_config(args) -> dict:
                         "mu_activation": "None",
                         "sigma_activation": "None",
                         "mu_init": {"name": "default"},
-                        "sigma_init": {"name": "const_initializer", "val": 0},
+                        "sigma_init": {"name": "const_initializer", "val": 0.0},
                         "fixed_sigma": True,
                     }
                 },
@@ -145,8 +146,11 @@ def build_rl_games_config(args) -> dict:
                 "multi_gpu": False,
                 "ppo": True,
                 "mixed_precision": False,
-                "normalize_input": True,
-                "normalize_value": True,
+                
+                # [핵심 수정] 관측치 정규화 완전 비활성화 (Division by zero 방지)
+                "normalize_input": False,
+                "normalize_value": False,
+                
                 "num_actors": args.num_envs,
                 "reward_shaper": {
                     "scale_value": 0.01,
@@ -165,15 +169,44 @@ def build_rl_games_config(args) -> dict:
                 "grad_norm": 1.0,
                 "entropy_coef": 0.0,
                 "truncate_grads": True,
-                "e_clip": 0.2,             
+                "e_clip": 0.2,
+                "kl_threshold": 0.008,
+                "horizon_length": 8,
                 "num_steps_per_env": 8,    
                 "mini_epochs": 5,
-                "minibatch_size": 16384,
+                "minibatch_size": 4096,
                 "critic_coef": 4,
                 "clip_value": True,
                 "seq_length": 4,
                 "bounds_loss_coef": 0.0001,
                 "log_dir": args.log_dir,
+                
+                # [유지] Asymmetric Actor-Critic 설정
+                "use_central_value": True,
+                "central_value_config": {
+                    "minibatch_size": 4096,
+                    "mini_epochs": 5,
+                    "learning_rate": 5e-4,
+                    "lr_schedule": "adaptive",
+                    "lr_threshold": 0.008,
+                    "clip_value": True,
+                    
+                    # [핵심 수정] Critic 네트워크도 정규화 비활성화
+                    "normalize_input": False,
+                    
+                    "truncate_grads": True,
+                    "network": {
+                        "name": "actor_critic",
+                        "central_value": True,
+                        "mlp": {
+                            "units": [512, 512, 256, 128],
+                            "activation": "elu",
+                            "d2rl": False,
+                            "initializer": {"name": "default"},
+                            "regularizer": {"name": "None"},
+                        }
+                    }
+                }
             },
         }
     }
@@ -182,24 +215,41 @@ def build_rl_games_config(args) -> dict:
 def main():
     args = parse_args()
 
-    # Validate grasp graph exists
+    app_launcher = AppLauncher(args)
+    sim_app = app_launcher.app
+
+    try:
+        import carb as _carb
+        _cs = _carb.settings.get_settings()
+        if not _cs.get("/persistent/isaac/asset_root/cloud"):
+            _cs.set(
+                "/persistent/isaac/asset_root/cloud",
+                "https://omniverse-content-production.s3-us-west-2.amazonaws.com"
+                "/Assets/Isaac/5.0",
+            )
+            print("[train_rl] Set Isaac Sim cloud asset root to S3 (5.0).")
+    except Exception as _e:
+        print(f"[train_rl] WARNING: could not set carb asset root: {_e}")
+
     if not Path(args.grasp_graph).exists():
         print(f"ERROR: GraspGraph not found at {args.grasp_graph}")
         print("Run Stage 0 first:")
         print("  python scripts/run_grasp_generation.py")
+        sim_app.close()
         sys.exit(1)
 
-    # Import Isaac Lab dependencies
     try:
         import isaaclab  # noqa: F401
     except ImportError:
         print("ERROR: Isaac Lab not found. Run ./setup_isaaclab.sh first.")
+        sim_app.close()
         sys.exit(1)
 
     try:
         import rl_games  # noqa: F401
     except ImportError:
         print("ERROR: rl_games not found. Run: pip install rl_games")
+        sim_app.close()
         sys.exit(1)
 
     from isaaclab.envs import ManagerBasedRLEnv
@@ -209,20 +259,16 @@ def main():
 
     from envs import AnyGraspEnvCfg, register_anygrasp_env
 
-    # Register environment
     register_anygrasp_env()
 
-    # Load YAML config
     cfg_file = load_config(args.config)
 
-    # Build environment config
     env_cfg = AnyGraspEnvCfg()
     env_cfg.scene.num_envs = args.num_envs
     env_cfg.grasp_graph_path = args.grasp_graph
-    if args.headless:
+    if getattr(args, "headless", False): 
         env_cfg.viewer = None
 
-    # Apply domain-randomization
     apply_dr_config(env_cfg, cfg_file.get("domain_randomization", {}))
 
     print(f"[Stage 1] Config:   {args.config}")
@@ -233,7 +279,6 @@ def main():
     print(f"[Stage 1] Log dir: {args.log_dir}")
     print("-" * 60)
 
-    # rl_games env wrapper
     def create_env(**kwargs):
         return ManagerBasedRLEnv(env_cfg)
 
@@ -251,7 +296,6 @@ def main():
         ),
     )
 
-    # Build and run rl_games trainer
     cfg = build_rl_games_config(args)
     runner = Runner(IsaacAlgoObserver())
     runner.load(cfg)
@@ -262,22 +306,27 @@ def main():
     print(f"Checkpoints saved to: {args.log_dir}")
     print(f"\nNext: collect dataset")
     print(f"  python scripts/collect_data.py --log_dir {args.log_dir}")
+    
+    sim_app.close()
 
 
 def _to_rl_obs(obs):
     """
     Convert Isaac Lab observation output to rl_games format.
-
-    Isaac Lab returns a dict keyed by obs-group name, e.g.
-      {"policy": Tensor(N, 76), "critic": Tensor(N, 104)}
-
-    rl_games expects:
-      {"obs": Tensor(N, obs_dim)}          — actor observations
-      (asymmetric-AC also uses "states", but we use a shared network here)
+    Asymmetric AC expects policy obs in 'obs' and critic obs in 'states'.
     """
     if isinstance(obs, dict):
-        policy_obs = obs.get("policy", next(iter(obs.values())))
-        return {"obs": policy_obs}
+        res = {}
+        if "policy" in obs:
+            res["obs"] = obs["policy"]
+        else:
+            res["obs"] = next(iter(obs.values()))
+            
+        if "critic" in obs:
+            res["states"] = obs["critic"]
+            
+        return res
+        
     return {"obs": obs}
 
 
@@ -300,26 +349,55 @@ class _IsaacLabVecEnv:
     def get_number_of_agents(self):
         return self.num_envs
 
+    def set_train_info(self, frame, self_agent):
+        pass
+
     def get_env_info(self):
-        import gymnasium as gym
+        import gymnasium
+        import gym as old_gym
+        import numpy as np
 
-        action_space = self.env.action_space
-
-        # Isaac Lab may return a Dict obs space (one Box per obs group).
-        # rl_games needs a flat Box for the policy group.
         raw_obs_space = self.env.observation_space
-        if isinstance(raw_obs_space, gym.spaces.Dict):
+        if isinstance(raw_obs_space, (gymnasium.spaces.Dict, old_gym.spaces.Dict)):
             obs_space = raw_obs_space.spaces.get(
                 "policy",
                 next(iter(raw_obs_space.spaces.values())),
             )
+            state_space = raw_obs_space.spaces.get("critic", None)
         else:
             obs_space = raw_obs_space
+            state_space = None
 
-        return {
-            "action_space": action_space,
-            "observation_space": obs_space,
+        obs_shape = obs_space.shape
+        if len(obs_shape) > 1:
+            obs_shape = obs_shape[1:]
+
+        raw_act_space = self.env.action_space
+        act_shape = raw_act_space.shape
+        if len(act_shape) > 1:
+            act_shape = act_shape[1:]
+
+        obs_space_old = old_gym.spaces.Box(
+            low=-np.inf, high=np.inf, shape=obs_shape, dtype=np.float32
+        )
+        action_space_old = old_gym.spaces.Box(
+            low=-np.inf, high=np.inf, shape=act_shape, dtype=np.float32
+        )
+
+        info = {
+            "action_space": action_space_old,
+            "observation_space": obs_space_old,
         }
+        
+        if state_space is not None:
+            state_shape = state_space.shape
+            if len(state_shape) > 1:
+                state_shape = state_shape[1:]
+            info["state_space"] = old_gym.spaces.Box(
+                low=-np.inf, high=np.inf, shape=state_shape, dtype=np.float32
+            )
+
+        return info
 
 
 if __name__ == "__main__":

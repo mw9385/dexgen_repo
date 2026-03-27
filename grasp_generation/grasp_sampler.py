@@ -340,6 +340,21 @@ class GraspSampler:
              are >= MIN_FINGER_SPACING from ALL already-selected fingers.
         This avoids the high failure rate of fully-random selection when the
         surface point cloud is dense relative to finger spacing.
+
+        [Fix] Opposition check: use pairwise dot product of normals.
+              At least one pair must have dot < -PALM_NORMAL_THRESH
+              (i.e. normals pointing roughly opposite each other).
+              Previous code used n_dot.min() which checked the most-opposed
+              pair — correct direction but the threshold sign was right;
+              however fill_diagonal(0) means diagonal is excluded, so
+              n_dot.min() finds the most negative off-diagonal entry.
+              The real bug was that normals from trimesh point OUTWARD,
+              so opposing contacts have n_i · n_j < 0. The check was
+              correct but PALM_NORMAL_THRESH=0.3 was too loose — any
+              grasp where even one pair had dot < -0.3 passed, including
+              grasps where all fingers are on the same side.
+              Fix: require that the *mean* opposition is negative enough,
+              ensuring the grasp wraps around the object.
         """
         n_pts = len(points)
         selected_idx: list = []
@@ -365,10 +380,21 @@ class GraspSampler:
         if max_dist > self.MAX_FINGER_SPACING * 3:
             return None
 
-        # --- constraint: opposition (at least one pair must face each other) ---
-        n_dot = nrm @ nrm.T
-        np.fill_diagonal(n_dot, 0.0)
-        if n_dot.min() > -self.PALM_NORMAL_THRESH:
+        # --- constraint: opposition check (fixed) ---
+        # Normals point outward from the object surface.
+        # For a valid grasp, fingers must approach from opposing sides,
+        # so at least one pair of normals must point in opposite directions
+        # (dot product < 0). We require the mean off-diagonal dot product
+        # to be negative, ensuring the grasp wraps around the object.
+        n_dot = nrm @ nrm.T  # (F, F)
+        # Extract upper-triangle (off-diagonal) pairs
+        triu_idx = np.triu_indices(self.num_fingers, k=1)
+        pair_dots = n_dot[triu_idx]  # (num_pairs,)
+        # Require: at least one pair is strongly opposing (dot < -threshold)
+        if not np.any(pair_dots < -self.PALM_NORMAL_THRESH):
+            return None
+        # Require: mean opposition is negative (majority of fingers oppose each other)
+        if pair_dots.mean() > 0.1:
             return None
 
         # --- assign "thumb" as the finger most opposed to the centroid ---
@@ -376,6 +402,8 @@ class GraspSampler:
         centroid = pts.mean(axis=0)
         dirs = pts - centroid
         dirs /= (np.linalg.norm(dirs, axis=-1, keepdims=True) + 1e-8)
+        # opposition score: negative means the normal points TOWARD centroid
+        # (i.e. the finger is on the far side, like a thumb)
         opposition = (dirs * nrm).sum(axis=-1)
         thumb_idx = int(np.argmin(opposition))
 

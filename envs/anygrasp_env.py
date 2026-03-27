@@ -177,6 +177,15 @@ if _ISAACLAB_AVAILABLE:
             init_state=ArticulationCfg.InitialStateCfg(
                 pos=(0.0, 0.0, 0.6),
                 rot=(1.0, 0.0, 0.0, 0.0),
+                joint_pos={
+                    "thumb_joint_0": 0.28,  # within [0.279, 1.571]
+                },
+            ),
+            actuators={
+                **ALLEGRO_HAND_CFG.actuators,
+            },
+            spawn=ALLEGRO_HAND_CFG.spawn.replace(
+                activate_contact_sensors=True,
             ),
         )
 
@@ -197,7 +206,7 @@ if _ISAACLAB_AVAILABLE:
         )
 
         fingertip_contact_sensor: ContactSensorCfg = ContactSensorCfg(
-            prim_path="{ENV_REGEX_NS}/AllegroHand/.*_tip",
+            prim_path="{ENV_REGEX_NS}/AllegroHand/.*biotac_tip",
             update_period=0.0,
             history_length=1,
             debug_vis=False,
@@ -206,21 +215,6 @@ if _ISAACLAB_AVAILABLE:
 
         num_envs:    int   = MISSING
         env_spacing: float = 0.6
-
-
-# ---------------------------------------------------------------------------
-# [Fix] Action Configuration
-# ---------------------------------------------------------------------------
-
-if _ISAACLAB_AVAILABLE:
-    @configclass
-    class AnyGraspActionsCfg:
-        """Action Manager: Allegro Hand 16 DoF Joint Position Control."""
-        joint_pos = JointPositionActionCfg(
-            asset_name="robot", 
-            joint_names=[".*"], 
-            use_default_offset=True
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -293,10 +287,9 @@ if _ISAACLAB_AVAILABLE:
     @configclass
     class AnyGraspActionsCfg:
         """Joint-position targets for the Allegro Hand (16 DOF)."""
-        joint_pos: ActionTerm = JointPositionActionCfg(
+        joint_pos = JointPositionActionCfg(
             asset_name="robot",
             joint_names=[".*"],
-            scale=0.1,
             use_default_offset=True,
         )
 
@@ -419,7 +412,7 @@ if _ISAACLAB_AVAILABLE:
             if self.hand is None:
                 self.hand = {
                     "name": "allegro", "num_fingers": 4, "num_dof": 16, "dof_per_finger": 4,
-                    "fingertip_links": ["link_3.0_tip", "link_7.0_tip", "link_11.0_tip", "link_15.0_tip"],
+                    "fingertip_links": ["index_link_3", "middle_biotac_tip", "ring_biotac_tip", "thumb_biotac_tip"],
                 }
             
             # [Fix] Apply action_scale to the joint position action term

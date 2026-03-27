@@ -244,9 +244,24 @@ class RRTGraspExpander:
             src = grasps[self.rng.integers(0, len(grasps))]
             noise = self.rng.normal(0, self.delta_pos,
                                     src.fingertip_positions.shape).astype(np.float32)
+            new_pos = src.fingertip_positions + noise
+
+            # [Fix] Recompute contact normals from perturbed positions.
+            # Previously, normals were independently perturbed with random noise,
+            # making them physically inconsistent with the new fingertip positions.
+            # This caused the NFO quality check to pass for geometrically invalid
+            # grasps (e.g. normals pointing inward, or not opposing each other),
+            # polluting the GraspGraph with bad nodes that cause divergence in RL.
+            #
+            # Correct approach: normals should point FROM the object centroid
+            # TOWARD each fingertip (outward surface normal approximation).
+            # This is valid for convex objects and a good approximation for
+            # near-convex objects like cubes, spheres, cylinders.
+            new_normals = self._recompute_normals_from_positions(new_pos)
+
             candidate = Grasp(
-                fingertip_positions=src.fingertip_positions + noise,
-                contact_normals=self._perturb_normals(src.contact_normals),
+                fingertip_positions=new_pos,
+                contact_normals=new_normals,
                 quality=0.0,
                 object_name=src.object_name,
                 object_scale=src.object_scale,
@@ -257,7 +272,28 @@ class RRTGraspExpander:
                 return candidate
         return None
 
+    def _recompute_normals_from_positions(self, positions: np.ndarray) -> np.ndarray:
+        """
+        Approximate outward surface normals from fingertip positions.
+
+        For convex objects, the outward normal at a surface point is
+        approximately the direction from the object centroid to that point.
+        This is exact for spheres and a good approximation for cubes/cylinders.
+
+        Args:
+            positions: (F, 3) fingertip positions in object frame
+
+        Returns:
+            normals: (F, 3) unit outward normals
+        """
+        # Object centroid is at origin in object frame
+        centroid = positions.mean(axis=0)  # approximate object center
+        normals = positions - centroid     # outward direction
+        norms = np.linalg.norm(normals, axis=-1, keepdims=True)
+        return (normals / (norms + 1e-8)).astype(np.float32)
+
     def _perturb_normals(self, normals: np.ndarray) -> np.ndarray:
+        """Legacy method kept for compatibility. Use _recompute_normals_from_positions instead."""
         noise = self.rng.normal(0, 0.05, normals.shape).astype(np.float32)
         new_normals = normals + noise
         norms = np.linalg.norm(new_normals, axis=-1, keepdims=True)

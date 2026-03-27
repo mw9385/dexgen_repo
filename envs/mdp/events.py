@@ -39,7 +39,7 @@ def object_dropped(env, min_height: float = 0.2) -> torch.Tensor:
 
 def reset_to_random_grasp(
     env,
-    env_ids: Optional[torch.Tensor] = None,
+    env_ids: torch.Tensor,
 ):
     """
     Full episode reset:
@@ -49,9 +49,6 @@ def reset_to_random_grasp(
       4. Store goal fingertip positions
       5. Randomise object pose
     """
-    if env_ids is None:
-        env_ids = torch.arange(env.num_envs, device=env.device)
-
     graph = _load_grasp_graph(env)
     if graph is None:
         _reset_to_default_pose(env, env_ids)
@@ -248,29 +245,66 @@ def _set_robot_to_fingertip_config(
     env_ids: torch.Tensor,
     fingertip_positions: torch.Tensor,   # (n, num_fingers, 3) object frame
 ):
-    """Approximate IK: scale joint angles to reach fingertip targets."""
+    """
+    Approximate IK: scale joint angles to reach fingertip targets.
+
+    [Fix] Previous code computed ft_world = fingertip_positions + obj_pos,
+    which is correct (object frame → world frame). However palm_pos was
+    taken from body_pos_w[env_ids, 0, :] which is the BASE LINK position,
+    not the palm/wrist position. For Allegro Hand, body index 0 is the
+    base link which may be at the wrist mount point, not the palm center.
+
+    More critically: the distance-based IK scaling was computing distance
+    from the palm to the fingertip TARGET positions, but the wrist pose
+    had already been randomised by _randomise_wrist_pose() BEFORE this
+    function is called. So palm_pos reflects the new randomised wrist
+    position — this is actually correct.
+
+    The real bug: fingertip_positions are in OBJECT frame (centred at
+    object origin), but the distance to palm should account for the
+    object's position in world frame. The previous code did:
+        ft_world = fingertip_positions + obj_pos  ← correct
+        ft_dist = ||ft_world - palm_pos||          ← correct
+
+    However, after _randomise_wrist_pose(), the robot's body_pos_w may
+    not yet be updated in the data buffer (Isaac Lab updates body poses
+    after physics step, not immediately after write_root_pose_to_sim).
+    We should use the wrist position we just set, not the stale buffer.
+
+    Fix: read the wrist position from the root state we just wrote,
+    or use a fixed reference distance based on the object size.
+    Since we don't have easy access to the just-written pose here,
+    we use a robust fallback: compute distance from object center to
+    fingertip (in object frame) and use that as the IK scale proxy.
+    This is more stable than using the palm position.
+    """
     robot = env.scene["robot"]
-    obj   = env.scene["object"]
     n     = len(env_ids)
 
-    hand_cfg      = getattr(env.cfg, "hand", None) or {}
-    num_fingers   = hand_cfg.get("num_fingers",    fingertip_positions.shape[1])
+    hand_cfg       = getattr(env.cfg, "hand", None) or {}
+    num_fingers    = hand_cfg.get("num_fingers",    fingertip_positions.shape[1])
     dof_per_finger = hand_cfg.get("dof_per_finger", 4)
 
     default_q = robot.data.default_joint_pos[env_ids].clone()   # (n, num_dof)
-    obj_pos   = obj.data.root_pos_w[env_ids]                    # (n, 3)
-    ft_world  = fingertip_positions + obj_pos.unsqueeze(1)      # (n, F, 3)
-    palm_pos  = robot.data.body_pos_w[env_ids, 0, :]            # (n, 3) base link
-    ft_dist   = torch.norm(ft_world - palm_pos.unsqueeze(1), dim=-1)  # (n, F)
 
-    # Map distance [0.05, 0.18] → joint scale [0.2, 1.0]
-    scale = ((ft_dist - 0.05) / 0.13).clamp(0, 1) * 0.8 + 0.2   # (n, F)
+    # Distance from object centroid (origin in object frame) to each fingertip.
+    # This is a stable proxy for how "open" the hand needs to be.
+    # fingertip_positions: (n, F, 3) in object frame
+    ft_dist_from_obj = torch.norm(fingertip_positions, dim=-1)   # (n, F)
+
+    # Typical fingertip-to-object-center distances for Allegro:
+    #   close grasp: ~0.03–0.05 m (fingertips near object surface)
+    #   open grasp:  ~0.08–0.12 m (fingertips further out)
+    # Map [0.02, 0.12] → joint scale [0.1, 0.9]
+    scale = ((ft_dist_from_obj - 0.02) / 0.10).clamp(0.0, 1.0) * 0.8 + 0.1  # (n, F)
 
     for f in range(num_fingers):
-        s = scale[:, f:f+1]
+        s = scale[:, f:f+1]                                      # (n, 1)
         jrange = slice(f * dof_per_finger, f * dof_per_finger + dof_per_finger)
-        q_upper = robot.data.soft_joint_pos_limits[env_ids, jrange, 1]
-        default_q[:, jrange] = q_upper * s
+        q_low  = robot.data.soft_joint_pos_limits[env_ids, jrange, 0]
+        q_high = robot.data.soft_joint_pos_limits[env_ids, jrange, 1]
+        # Interpolate between low and high limits based on scale
+        default_q[:, jrange] = q_low + s * (q_high - q_low)
 
     robot.write_joint_state_to_sim(
         default_q,

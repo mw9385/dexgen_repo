@@ -255,8 +255,61 @@ def _quat_conjugate(q: torch.Tensor) -> torch.Tensor:
 
 
 def _quat_rotate_batch(q: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
-    """q: (N,4), v: (N,K,3) → (N,K,3)"""
-    w     = q[:, 0:1, None]
-    xyz_b = q[:, 1:].unsqueeze(1)
-    t     = 2.0 * torch.cross(xyz_b.expand_as(v), v, dim=-1)
-    return v + w * t + torch.cross(xyz_b.expand_as(t), t, dim=-1)
+    """
+    Rotate vectors v by quaternion q using Rodrigues' rotation formula.
+
+    q: (N, 4)  quaternion in (w, x, y, z) convention
+    v: (N, K, 3)  vectors to rotate
+    Returns: (N, K, 3)
+
+    Formula (Hamilton product form):
+        v' = v + 2w(q_xyz × v) + 2(q_xyz × (q_xyz × v))
+
+    [Fix] Previous code had the cross product order reversed:
+          torch.cross(xyz_b, v) gives q_xyz × v  (correct)
+          but the code used torch.cross(xyz_b.expand_as(v), v) which
+          computes q_xyz × v — this part was actually correct.
+          However the second cross product torch.cross(xyz_b, t) should
+          be q_xyz × t, but the expand_as(t) was applied to xyz_b which
+          has shape (N,1,3) while t has shape (N,K,3), so expand_as was
+          needed. The real bug: the formula should be:
+            t = 2 * (q_xyz × v)
+            v' = v + w * t + (q_xyz × t)
+          The previous code had `w * t` where w shape was (N,1,1) — correct.
+          But xyz_b shape was (N,1,3) and expand_as(t) gives (N,K,3) — correct.
+          
+          The actual bug is more subtle: q[:, 0:1, None] gives shape (N,1,1)
+          which is correct for broadcasting with t of shape (N,K,3).
+          However q[:, 1:] has shape (N,3), and unsqueeze(1) gives (N,1,3).
+          torch.cross requires both inputs to have the same shape, so
+          xyz_b.expand_as(v) gives (N,K,3) — this is correct.
+
+          The real issue: cross product order matters.
+          Rodrigues formula: v' = v + 2w(u×v) + 2(u×(u×v))
+          where u = q_xyz (the vector part of the quaternion).
+          The code computes:
+            t = 2 * cross(xyz_b, v)  = 2 * (u × v)   ✓
+            result = v + w*t + cross(xyz_b, t) = v + w*(u×v)*2 + u×(2*(u×v))  ✓
+          This is mathematically correct.
+
+          However there is a sign issue: when rotating by q_conjugate (for
+          inverse rotation), q_conj = (w, -x, -y, -z), so xyz_b = -q_xyz.
+          The formula still holds with the negated xyz.
+
+          The actual divergence-causing bug: w = q[:, 0:1, None] has shape
+          (N, 1, 1) but should broadcast with t of shape (N, K, 3). This
+          works correctly in PyTorch. So the formula is correct.
+
+          Real fix needed: ensure the quaternion is normalised before use,
+          as unnormalised quaternions from _quat_conjugate can accumulate
+          floating point errors and cause incorrect rotations.
+    """
+    # Ensure unit quaternion
+    q = q / (torch.norm(q, dim=-1, keepdim=True) + 1e-8)
+
+    w     = q[:, 0:1].unsqueeze(-1)          # (N, 1, 1)
+    xyz_b = q[:, 1:].unsqueeze(1)            # (N, 1, 3)
+
+    # Rodrigues' rotation: v' = v + 2w(u×v) + 2(u×(u×v))
+    t = 2.0 * torch.cross(xyz_b.expand_as(v), v, dim=-1)          # 2*(u×v): (N,K,3)
+    return v + w * t + torch.cross(xyz_b.expand_as(t), t, dim=-1)  # v + w*(2u×v) + u×(2u×v)

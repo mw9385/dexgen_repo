@@ -36,50 +36,58 @@ import torch
 # Reset-time DR events
 # ---------------------------------------------------------------------------
 
-def randomize_object_physics(env, env_ids: Optional[torch.Tensor] = None, **kwargs):
+def randomize_object_physics(
+    env,
+    env_ids: torch.Tensor,
+    mass_range: tuple = (0.03, 0.30),
+    friction_range: tuple = (0.30, 1.20),
+    restitution_range: tuple = (0.00, 0.40),
+):
     """
     Randomise object mass and contact properties at episode reset.
 
     Uses Isaac Lab's physics material and body properties API.
     Values are stored to env.extras["dr_params"] for the critic.
     """
-    mass_range        = kwargs.get("mass_range",        (0.03, 0.30))
-    friction_range    = kwargs.get("friction_range",    (0.30, 1.20))
-    restitution_range = kwargs.get("restitution_range", (0.00, 0.40))
-
-    if env_ids is None:
-        env_ids = torch.arange(env.num_envs, device=env.device)
-
     n   = len(env_ids)
     obj = env.scene["object"]
 
     # --- Mass ---
-    masses = torch.empty(n, device=env.device).uniform_(*mass_range)
+    masses = torch.empty(n, device="cpu").uniform_(*mass_range)
+    env_ids_cpu = env_ids.cpu()
     obj.root_physx_view.set_masses(
         masses.unsqueeze(-1),               # (n, 1)
-        indices=env_ids,
+        indices=env_ids_cpu,
     )
 
     # --- Friction + restitution via physics material ---
-    friction     = torch.empty(n, device=env.device).uniform_(*friction_range)
-    restitution  = torch.empty(n, device=env.device).uniform_(*restitution_range)
+    friction     = torch.empty(n, device="cpu").uniform_(*friction_range)
+    restitution  = torch.empty(n, device="cpu").uniform_(*restitution_range)
 
-    # Isaac Lab API: set_material_properties expects (n, num_shapes, 7)
-    # Properties: [static_friction, dynamic_friction, restitution, ...]
-    mat_props = obj.root_physx_view.get_material_properties(indices=env_ids)
-    mat_props[:, :, 0] = friction.unsqueeze(-1)        # static friction
-    mat_props[:, :, 1] = friction.unsqueeze(-1) * 0.9  # dynamic friction (~10% less)
-    mat_props[:, :, 2] = restitution.unsqueeze(-1)
-    obj.root_physx_view.set_material_properties(mat_props, indices=env_ids)
+    # Isaac Lab API: get_material_properties() returns (N_total, num_shapes, 3)
+    # set_material_properties(mat, indices) requires indices
+    mat_props = obj.root_physx_view.get_material_properties()
+    mat_props[env_ids_cpu, :, 0] = friction.unsqueeze(-1)        # static friction
+    mat_props[env_ids_cpu, :, 1] = friction.unsqueeze(-1) * 0.9  # dynamic friction (~10% less)
+    mat_props[env_ids_cpu, :, 2] = restitution.unsqueeze(-1)
+    obj.root_physx_view.set_material_properties(mat_props, env_ids_cpu)
 
     # --- Store normalised DR params for critic ---
-    _update_dr_params(env, env_ids,
-                      mass=masses,
-                      friction=friction,
-                      damping_mean=None)   # damping updated separately
+    _update_dr_params(
+        env,
+        env_ids,
+        mass=masses.to(env.device),
+        friction=friction.to(env.device),
+        damping_mean=None,
+    )  # damping updated separately
 
 
-def randomize_robot_physics(env, env_ids: Optional[torch.Tensor] = None, **kwargs):
+def randomize_robot_physics(
+    env,
+    env_ids: torch.Tensor,
+    damping_range: tuple = (0.01, 0.30),
+    armature_range: tuple = (0.001, 0.03),
+):
     """
     Randomise Allegro Hand joint damping and armature at episode reset.
 
@@ -87,40 +95,34 @@ def randomize_robot_physics(env, env_ids: Optional[torch.Tensor] = None, **kwarg
     Armature: effective rotational inertia at each joint
     Both affect how quickly the joints respond to torque commands.
     """
-    damping_range  = kwargs.get("damping_range",  (0.01, 0.30))
-    armature_range = kwargs.get("armature_range", (0.001, 0.03))
-
-    if env_ids is None:
-        env_ids = torch.arange(env.num_envs, device=env.device)
-
     n     = len(env_ids)
     robot = env.scene["robot"]
     hand_cfg = getattr(env.cfg, "hand", None) or {}
     n_dof = hand_cfg.get("num_dof", robot.data.joint_pos.shape[-1])
 
-    damping  = torch.empty(n, n_dof, device=env.device).uniform_(*damping_range)
-    armature = torch.empty(n, n_dof, device=env.device).uniform_(*armature_range)
+    env_ids_cpu = env_ids.cpu()
+    damping  = torch.empty(n, n_dof, device="cpu").uniform_(*damping_range)
+    armature = torch.empty(n, n_dof, device="cpu").uniform_(*armature_range)
 
-    robot.root_physx_view.set_dof_damping_scales(damping,   indices=env_ids)
-    robot.root_physx_view.set_dof_armatures(armature,       indices=env_ids)
+    robot.root_physx_view.set_dof_dampings(damping,   indices=env_ids_cpu)
+    robot.root_physx_view.set_dof_armatures(armature,  indices=env_ids_cpu)
 
     # Update dr_params with mean damping
-    damping_mean = damping.mean(dim=-1)
+    damping_mean = damping.mean(dim=-1).to(env.device)
     _update_dr_params(env, env_ids, damping_mean=damping_mean)
 
 
-def randomize_action_delay(env, env_ids: Optional[torch.Tensor] = None, **kwargs):
+def randomize_action_delay(
+    env,
+    env_ids: torch.Tensor,
+    max_delay: int = 2,
+):
     """
     Randomise per-env action delay (0–max_delay steps).
 
     The delay buffer is initialised to zeros so the first actions are
     replayed from a neutral (zero-delta) start.
     """
-    max_delay = kwargs.get("max_delay", 2)
-
-    if env_ids is None:
-        env_ids = torch.arange(env.num_envs, device=env.device)
-
     n = len(env_ids)
 
     # Initialise delay buffer if absent
