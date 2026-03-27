@@ -1,29 +1,9 @@
-# ==============================================================================
-# DexGen Docker Image
-# ==============================================================================
-# Base: NVIDIA Isaac Sim 5.1.0 (from NGC)
-#
-# Prerequisites on host:
-#   - Docker >= 24.x
-#   - NVIDIA Container Toolkit (nvidia-docker2)
-#   - NGC account + docker login (see README)
-#
-# Build:
-#   docker compose -f docker/docker-compose.yml build
-#
-# Run:
-#   ./docker/run.sh up
-# ==============================================================================
+# Base: NVIDIA Isaac Sim 5.1.0 (Ubuntu 24.04 Base)
+FROM nvcr.io/nvidia/isaac-sim:5.1.0
 
-ARG ISAACSIM_VERSION=5.1.0
-FROM nvcr.io/nvidia/isaac-sim:${ISAACSIM_VERSION}
-
-# ------------------------------------------------------------------------------
-# System dependencies
-# ------------------------------------------------------------------------------
-# Isaac Sim 5.1.0 runs as a non-root user by default — switch to root for apt.
 USER root
 
+# 필수 시스템 패키지 설치 (libgl1 적용)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     git-lfs \
@@ -32,7 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     vim \
     htop \
     tmux \
-    libgl1-mesa-glx \
+    libgl1 \
     libglib2.0-0 \
     libsm6 \
     libxext6 \
@@ -40,9 +20,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # ------------------------------------------------------------------------------
-# Isaac Lab v5.1.0
+# Isaac Lab (Isaac Sim 5.1.0과 호환되는 v2.3.2 브랜치 명시)
 # ------------------------------------------------------------------------------
-ARG ISAACLAB_VERSION=v5.1.0
+ARG ISAACLAB_VERSION=v2.3.2
 ENV ISAACLAB_DIR=/workspace/IsaacLab
 
 RUN git clone --depth 1 --branch ${ISAACLAB_VERSION} \
@@ -50,11 +30,18 @@ RUN git clone --depth 1 --branch ${ISAACLAB_VERSION} \
 
 WORKDIR ${ISAACLAB_DIR}
 
+ENV TERM=xterm
+
+# isaac sim path
+ENV ISAACSIM_PATH=/isaac-sim
+ENV ISAACSIM_PTYHON_EXE=${ISAACSIM_PATH}/python.sh
+RUN ln -s ${ISAACSIM_PATH} ${ISAACLAB_DIR}/_isaac_sim
+
 # Install Isaac Lab core + RL frameworks
-RUN ./isaaclab.sh --install 2>&1 | tee /tmp/isaaclab_install.log
-RUN ./isaaclab.sh --install rl_games  2>&1 | tee /tmp/rl_games_install.log
-RUN ./isaaclab.sh --install rsl_rl    2>&1 | tee /tmp/rsl_rl_install.log
-RUN ./isaaclab.sh --install skrl      2>&1 | tee /tmp/skrl_install.log
+RUN ./isaaclab.sh --install
+RUN ./isaaclab.sh --install rl_games
+RUN ./isaaclab.sh --install rsl_rl
+RUN ./isaaclab.sh --install skrl
 
 # ------------------------------------------------------------------------------
 # DexGen Python dependencies
@@ -62,30 +49,21 @@ RUN ./isaaclab.sh --install skrl      2>&1 | tee /tmp/skrl_install.log
 WORKDIR /workspace/dexgen
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN ${ISAACSIM_PTYHON_EXE} -m pip install --no-cache-dir -r requirements.txt
 
 # ------------------------------------------------------------------------------
-# Copy DexGen source
+# Copy DexGen source & Set Environment
 # ------------------------------------------------------------------------------
 COPY . .
 
-# ------------------------------------------------------------------------------
-# Environment variables
-# ------------------------------------------------------------------------------
 ENV PYTHONPATH=/workspace/dexgen:${ISAACLAB_DIR}/source/isaaclab:${PYTHONPATH}
 ENV ISAACLAB_DIR=${ISAACLAB_DIR}
 
-# Headless rendering (EGL) — override with -e DISPLAY=:0 for GUI
+# Headless rendering (EGL)
 ENV DISPLAY=""
 ENV NVIDIA_DRIVER_CAPABILITIES=all
 ENV NVIDIA_VISIBLE_DEVICES=all
 
-# Isaac Sim kit config
-ENV ISAACSIM_PATH=/isaac-sim
-ENV ISAACSIM_PYTHON_EXE=${ISAACSIM_PATH}/python.sh
-
-# Default working directory
 WORKDIR /workspace/dexgen
 
-# Default entrypoint: bash (override for specific tasks)
 CMD ["/bin/bash"]
