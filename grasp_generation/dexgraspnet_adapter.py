@@ -27,7 +27,10 @@ Design for extensibility:
 from __future__ import annotations
 
 import math
+import os
 import sys
+import importlib
+import importlib.util
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -74,6 +77,10 @@ def _ensure_dexgraspnet_on_path():
     DexGraspNet ships without __init__.py in its utils/ directory.  We create
     them at runtime so that ``from utils.hand_model import HandModel`` works
     when the grasp_generation dir is on sys.path.
+
+    Isaac Lab may already have imported a different top-level ``utils``
+    package. DexGraspNet depends on its own ``utils`` package rooted under
+    ``grasp_generation/``, so evict conflicting modules before importing it.
     """
     gen_str = str(_DEXGRASPNET_GEN)
     if gen_str not in sys.path:
@@ -83,6 +90,44 @@ def _ensure_dexgraspnet_on_path():
         init_file = subdir / "__init__.py"
         if not init_file.exists() and subdir.is_dir():
             init_file.write_text("")
+
+    utils_mod = sys.modules.get("utils")
+    if utils_mod is not None:
+        utils_file = getattr(utils_mod, "__file__", "") or ""
+        utils_paths = getattr(utils_mod, "__path__", []) or []
+        owned_by_dexgraspnet = utils_file.startswith(gen_str) or any(
+            str(path).startswith(gen_str) for path in utils_paths
+        )
+        if not owned_by_dexgraspnet:
+            sys.modules.pop("utils", None)
+            for name in list(sys.modules):
+                if name.startswith("utils."):
+                    sys.modules.pop(name, None)
+
+
+def _import_dexgraspnet_utils_module(module_name: str):
+    """Import a DexGraspNet ``utils.*`` module from its package path."""
+    _ensure_dexgraspnet_on_path()
+
+    utils_pkg_name = "utils"
+    utils_init = _DEXGRASPNET_GEN / "utils" / "__init__.py"
+    utils_pkg = sys.modules.get(utils_pkg_name)
+    if utils_pkg is None or not any(
+        str(path).startswith(str(_DEXGRASPNET_GEN / "utils"))
+        for path in (getattr(utils_pkg, "__path__", []) or [])
+    ):
+        spec = importlib.util.spec_from_file_location(
+            utils_pkg_name,
+            utils_init,
+            submodule_search_locations=[str(_DEXGRASPNET_GEN / "utils")],
+        )
+        if spec is None or spec.loader is None:
+            raise ImportError(f"Failed to load DexGraspNet utils package from {utils_init}")
+        utils_pkg = importlib.util.module_from_spec(spec)
+        sys.modules[utils_pkg_name] = utils_pkg
+        spec.loader.exec_module(utils_pkg)
+
+    return importlib.import_module(module_name)
 
 
 # ---------------------------------------------------------------------------
@@ -269,15 +314,15 @@ def run_dexgraspnet_optimization(
     import torch
     from tqdm import tqdm
 
-    _ensure_dexgraspnet_on_path()
-
     # Main branch HandModel uses MJCF (different API from allegro branch)
-    from utils.hand_model import HandModel
-    from utils.object_model import ObjectModel
-    from utils.initializations import initialize_convex_hull
-    from utils.energy import cal_energy
-    from utils.optimizer import Annealing
-    from utils.rot6d import robust_compute_rotation_matrix_from_ortho6d
+    HandModel = _import_dexgraspnet_utils_module("utils.hand_model").HandModel
+    ObjectModel = _import_dexgraspnet_utils_module("utils.object_model").ObjectModel
+    initialize_convex_hull = _import_dexgraspnet_utils_module("utils.initializations").initialize_convex_hull
+    cal_energy = _import_dexgraspnet_utils_module("utils.energy").cal_energy
+    Annealing = _import_dexgraspnet_utils_module("utils.optimizer").Annealing
+    robust_compute_rotation_matrix_from_ortho6d = _import_dexgraspnet_utils_module(
+        "utils.rot6d"
+    ).robust_compute_rotation_matrix_from_ortho6d
     import transforms3d
 
     if cfg is None:
@@ -290,112 +335,114 @@ def run_dexgraspnet_optimization(
 
     os.environ["CUDA_VISIBLE_DEVICES"] = cfg.gpu
     torch_device = torch.device(device)
+    prev_cwd = os.getcwd()
 
-    # ---- Hand model (main branch MJCF API) ----
-    hand_model = HandModel(
-        mjcf_path=str(hand_cfg.mjcf_path),
-        mesh_path=str(hand_cfg.mesh_path),
-        contact_points_path=str(hand_cfg.contact_points_path),
-        penetration_points_path=str(hand_cfg.penetration_points_path),
-        n_surface_points=1000,
-        device=torch_device,
-    )
+    try:
+        # DexGraspNet main expects relative MJCF asset paths from grasp_generation/.
+        os.chdir(_DEXGRASPNET_GEN)
 
-    # ---- Object model ----
-    object_model = ObjectModel(
-        data_root_path=str(meshdata_root),
-        batch_size_each=cfg.batch_size,
-        num_samples=2000,
-        device=torch_device,
-    )
-    object_model.initialize([object_code])
-    # Override scale to match our specific object
-    object_model.object_scale_tensor = torch.full(
-        (1, cfg.batch_size), object_scale, dtype=torch.float, device=torch_device,
-    )
+        # ---- Hand model (main branch MJCF API) ----
+        hand_model = HandModel(
+            mjcf_path=str(hand_cfg.mjcf_path),
+            mesh_path=str(hand_cfg.mesh_path),
+            contact_points_path=str(hand_cfg.contact_points_path),
+            penetration_points_path=str(hand_cfg.penetration_points_path),
+            n_surface_points=1000,
+            device=torch_device,
+        )
 
-    # ---- Initialisation ----
-    class _Args:
-        pass
-    init_args = _Args()
-    init_args.n_contact = cfg.n_contact
-    init_args.jitter_strength = cfg.jitter_strength
-    init_args.distance_lower = cfg.distance_lower
-    init_args.distance_upper = cfg.distance_upper
-    init_args.theta_lower = cfg.theta_lower
-    init_args.theta_upper = cfg.theta_upper
+        # ---- Object model ----
+        object_model = ObjectModel(
+            data_root_path=str(meshdata_root),
+            batch_size_each=cfg.batch_size,
+            num_samples=2000,
+            device=torch_device,
+        )
+        object_model.initialize([object_code])
+        object_model.object_scale_tensor = torch.full(
+            (1, cfg.batch_size), object_scale, dtype=torch.float, device=torch_device,
+        )
 
-    initialize_convex_hull(hand_model, object_model, init_args)
-    hand_pose_st = hand_model.hand_pose.detach().clone()
+        # ---- Initialisation ----
+        class _Args:
+            pass
+        init_args = _Args()
+        init_args.n_contact = cfg.n_contact
+        init_args.jitter_strength = cfg.jitter_strength
+        init_args.distance_lower = cfg.distance_lower
+        init_args.distance_upper = cfg.distance_upper
+        init_args.theta_lower = cfg.theta_lower
+        init_args.theta_upper = cfg.theta_upper
 
-    # ---- Optimizer ----
-    optimizer = Annealing(
-        hand_model,
-        switch_possibility=cfg.switch_possibility,
-        starting_temperature=cfg.starting_temperature,
-        temperature_decay=cfg.temperature_decay,
-        annealing_period=cfg.annealing_period,
-        noise_size=cfg.noise_size,
-        stepsize_period=cfg.stepsize_period,
-        mu=cfg.mu,
-        device=torch_device,
-    )
+        initialize_convex_hull(hand_model, object_model, init_args)
+        hand_pose_st = hand_model.hand_pose.detach().clone()
 
-    weight_dict = dict(
-        w_dis=cfg.w_dis, w_pen=cfg.w_pen,
-        w_spen=cfg.w_spen, w_joints=cfg.w_joints,
-    )
+        optimizer = Annealing(
+            hand_model,
+            switch_possibility=cfg.switch_possibility,
+            starting_temperature=cfg.starting_temperature,
+            temperature_decay=cfg.temperature_decay,
+            annealing_period=cfg.annealing_period,
+            step_size=cfg.noise_size,
+            stepsize_period=cfg.stepsize_period,
+            mu=cfg.mu,
+            device=torch_device,
+        )
 
-    # ---- Initial energy ----
-    energy, E_fc, E_dis, E_pen, E_spen, E_joints = cal_energy(
-        hand_model, object_model, verbose=True, **weight_dict,
-    )
-    energy.sum().backward(retain_graph=True)
+        weight_dict = dict(
+            w_dis=cfg.w_dis, w_pen=cfg.w_pen,
+            w_spen=cfg.w_spen, w_joints=cfg.w_joints,
+        )
 
-    # ---- Optimisation loop (DexGraspNet as-is) ----
-    for step in tqdm(range(1, cfg.n_iter + 1), desc=f"DexGraspNet [{object_code}]"):
-        optimizer.try_step()
-        optimizer.zero_grad()
+        energy, E_fc, E_dis, E_pen, E_spen, E_joints = cal_energy(
+            hand_model, object_model, verbose=True, **weight_dict,
+        )
+        energy.sum().backward(retain_graph=True)
 
-        new_energy, new_E_fc, new_E_dis, new_E_pen, new_E_spen, new_E_joints = \
-            cal_energy(hand_model, object_model, verbose=True, **weight_dict)
-        new_energy.sum().backward(retain_graph=True)
+        for step in tqdm(range(1, cfg.n_iter + 1), desc=f"DexGraspNet [{object_code}]"):
+            optimizer.try_step()
+            optimizer.zero_grad()
 
-        with torch.no_grad():
-            accept, t = optimizer.accept_step(energy, new_energy)
-            energy[accept]   = new_energy[accept]
-            E_fc[accept]     = new_E_fc[accept]
-            E_dis[accept]    = new_E_dis[accept]
-            E_pen[accept]    = new_E_pen[accept]
-            E_spen[accept]   = new_E_spen[accept]
-            E_joints[accept] = new_E_joints[accept]
+            new_energy, new_E_fc, new_E_dis, new_E_pen, new_E_spen, new_E_joints = \
+                cal_energy(hand_model, object_model, verbose=True, **weight_dict)
+            new_energy.sum().backward(retain_graph=True)
 
-    # ---- Collect results ----
-    joint_names = hand_cfg.joint_names
-    results = []
-    for j in range(cfg.batch_size):
-        scale = object_model.object_scale_tensor[0][j].item()
-        hand_pose = hand_model.hand_pose[j].detach().cpu()
+            with torch.no_grad():
+                accept, t = optimizer.accept_step(energy, new_energy)
+                energy[accept]   = new_energy[accept]
+                E_fc[accept]     = new_E_fc[accept]
+                E_dis[accept]    = new_E_dis[accept]
+                E_pen[accept]    = new_E_pen[accept]
+                E_spen[accept]   = new_E_spen[accept]
+                E_joints[accept] = new_E_joints[accept]
 
-        qpos = dict(zip(joint_names, hand_pose[9:].tolist()))
-        rot = robust_compute_rotation_matrix_from_ortho6d(hand_pose[3:9].unsqueeze(0))[0]
-        euler = transforms3d.euler.mat2euler(rot.numpy(), axes="sxyz")
-        qpos.update(dict(zip(_ROTATION_NAMES, euler)))
-        qpos.update(dict(zip(_TRANSLATION_NAMES, hand_pose[:3].tolist())))
+        joint_names = hand_cfg.joint_names
+        results = []
+        for j in range(cfg.batch_size):
+            scale = object_model.object_scale_tensor[0][j].item()
+            hand_pose = hand_model.hand_pose[j].detach().cpu()
 
-        results.append(dict(
-            scale=scale,
-            qpos=qpos,
-            energy=energy[j].item(),
-            E_fc=E_fc[j].item(),
-            E_dis=E_dis[j].item(),
-            E_pen=E_pen[j].item(),
-            E_spen=E_spen[j].item(),
-            E_joints=E_joints[j].item(),
-            _hand_pose=hand_pose,
-        ))
+            qpos = dict(zip(joint_names, hand_pose[9:].tolist()))
+            rot = robust_compute_rotation_matrix_from_ortho6d(hand_pose[3:9].unsqueeze(0))[0]
+            euler = transforms3d.euler.mat2euler(rot.numpy(), axes="sxyz")
+            qpos.update(dict(zip(_ROTATION_NAMES, euler)))
+            qpos.update(dict(zip(_TRANSLATION_NAMES, hand_pose[:3].tolist())))
 
-    return results
+            results.append(dict(
+                scale=scale,
+                qpos=qpos,
+                energy=energy[j].item(),
+                E_fc=E_fc[j].item(),
+                E_dis=E_dis[j].item(),
+                E_pen=E_pen[j].item(),
+                E_spen=E_spen[j].item(),
+                E_joints=E_joints[j].item(),
+                _hand_pose=hand_pose,
+            ))
+
+        return results
+    finally:
+        os.chdir(prev_cwd)
 
 
 # ---------------------------------------------------------------------------
@@ -452,13 +499,18 @@ def _extract_fingertip_positions(
         if cands is None or cands.shape[0] == 0:
             # Fall back to link origin
             T = fk_status[link_name].get_matrix()                   # (1, 4, 4)
+            if T.dim() == 2:
+                T = T.unsqueeze(0)
             tip_world = T[:, :3, 3]                                 # (1, 3)
         else:
             T = fk_status[link_name].get_matrix()                   # (1, 4, 4)
-            ones = torch.ones(cands.shape[0], 1, dtype=torch.float, device=device)
-            cands_h = torch.cat([cands, ones], dim=1)               # (K, 4)
-            # T: (1, 4, 4), cands_h: (K, 4) → (1, K, 4) bmm (1, 4, 4)^T
-            tip_wrist = (T @ cands_h.unsqueeze(-1)).squeeze(-1)[:, :, :3]  # (1, K, 3)
+            if T.dim() == 2:
+                T = T.unsqueeze(0)
+            rot = T[:, :3, :3]                                      # (1, 3, 3)
+            trans = T[:, :3, 3]                                     # (1, 3)
+            tip_wrist = torch.matmul(
+                cands.unsqueeze(0), rot.transpose(1, 2)
+            ) + trans.unsqueeze(1)                                  # (1, K, 3)
             tip_world = tip_wrist.mean(dim=1)                       # (1, 3)
         # Apply global rotation + translation
         tip_world_tf = tip_world @ rotation[:, :, :].squeeze(0) + translation
@@ -514,15 +566,20 @@ def convert_results_to_grasps(
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     if hand_model is None:
-        from utils.hand_model import HandModel
-        hand_model = HandModel(
-            mjcf_path=str(hand_cfg.mjcf_path),
-            mesh_path=str(hand_cfg.mesh_path),
-            contact_points_path=str(hand_cfg.contact_points_path),
-            penetration_points_path=str(hand_cfg.penetration_points_path),
-            n_surface_points=0,
-            device=device,
-        )
+        HandModel = _import_dexgraspnet_utils_module("utils.hand_model").HandModel
+        prev_cwd = os.getcwd()
+        try:
+            os.chdir(_DEXGRASPNET_GEN)
+            hand_model = HandModel(
+                mjcf_path=str(hand_cfg.mjcf_path),
+                mesh_path=str(hand_cfg.mesh_path),
+                contact_points_path=str(hand_cfg.contact_points_path),
+                penetration_points_path=str(hand_cfg.penetration_points_path),
+                n_surface_points=0,
+                device=device,
+            )
+        finally:
+            os.chdir(prev_cwd)
 
     joint_names    = hand_cfg.joint_names
     fingertip_links = hand_cfg.fingertip_links

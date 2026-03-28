@@ -164,8 +164,9 @@ def reset_to_random_grasp(
         ].clone()
     for i, gj in enumerate(goal_joints_list):
         if gj is not None:
-            env.extras["target_joint_angles"][env_ids[i]] = torch.tensor(
-                gj, device=env.device, dtype=torch.float32
+            env.extras["target_joint_angles"][env_ids[i]] = _expand_grasp_joint_vector(
+                torch.tensor(gj, device=env.device, dtype=torch.float32),
+                num_dof,
             )
 
     # Store goal object pose in hand frame for object_pose_reward
@@ -632,9 +633,10 @@ def _set_robot_joints_direct(
 
     for i, joints in enumerate(joints_list):
         if joints is not None:
-            j = torch.tensor(joints, device=env.device, dtype=torch.float32)
-            if j.shape[0] == num_dof:
-                joint_pos[i] = j
+            joint_pos[i] = _expand_grasp_joint_vector(
+                torch.tensor(joints, device=env.device, dtype=torch.float32),
+                num_dof,
+            )
 
     robot.write_joint_state_to_sim(
         joint_pos,
@@ -642,6 +644,29 @@ def _set_robot_joints_direct(
         env_ids=env_ids,
     )
     robot.set_joint_position_target(joint_pos, env_ids=env_ids)
+
+
+def _expand_grasp_joint_vector(
+    joint_vec: torch.Tensor,
+    target_num_dof: int,
+) -> torch.Tensor:
+    """
+    Expand/pad a stored grasp joint vector to the articulation DOF count.
+
+    Shadow grasps from DexGraspNet store 22 finger joints. Isaac Lab's Shadow
+    USD articulation exposes 24 joints with 2 wrist DOFs leading the vector.
+    """
+    if joint_vec.shape[0] == target_num_dof:
+        return joint_vec
+    if joint_vec.shape[0] == target_num_dof - 2:
+        expanded = torch.zeros(target_num_dof, device=joint_vec.device, dtype=joint_vec.dtype)
+        expanded[2:] = joint_vec
+        return expanded
+
+    expanded = torch.zeros(target_num_dof, device=joint_vec.device, dtype=joint_vec.dtype)
+    n_copy = min(target_num_dof, joint_vec.shape[0])
+    expanded[:n_copy] = joint_vec[:n_copy]
+    return expanded
 
 
 # ---------------------------------------------------------------------------
@@ -765,7 +790,11 @@ def _align_wrist_palm_up(env, env_ids: torch.Tensor, wrist_quat: torch.Tensor) -
 def _get_local_palm_normal(robot, env) -> torch.Tensor:
     key = id(robot)
     if key not in _PALM_NORMAL_CACHE:
-        base_names = ["index_link_0", "ring_link_0", "thumb_link_0"]
+        hand_cfg = getattr(env.cfg, "hand", None) or {}
+        if hand_cfg.get("name") == "shadow":
+            base_names = ["robot0_ffknuckle", "robot0_rfknuckle", "robot0_thbase"]
+        else:
+            base_names = ["index_link_0", "ring_link_0", "thumb_link_0"]
         body_ids = [robot.find_bodies(name)[0][0] for name in base_names]
         pts_world = robot.data.body_pos_w[0:1, body_ids, :]
         root_pos = robot.data.root_pos_w[0:1]

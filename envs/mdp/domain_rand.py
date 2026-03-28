@@ -60,8 +60,7 @@ def randomize_robot_physics(
 ):
     n     = len(env_ids)
     robot = env.scene["robot"]
-    hand_cfg = getattr(env.cfg, "hand", None) or {}
-    n_dof = hand_cfg.get("num_dof", robot.data.joint_pos.shape[-1])
+    n_dof = robot.data.joint_pos.shape[-1]
 
     env_ids_cpu = env_ids.cpu()
     all_indices = torch.arange(env.num_envs, device="cpu")
@@ -91,8 +90,7 @@ def randomize_action_delay(
     n = len(env_ids)
 
     if "action_delay_buf" not in env.extras:
-        hand_cfg = getattr(env.cfg, "hand", None) or {}
-        n_dof = hand_cfg.get("num_dof", env.scene["robot"].data.joint_pos.shape[-1])
+        n_dof = env.scene["robot"].data.joint_pos.shape[-1]
         env.extras["action_delay_buf"] = torch.zeros(
             env.num_envs, max_delay + 1, n_dof, device=env.device
         )

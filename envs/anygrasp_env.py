@@ -8,10 +8,10 @@ Implements the core RL environment from DexterityGen §3.2 with:
   - Random object pool (cube / sphere / cylinder, multiple sizes)
   - Random Shadow Hand wrist position per episode
 
-Shadow Hand E-Series: 5 fingers, 22 DOF
+Shadow Hand E-Series: 5 fingers, 22 actuated DOF + 2 wrist DOF in Isaac = 24 total DOF
   FF×4 + MF×4 + RF×4 + LF×5 + TH×5 = 22 actuated DOF
   Isaac Lab joints:  rh_FFJ1-4, rh_MFJ1-4, rh_RFJ1-4, rh_LFJ1-5, rh_THJ1-5
-  Fingertip links:   rh_fftip, rh_mftip, rh_rftip, rh_lftip, rh_thtip
+  Fingertip links:   robot0_ffdistal, robot0_mfdistal, robot0_rfdistal, robot0_lfdistal, robot0_thdistal
 
 =======================================================================
   OBSERVATION SPLIT  (see mdp/observations.py for full details)
@@ -19,12 +19,12 @@ Shadow Hand E-Series: 5 fingers, 22 DOF
 
   ACTOR (policy) — 101 dims
   ─────────────────────────────────────────────────────────────────
-  joint_pos_normalized       22   (encoder, normalised)
-  joint_vel_normalized       22   (encoder derivative)
+  joint_pos_normalized       24   (encoder, normalised)
+  joint_vel_normalized       24   (encoder derivative)
   fingertip_pos_obj_frame    15   (FK in object-centric frame, 5×3)
   target_fingertip_pos       15   (goal from GraspGraph)
   fingertip_contact_binary    5   (tactile: binary contact per tip)
-  last_action                22   (previous joint targets)
+  last_action                24   (previous joint targets)
   ─────────────────────────────────────────────────────────────────
   Total: 101
 
@@ -182,8 +182,8 @@ if _ISAACLAB_AVAILABLE:
                 pos=(0.0, 0.0, 0.6),
                 rot=(1.0, 0.0, 0.0, 0.0),
                 joint_pos={
-                    "rh_THJ4": 0.5,   # thumb rotation: natural resting pose
-                    "rh_THJ3": 0.3,
+                    "robot0_THJ4": 0.5,   # thumb rotation: natural resting pose
+                    "robot0_THJ3": 0.3,
                 },
             ),
             actuators={
@@ -210,37 +210,37 @@ if _ISAACLAB_AVAILABLE:
             ),
         )
 
-        # Shadow Hand 5-finger contact sensors (rh_fftip .. rh_thtip)
+        # Shadow Hand 5-finger contact sensors (distal links in Isaac USD)
         fingertip_contact_sensor_ff: ContactSensorCfg = ContactSensorCfg(
-            prim_path="{ENV_REGEX_NS}/ShadowHand/rh_fftip",
+            prim_path="{ENV_REGEX_NS}/ShadowHand/robot0_ffdistal",
             update_period=0.0,
             history_length=1,
             debug_vis=False,
             filter_prim_paths_expr=["{ENV_REGEX_NS}/Object"],
         )
         fingertip_contact_sensor_mf: ContactSensorCfg = ContactSensorCfg(
-            prim_path="{ENV_REGEX_NS}/ShadowHand/rh_mftip",
+            prim_path="{ENV_REGEX_NS}/ShadowHand/robot0_mfdistal",
             update_period=0.0,
             history_length=1,
             debug_vis=False,
             filter_prim_paths_expr=["{ENV_REGEX_NS}/Object"],
         )
         fingertip_contact_sensor_rf: ContactSensorCfg = ContactSensorCfg(
-            prim_path="{ENV_REGEX_NS}/ShadowHand/rh_rftip",
+            prim_path="{ENV_REGEX_NS}/ShadowHand/robot0_rfdistal",
             update_period=0.0,
             history_length=1,
             debug_vis=False,
             filter_prim_paths_expr=["{ENV_REGEX_NS}/Object"],
         )
         fingertip_contact_sensor_lf: ContactSensorCfg = ContactSensorCfg(
-            prim_path="{ENV_REGEX_NS}/ShadowHand/rh_lftip",
+            prim_path="{ENV_REGEX_NS}/ShadowHand/robot0_lfdistal",
             update_period=0.0,
             history_length=1,
             debug_vis=False,
             filter_prim_paths_expr=["{ENV_REGEX_NS}/Object"],
         )
         fingertip_contact_sensor_th: ContactSensorCfg = ContactSensorCfg(
-            prim_path="{ENV_REGEX_NS}/ShadowHand/rh_thtip",
+            prim_path="{ENV_REGEX_NS}/ShadowHand/robot0_thdistal",
             update_period=0.0,
             history_length=1,
             debug_vis=False,
@@ -529,15 +529,15 @@ if _ISAACLAB_AVAILABLE:
             #   4-finger: FF + MF + RF + TH
             #   5-finger: FF + MF + RF + LF + TH  (Shadow Hand default)
             _TIP_LINK_SUBSETS = {
-                2: ["rh_fftip", "rh_thtip"],
-                3: ["rh_fftip", "rh_mftip", "rh_thtip"],
-                4: ["rh_fftip", "rh_mftip", "rh_rftip", "rh_thtip"],
-                5: ["rh_fftip", "rh_mftip", "rh_rftip", "rh_lftip", "rh_thtip"],
+                2: ["robot0_ffdistal", "robot0_thdistal"],
+                3: ["robot0_ffdistal", "robot0_mfdistal", "robot0_thdistal"],
+                4: ["robot0_ffdistal", "robot0_mfdistal", "robot0_rfdistal", "robot0_thdistal"],
+                5: ["robot0_ffdistal", "robot0_mfdistal", "robot0_rfdistal", "robot0_lfdistal", "robot0_thdistal"],
             }
 
             if self.hand is None:
                 self.hand = {
-                    "name": "shadow", "num_fingers": 5, "num_dof": 22, "dof_per_finger": 4,
+                    "name": "shadow", "num_fingers": 5, "num_dof": 24, "dof_per_finger": 4,
                     "fingertip_links": _TIP_LINK_SUBSETS[5],
                 }
             else:
@@ -556,11 +556,11 @@ if _ISAACLAB_AVAILABLE:
             self.hand["fingertip_links"] = tip_links
 
             sensor_attr_by_link = {
-                "rh_fftip": "fingertip_contact_sensor_ff",
-                "rh_mftip": "fingertip_contact_sensor_mf",
-                "rh_rftip": "fingertip_contact_sensor_rf",
-                "rh_lftip": "fingertip_contact_sensor_lf",
-                "rh_thtip": "fingertip_contact_sensor_th",
+                "robot0_ffdistal": "fingertip_contact_sensor_ff",
+                "robot0_mfdistal": "fingertip_contact_sensor_mf",
+                "robot0_rfdistal": "fingertip_contact_sensor_rf",
+                "robot0_lfdistal": "fingertip_contact_sensor_lf",
+                "robot0_thdistal": "fingertip_contact_sensor_th",
             }
             for link_name, sensor_attr in sensor_attr_by_link.items():
                 sensor_cfg = getattr(self.scene, sensor_attr)
