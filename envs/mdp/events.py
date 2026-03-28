@@ -218,7 +218,38 @@ def reset_to_random_grasp(
         solve_mean_err, solve_max_err = _measure_grasp_contact_error(env, env_ids, start_fps)
 
     # ------------------------------------------------------------------
-    # 7. Initialise action buffers (fixes last_action always being 0)
+    # 7. Compute target_object_pos/quat_hand from sim state as fallback.
+    #    For graphs generated without stored object_pos_hand (old Stage 0),
+    #    use the CURRENT object-in-hand pose.  Since the object doesn't move
+    #    during AnyGrasp-to-AnyGrasp, this equals the ideal target pose.
+    #    For new graphs with stored goal data, the extras were already set
+    #    above from goal_object_pos_hand_list and those take priority.
+    # ------------------------------------------------------------------
+    robot_for_goal = env.scene["robot"]
+    obj_for_goal   = env.scene["object"]
+    for i in range(n):
+        # Only fill in the fallback if we don't already have a valid goal
+        has_valid_goal = (
+            goal_object_pos_hand_list[i] is not None
+            and goal_object_quat_hand_list[i] is not None
+        )
+        if not has_valid_goal:
+            # Compute current object position in hand (wrist) frame
+            rp_w = robot_for_goal.data.root_pos_w[env_ids[i]]   # (3,)
+            rq_w = robot_for_goal.data.root_quat_w[env_ids[i]]  # (4,)
+            op_w = obj_for_goal.data.root_pos_w[env_ids[i]]     # (3,)
+            oq_w = obj_for_goal.data.root_quat_w[env_ids[i]]    # (4,)
+            rel  = op_w - rp_w
+            cur_obj_pos_hand = quat_apply_inverse(rq_w.unsqueeze(0), rel.unsqueeze(0))[0]
+            env.extras["target_object_pos_hand"][env_ids[i]] = cur_obj_pos_hand.clone()
+            # Object quat in hand frame
+            cur_obj_quat_hand = _quat_multiply(
+                _quat_conjugate(rq_w.unsqueeze(0)), oq_w.unsqueeze(0)
+            )[0]
+            env.extras["target_object_quat_hand"][env_ids[i]] = cur_obj_quat_hand.clone()
+
+    # ------------------------------------------------------------------
+    # 8. Initialise action buffers (fixes last_action always being 0)
     # ------------------------------------------------------------------
     robot = env.scene["robot"]
     current_q = robot.data.joint_pos[env_ids]  # (n, num_dof)

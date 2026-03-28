@@ -203,8 +203,16 @@ def _make_env_for_object(spec: dict, args, num_fingers: int, num_envs: int = 1):
     env_cfg.grasp_graph_path = "/tmp/stage0_refine_no_graph.pkl"
     env_cfg.hand = dict(env_cfg.hand or {})
     env_cfg.hand["num_fingers"] = int(num_fingers)
-    default_tip_links = ["index_link_3", "middle_link_3", "ring_link_3", "thumb_link_3"]
-    tip_links = default_tip_links[: int(num_fingers)]
+    # Must match GraspSampler._FINGER_SUBSETS so fingertip_positions order aligns
+    _TIP_LINK_SUBSETS = {
+        2: ["index_link_3", "thumb_link_3"],
+        3: ["index_link_3", "middle_link_3", "thumb_link_3"],
+        4: ["index_link_3", "middle_link_3", "ring_link_3", "thumb_link_3"],
+    }
+    tip_links = _TIP_LINK_SUBSETS.get(
+        int(num_fingers),
+        ["index_link_3", "middle_link_3", "ring_link_3", "thumb_link_3"][: int(num_fingers)],
+    )
     env_cfg.hand["fingertip_links"] = tip_links
     sensor_pattern = "|".join(re.escape(name) for name in tip_links)
     env_cfg.scene.fingertip_contact_sensor = env_cfg.scene.fingertip_contact_sensor.replace(

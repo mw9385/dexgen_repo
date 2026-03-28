@@ -251,3 +251,20 @@ def joint_limit_penalty(env) -> torch.Tensor:
 def wrist_height_penalty(env, min_height: float = 0.1) -> torch.Tensor:
     """Prevent wrist-table collision. Returns: (N,) >= 0"""
     return torch.relu(min_height - env.scene["robot"].data.root_pos_w[:, 2])
+
+
+def object_left_hand_penalty(env, max_dist: float = 0.25) -> torch.Tensor:
+    """
+    Binary penalty when object escapes from the hand (any direction).
+
+    Catches upward flings, sideways slips, and downward drops — unlike
+    object_drop_penalty which only fires when the object hits the floor.
+    Used together with the object_left_hand DoneTerm for immediate episode
+    termination + large negative reward.
+
+    Returns: (N,)  0.0 or 1.0
+    """
+    robot = env.scene["robot"]
+    obj   = env.scene["object"]
+    dist  = torch.norm(obj.data.root_pos_w - robot.data.root_pos_w, dim=-1)
+    return (dist > max_dist).float()
