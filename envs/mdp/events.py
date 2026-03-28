@@ -431,9 +431,10 @@ def _sample_wrist_pose_world(
     n = len(env_ids)
     cfg = getattr(env.cfg, "reset_randomization", {}) or {}
 
-    root_pose = robot.data.default_root_state[env_ids, :7].clone()
-    wrist_pos = root_pose[:, :3]
-    wrist_quat = root_pose[:, 3:7]
+    # default_root_state is in LOCAL env frame.  Add env origin to get world frame.
+    root_local = robot.data.default_root_state[env_ids, :7].clone()
+    wrist_pos = root_local[:, :3] + env.scene.env_origins[env_ids]
+    wrist_quat = root_local[:, 3:7]
 
     pos_jitter_std = float(cfg.get("wrist_pos_jitter_std", 0.005))
     if pos_jitter_std > 0.0:
@@ -474,6 +475,8 @@ def _set_object_pose_from_grasp(
     robot_pos = robot.data.root_pos_w[env_ids]
     robot_quat = robot.data.root_quat_w[env_ids]
     root_state = obj.data.default_root_state[env_ids].clone()
+    # default_root_state is LOCAL → convert base positions to world for the fallback
+    root_state[:, :3] += env.scene.env_origins[env_ids]
 
     for i, (pos_hand, quat_hand) in enumerate(zip(object_pos_hand_list, object_quat_hand_list)):
         if pos_hand is None or quat_hand is None:
@@ -948,7 +951,8 @@ def _randomise_object_pose(env, env_ids: torch.Tensor):
     cfg = getattr(env.cfg, "reset_randomization", {}) or {}
 
     default_state = obj.data.default_root_state[env_ids].clone()
-    default_pos = default_state[:, :3].clone()
+    # default_root_state is in LOCAL env frame → add env origin to get world frame.
+    default_pos = default_state[:, :3].clone() + env.scene.env_origins[env_ids]
     pos_std = float(cfg.get("object_pos_jitter_std", 0.0))
     if pos_std > 0.0:
         default_pos += torch.randn(n, 3, device=env.device) * pos_std
