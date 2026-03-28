@@ -117,12 +117,7 @@ def fingertip_contact_binary(env) -> torch.Tensor:
     Returns: (N, num_fingers)
     """
     num_fingers = _get_num_fingers(env)
-    sensor = env.scene.sensors.get("fingertip_contact_sensor")
-    if sensor is None:
-        return torch.zeros(env.num_envs, num_fingers, device=env.device)
-
-    forces = _sensor_force_vectors(sensor)
-    forces = forces[:, :num_fingers, :]
+    forces = _get_fingertip_contact_forces_world(env)
     force_mag = torch.norm(forces, dim=-1)                       # (N, F)
     return (force_mag > 0.5).float()
 
@@ -170,12 +165,7 @@ def fingertip_contact_forces(env) -> torch.Tensor:
     Returns: (N, num_fingers*3)  [fx, fy, fz] × num_fingers tips
     """
     num_fingers = _get_num_fingers(env)
-    sensor = env.scene.sensors.get("fingertip_contact_sensor")
-    if sensor is None:
-        return torch.zeros(env.num_envs, num_fingers * 3, device=env.device)
-
-    forces = _sensor_force_vectors(sensor)
-    forces = forces[:, :num_fingers, :]
+    forces = _get_fingertip_contact_forces_world(env)
     return (forces / 10.0).clamp(-3.0, 3.0).reshape(env.num_envs, -1)
 
 
@@ -209,6 +199,13 @@ _ALLEGRO_TIP_NAMES = [
     "ring_link_3",    # ring
     "thumb_link_3",   # thumb
 ]
+
+_SENSOR_KEY_BY_LINK_NAME = {
+    "index_link_3": "fingertip_contact_sensor_index",
+    "middle_link_3": "fingertip_contact_sensor_middle",
+    "ring_link_3": "fingertip_contact_sensor_ring",
+    "thumb_link_3": "fingertip_contact_sensor_thumb",
+}
 
 # Cached fingertip body ID lookup  (keyed by robot object id)
 _FT_IDS_CACHE: dict = {}
@@ -259,6 +256,36 @@ def _sensor_force_vectors(sensor) -> torch.Tensor:
         return forces[:, :, 0, :]
     # Fall back to treating dim 1 as history and using the latest frame.
     return forces[:, -1, :, :]
+
+
+def _get_fingertip_contact_forces_world(env) -> torch.Tensor:
+    """
+    Return fingertip-object contact forces as (N, F, 3) in fingertip order.
+
+    Each fingertip has its own ContactSensorCfg because Isaac Lab only supports
+    filtered one-to-many contact reporting when a sensor matches a single body.
+    """
+    hand_cfg = _get_hand_cfg(env)
+    tip_links = hand_cfg.get("fingertip_links", _ALLEGRO_TIP_NAMES)
+    if len(tip_links) == 0:
+        return torch.zeros(env.num_envs, 0, 3, device=env.device)
+
+    per_tip_forces = []
+    for link_name in tip_links:
+        sensor_key = _SENSOR_KEY_BY_LINK_NAME.get(link_name)
+        sensor = env.scene.sensors.get(sensor_key) if sensor_key is not None else None
+        if sensor is None:
+            per_tip_forces.append(torch.zeros(env.num_envs, 3, device=env.device))
+            continue
+
+        force_matrix = getattr(sensor.data, "force_matrix_w", None)
+        if force_matrix is not None and force_matrix.numel() > 0:
+            tip_force = force_matrix[:, 0, 0, :]
+        else:
+            tip_force = _sensor_force_vectors(sensor)[:, 0, :]
+        per_tip_forces.append(tip_force)
+
+    return torch.stack(per_tip_forces, dim=1)
 
 
 def _transform_points_to_local_frame(

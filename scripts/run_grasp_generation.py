@@ -52,33 +52,33 @@ def parse_args():
     p = argparse.ArgumentParser(description="DexGen Stage 0: Multi-Object Grasp Generation")
 
     # Object pool
-    p.add_argument("--shapes", nargs="+", default=["cube", "sphere", "cylinder"],
+    p.add_argument("--shapes", nargs="+", default=None,
                    choices=["cube", "sphere", "cylinder"],
                    help="Primitive shapes to include in the object pool")
-    p.add_argument("--size_min", type=float, default=0.04,
-                   help="Minimum object size in metres (default: 4 cm)")
-    p.add_argument("--size_max", type=float, default=0.09,
-                   help="Maximum object size in metres (default: 9 cm)")
-    p.add_argument("--num_sizes", type=int, default=3,
-                   help="Number of size steps per shape (default: 3)")
+    p.add_argument("--size_min", type=float, default=None,
+                   help="Minimum object size in metres")
+    p.add_argument("--size_max", type=float, default=None,
+                   help="Maximum object size in metres")
+    p.add_argument("--num_sizes", type=int, default=None,
+                   help="Number of size steps per shape")
     p.add_argument("--mesh_path", type=str, default=None,
                    help="Single custom mesh file instead of pool (.obj/.stl/.ply)")
     p.add_argument("--mesh_dir", type=str, default=None,
                    help="Directory of mesh files — all loaded as pool objects")
 
     # Grasp generation quality
-    p.add_argument("--num_seed_grasps", type=int, default=300,
+    p.add_argument("--num_seed_grasps", type=int, default=None,
                    help="Seed grasps per object before NFO filtering")
-    p.add_argument("--num_grasps", type=int, default=300,
+    p.add_argument("--num_grasps", type=int, default=None,
                    help="Target grasps per object after RRT expansion")
-    p.add_argument("--min_quality", type=float, default=0.005,
+    p.add_argument("--min_quality", type=float, default=None,
                    help="Minimum NFO quality score")
-    p.add_argument("--mu", type=float, default=0.5,
+    p.add_argument("--mu", type=float, default=None,
                    help="Friction coefficient for NFO")
-    p.add_argument("--fast_nfo", action="store_true",
-                   help="Fast SVD approximation for NFO (less accurate)")
+    p.add_argument("--fast_nfo", action=argparse.BooleanOptionalAction, default=None,
+                   help="Use fast SVD approximation for NFO")
 
-    p.add_argument("--output_dir", type=str, default="data")
+    p.add_argument("--output_dir", type=str, default=None)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument(
         "--config", type=str,
@@ -220,10 +220,22 @@ def _make_env_for_object(spec: dict, args, num_fingers: int, num_envs: int = 1):
         ["index_link_3", "middle_link_3", "ring_link_3", "thumb_link_3"][: int(num_fingers)],
     )
     env_cfg.hand["fingertip_links"] = tip_links
-    sensor_pattern = "|".join(re.escape(name) for name in tip_links)
-    env_cfg.scene.fingertip_contact_sensor = env_cfg.scene.fingertip_contact_sensor.replace(
-        prim_path=f"{{ENV_REGEX_NS}}/AllegroHand/({sensor_pattern})"
-    )
+    sensor_attr_by_link = {
+        "index_link_3": "fingertip_contact_sensor_index",
+        "middle_link_3": "fingertip_contact_sensor_middle",
+        "ring_link_3": "fingertip_contact_sensor_ring",
+        "thumb_link_3": "fingertip_contact_sensor_thumb",
+    }
+    for link_name, sensor_attr in sensor_attr_by_link.items():
+        sensor_cfg = getattr(env_cfg.scene, sensor_attr)
+        setattr(
+            env_cfg.scene,
+            sensor_attr,
+            sensor_cfg.replace(
+                prim_path=f"{{ENV_REGEX_NS}}/AllegroHand/{link_name}",
+                filter_prim_paths_expr=["{ENV_REGEX_NS}/Object"],
+            ),
+        )
     if getattr(args, "headless", False):
         env_cfg.viewer = None
 
@@ -739,8 +751,6 @@ def main():
     args = parse_args()
     app_launcher = AppLauncher(args)
     sim_app = app_launcher.app
-    output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
     try:
         # ------------------------------------------------------------------
         # Load config file and resolve num_fingers / num_dof
@@ -756,6 +766,40 @@ def main():
             print(f"[Stage 0] Config not found at {cfg_path}, using defaults.")
 
         hand_cfg = cfg_file.get("hand", {})
+        object_pool_cfg = cfg_file.get("object_pool", {})
+        sampler_cfg = cfg_file.get("sampler", {})
+        nfo_cfg = cfg_file.get("nfo", {})
+        rrt_cfg = cfg_file.get("rrt", {})
+
+        # ------------------------------------------------------------------
+        # Resolve config-overridable CLI values.
+        # CLI takes precedence. If omitted, fall back to YAML. If YAML also
+        # omits the value, fall back to the historical hard-coded default.
+        # ------------------------------------------------------------------
+        args.shapes = args.shapes or object_pool_cfg.get("shapes", ["cube", "sphere", "cylinder"])
+        args.size_min = float(args.size_min if args.size_min is not None else object_pool_cfg.get("size_min", 0.04))
+        args.size_max = float(args.size_max if args.size_max is not None else object_pool_cfg.get("size_max", 0.09))
+        args.num_sizes = int(args.num_sizes if args.num_sizes is not None else object_pool_cfg.get("num_sizes", 3))
+
+        args.num_seed_grasps = int(
+            args.num_seed_grasps if args.num_seed_grasps is not None else sampler_cfg.get("num_seed_grasps", 300)
+        )
+        args.num_grasps = int(
+            args.num_grasps if args.num_grasps is not None else rrt_cfg.get("target_size", 300)
+        )
+        args.min_quality = float(
+            args.min_quality if args.min_quality is not None else nfo_cfg.get("min_quality", 0.005)
+        )
+        args.mu = float(
+            args.mu if args.mu is not None else nfo_cfg.get("mu", 0.5)
+        )
+        if args.fast_nfo is None:
+            args.fast_nfo = bool(nfo_cfg.get("fast_mode", False))
+        args.output_dir = args.output_dir or cfg_file.get("output_dir", "data")
+
+        output_dir = Path(args.output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
         if args.num_fingers is not None:
             num_fingers = args.num_fingers
         else:
@@ -766,6 +810,12 @@ def main():
 
         print(f"[Stage 0] Hand:       {hand_cfg.get('name', 'allegro')}  "
               f"(num_fingers={num_fingers}, num_dof={num_dof})")
+        print(f"[Stage 0] Object pool: shapes={args.shapes}, "
+              f"size_range=({args.size_min:.3f}, {args.size_max:.3f}), "
+              f"num_sizes={args.num_sizes}")
+        print(f"[Stage 0] Sampler/NFO/RRT: seeds={args.num_seed_grasps}, "
+              f"target={args.num_grasps}, min_quality={args.min_quality}, "
+              f"mu={args.mu}, fast_nfo={args.fast_nfo}")
 
         # ------------------------------------------------------------------
         # Build object pool
@@ -791,14 +841,9 @@ def main():
                 seed=args.seed,
             )
 
-        # Determine which finger counts to process.
-        # If a specific --num_fingers was requested, only do that one.
-        # Otherwise, generate grasps for 2, 3, and 4 fingers so the policy
-        # is trained on diverse contact configurations.
-        if args.num_fingers is not None:
-            finger_counts = [int(args.num_fingers)]
-        else:
-            finger_counts = [2, 3, 4]
+        # Respect the configured/default finger count unless the caller
+        # explicitly overrides it via CLI.
+        finger_counts = [int(num_fingers)]
 
         print(f"\n[Stage 0] Processing {len(pool)} objects × {finger_counts} finger configs")
 

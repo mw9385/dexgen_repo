@@ -206,8 +206,29 @@ if _ISAACLAB_AVAILABLE:
             ),
         )
 
-        fingertip_contact_sensor: ContactSensorCfg = ContactSensorCfg(
-            prim_path="{ENV_REGEX_NS}/AllegroHand/.*biotac_tip",
+        fingertip_contact_sensor_index: ContactSensorCfg = ContactSensorCfg(
+            prim_path="{ENV_REGEX_NS}/AllegroHand/index_link_3",
+            update_period=0.0,
+            history_length=1,
+            debug_vis=False,
+            filter_prim_paths_expr=["{ENV_REGEX_NS}/Object"],
+        )
+        fingertip_contact_sensor_middle: ContactSensorCfg = ContactSensorCfg(
+            prim_path="{ENV_REGEX_NS}/AllegroHand/middle_link_3",
+            update_period=0.0,
+            history_length=1,
+            debug_vis=False,
+            filter_prim_paths_expr=["{ENV_REGEX_NS}/Object"],
+        )
+        fingertip_contact_sensor_ring: ContactSensorCfg = ContactSensorCfg(
+            prim_path="{ENV_REGEX_NS}/AllegroHand/ring_link_3",
+            update_period=0.0,
+            history_length=1,
+            debug_vis=False,
+            filter_prim_paths_expr=["{ENV_REGEX_NS}/Object"],
+        )
+        fingertip_contact_sensor_thumb: ContactSensorCfg = ContactSensorCfg(
+            prim_path="{ENV_REGEX_NS}/AllegroHand/thumb_link_3",
             update_period=0.0,
             history_length=1,
             debug_vis=False,
@@ -216,6 +237,7 @@ if _ISAACLAB_AVAILABLE:
 
         num_envs:    int   = MISSING
         env_spacing: float = 1.5
+        replicate_physics: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -519,10 +541,22 @@ if _ISAACLAB_AVAILABLE:
                 tip_links = tip_links[:requested_fingers]
             self.hand["fingertip_links"] = tip_links
 
-            sensor_pattern = "|".join(re.escape(name) for name in tip_links)
-            self.scene.fingertip_contact_sensor = self.scene.fingertip_contact_sensor.replace(
-                prim_path=f"{{ENV_REGEX_NS}}/AllegroHand/({sensor_pattern})"
-            )
+            sensor_attr_by_link = {
+                "index_link_3": "fingertip_contact_sensor_index",
+                "middle_link_3": "fingertip_contact_sensor_middle",
+                "ring_link_3": "fingertip_contact_sensor_ring",
+                "thumb_link_3": "fingertip_contact_sensor_thumb",
+            }
+            for link_name, sensor_attr in sensor_attr_by_link.items():
+                sensor_cfg = getattr(self.scene, sensor_attr)
+                setattr(
+                    self.scene,
+                    sensor_attr,
+                    sensor_cfg.replace(
+                        prim_path=f"{{ENV_REGEX_NS}}/AllegroHand/{link_name}",
+                        filter_prim_paths_expr=["{ENV_REGEX_NS}/Object"],
+                    ),
+                )
             
             # action_scale=1.0 maps policy output [-1, 1] to the full soft joint range.
             self.actions.joint_pos.scale = self.action_scale

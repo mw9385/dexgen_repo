@@ -641,6 +641,7 @@ def _set_robot_joints_direct(
         torch.zeros_like(joint_pos),
         env_ids=env_ids,
     )
+    robot.set_joint_position_target(joint_pos, env_ids=env_ids)
 
 
 # ---------------------------------------------------------------------------
@@ -977,7 +978,7 @@ def _refine_hand_to_start_grasp(
         joint_pos = robot.data.joint_pos[env_ids].clone()
         joint_pos = torch.clamp(joint_pos + delta, joint_lower, joint_upper)
         robot.write_joint_state_to_sim(joint_pos, torch.zeros_like(joint_pos), env_ids=env_ids)
-        robot.set_joint_position_target(joint_pos)
+        robot.set_joint_position_target(joint_pos, env_ids=env_ids)
 
 
 def _look_at_quat(direction: torch.Tensor) -> torch.Tensor:
@@ -1188,6 +1189,7 @@ def _set_robot_to_fingertip_config(
         torch.zeros_like(default_q),
         env_ids=env_ids,
     )
+    robot.set_joint_position_target(default_q, env_ids=env_ids)
 
 
 def _reset_to_default_pose(env, env_ids: torch.Tensor):
@@ -1195,6 +1197,7 @@ def _reset_to_default_pose(env, env_ids: torch.Tensor):
     joint_pos = robot.data.default_joint_pos[env_ids]
     joint_vel = torch.zeros_like(joint_pos)
     robot.write_joint_state_to_sim(joint_pos, joint_vel, env_ids=env_ids)
+    robot.set_joint_position_target(joint_pos, env_ids=env_ids)
     hand_cfg = getattr(env.cfg, "hand", None) or {}
     num_fingers = hand_cfg.get("num_fingers", 4)
     num_dof = joint_pos.shape[-1]
