@@ -324,12 +324,15 @@ def _refine_object_graph_joints(graph, spec: dict, args) -> tuple[float, float]:
             avg_norm_obj = avg_norm_obj / (avg_norm_obj.norm(dim=-1, keepdim=True) + 1e-8)
             avg_norm_w   = _quat_apply(obj_quat_w, avg_norm_obj)  # (n, 3) world frame
 
-            # Place wrist root 20 cm along the approach direction from the
-            # object centroid.  This keeps the hand in the fingertip workspace
-            # regardless of which side of the object the grasp is from, and
-            # avoids the "hand stuck at z=0.6 far above the object" failure.
-            _WRIST_STANDOFF_S0 = 0.20  # metres
-            wrist_pos_w  = obj_pos_w + avg_norm_w * _WRIST_STANDOFF_S0  # (n,3)
+            # Place wrist root along the approach direction from the object centroid.
+            # Standoff is computed adaptively per-env: max fingertip-to-center radius
+            # in object frame + 0.05 m approach margin, clamped to [0.08, 0.14] m.
+            # A fixed 0.20 m was too large for the Allegro Hand whose longest finger
+            # reaches only ~13 cm — fingertips could not physically reach contact
+            # points (3-4 cm residual IK errors, all grasps discarded).
+            fp_max_radius = start_fps_body.norm(dim=-1).max(dim=-1).values  # (n,)
+            standoff_s0   = (fp_max_radius + 0.05).clamp(0.08, 0.14)        # (n,) m
+            wrist_pos_w   = obj_pos_w + avg_norm_w * standoff_s0.unsqueeze(-1)  # (n,3)
             # Apply per-grasp uniform yaw so Stage 0 data covers the full
             # wrist_rot_std_deg=20° range used in Stage 1 training.
             # Bounded uniform is safer than Gaussian here: IK convergence is
@@ -460,7 +463,7 @@ def _refine_object_graph_joints(graph, spec: dict, args) -> tuple[float, float]:
                     avg_n_obj_r  = cn_retry.mean(dim=1)
                     avg_n_obj_r  = avg_n_obj_r / (avg_n_obj_r.norm(dim=-1, keepdim=True) + 1e-8)
                     avg_n_w_r    = _quat_apply(obj_q_retry, avg_n_obj_r)
-                    new_pos      = obj_p_retry + avg_n_w_r * _WRIST_STANDOFF_S0
+                    new_pos      = obj_p_retry + avg_n_w_r * standoff_s0[high_mask].unsqueeze(-1)
 
                     mdp_events._set_robot_root_pose(env, retry_env_ids, new_pos, new_quat)
                     mdp_events._set_robot_to_fingertip_config(
