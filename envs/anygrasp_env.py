@@ -435,9 +435,24 @@ if _ISAACLAB_AVAILABLE:
             self.sim.dt = 1.0 / 120.0
             self.sim.render_interval = self.decimation
 
-            if self.object_pool_specs:
-                spawner = _build_object_spawner(self.object_pool_specs)
-                self.scene.object = self.scene.object.replace(spawn=spawner)
+            # Build multi-object spawner.
+            # Priority: explicit object_pool_specs > default diverse pool.
+            # "Default diverse pool" covers cube/sphere/cylinder at 3 sizes so
+            # even without running Stage 0 the env uses varied objects.
+            _DEFAULT_POOL = [
+                {"shape_type": "cube",     "size": 0.045, "mass": 0.08, "color": (0.9, 0.2, 0.2)},
+                {"shape_type": "cube",     "size": 0.060, "mass": 0.10, "color": (0.8, 0.2, 0.2)},
+                {"shape_type": "cube",     "size": 0.075, "mass": 0.13, "color": (0.7, 0.2, 0.2)},
+                {"shape_type": "sphere",   "size": 0.045, "mass": 0.07, "color": (0.2, 0.5, 0.9)},
+                {"shape_type": "sphere",   "size": 0.060, "mass": 0.10, "color": (0.2, 0.4, 0.8)},
+                {"shape_type": "sphere",   "size": 0.075, "mass": 0.13, "color": (0.2, 0.3, 0.7)},
+                {"shape_type": "cylinder", "size": 0.045, "mass": 0.08, "color": (0.2, 0.8, 0.3)},
+                {"shape_type": "cylinder", "size": 0.060, "mass": 0.10, "color": (0.2, 0.7, 0.3)},
+                {"shape_type": "cylinder", "size": 0.075, "mass": 0.13, "color": (0.2, 0.6, 0.3)},
+            ]
+            specs = self.object_pool_specs or _DEFAULT_POOL
+            spawner = _build_object_spawner(specs)
+            self.scene.object = self.scene.object.replace(spawn=spawner)
 
             if self.wrist_randomization is None:
                 self.wrist_randomization = {
@@ -469,17 +484,36 @@ if _ISAACLAB_AVAILABLE:
                     "pos_threshold": 0.005,
                 }
 
+            # Finger link subsets must MATCH GraspSampler._FINGER_SUBSETS so
+            # fingertip_positions order in grasps aligns with sensor/obs order.
+            #   2-finger: index + thumb   (pinch — thumb always required)
+            #   3-finger: index + middle + thumb
+            #   4-finger: index + middle + ring + thumb   (Allegro default)
+            _TIP_LINK_SUBSETS = {
+                2: ["index_link_3", "thumb_link_3"],
+                3: ["index_link_3", "middle_link_3", "thumb_link_3"],
+                4: ["index_link_3", "middle_link_3", "ring_link_3", "thumb_link_3"],
+                5: ["index_link_3", "middle_link_3", "ring_link_3", "thumb_link_3", "pinky_link_3"],
+            }
+
             if self.hand is None:
                 self.hand = {
                     "name": "allegro", "num_fingers": 4, "num_dof": 16, "dof_per_finger": 4,
-                    "fingertip_links": ["index_link_3", "middle_link_3", "ring_link_3", "thumb_link_3"],
+                    "fingertip_links": _TIP_LINK_SUBSETS[4],
                 }
             else:
                 self.hand = dict(self.hand)
 
-            default_tip_links = ["index_link_3", "middle_link_3", "ring_link_3", "thumb_link_3"]
-            requested_fingers = int(self.hand.get("num_fingers", len(default_tip_links)))
-            tip_links = list(self.hand.get("fingertip_links", default_tip_links))[:requested_fingers]
+            requested_fingers = int(self.hand.get("num_fingers", 4))
+            # Use pre-defined subset when possible; fall back to first-N of 4-finger list
+            default_tips = _TIP_LINK_SUBSETS.get(
+                requested_fingers,
+                _TIP_LINK_SUBSETS[4][:requested_fingers],
+            )
+            tip_links = list(self.hand.get("fingertip_links", default_tips))
+            # If caller provided a full list, trim to requested count
+            if len(tip_links) > requested_fingers:
+                tip_links = tip_links[:requested_fingers]
             self.hand["fingertip_links"] = tip_links
 
             sensor_pattern = "|".join(re.escape(name) for name in tip_links)

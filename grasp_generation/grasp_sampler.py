@@ -277,7 +277,17 @@ class GraspSampler:
     (e.g. 2 for pinch, 3 for tripod, 4 for full Allegro, 5 for Shadow).
     """
 
-    # Default Allegro finger names (overridden by num_fingers at __init__)
+    # Canonical finger order: ALWAYS include thumb for stable grasps.
+    # index+thumb (2-finger pinch) and index+middle+thumb (3-finger tripod)
+    # have much higher success than index+middle (no thumb).
+    # The 4-finger set matches the Allegro link order: index/middle/ring/thumb.
+    _FINGER_SUBSETS = {
+        2: ["index", "thumb"],
+        3: ["index", "middle", "thumb"],
+        4: ["index", "middle", "ring", "thumb"],
+        5: ["index", "middle", "ring", "thumb", "pinky"],
+    }
+    # Fallback list for num_fingers > 5
     _DEFAULT_FINGER_NAMES = ["index", "middle", "ring", "thumb", "pinky"]
 
     # Heuristic parameters (scale-adaptive, set in __init__)
@@ -299,7 +309,9 @@ class GraspSampler:
         self.num_candidates = num_candidates
         self.num_grasps = num_grasps
         self.num_fingers = num_fingers
-        self.finger_names = self._DEFAULT_FINGER_NAMES[:num_fingers]
+        self.finger_names = self._FINGER_SUBSETS.get(
+            num_fingers, self._DEFAULT_FINGER_NAMES[:num_fingers]
+        )
         self.rng = np.random.default_rng(seed)
 
         # Scale finger spacing with object size
