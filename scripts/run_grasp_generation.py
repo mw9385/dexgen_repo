@@ -749,10 +749,6 @@ def process_one_object_dexgraspnet(
     )
     print(f"  [mesh] Exported to {obj_path} (scale={scale:.4f}m)")
 
-    # Load normalised mesh for contact normal computation
-    import trimesh
-    unit_mesh = trimesh.load(str(obj_path), force="mesh", process=False)
-
     # Step 2-4: DexGraspNet optimisation + filter + convert
     cfg = DexGraspNetConfig(
         batch_size=args.dgn_batch_size,
@@ -763,7 +759,6 @@ def process_one_object_dexgraspnet(
     )
 
     grasps = generate_grasps_dexgraspnet(
-        mesh=unit_mesh,
         object_code=spec.name,
         meshdata_root=str(meshdata_root),
         object_scale=scale,
@@ -985,13 +980,19 @@ def main():
                 seed_offset = i * 100 + nf * 1000
 
                 if args.grasp_method == "dexgraspnet":
-                    graph, isaac_spec = process_one_object_dexgraspnet(
-                        spec, args,
-                        seed_offset=seed_offset,
-                        num_fingers=nf,
-                        num_dof=num_dof,
-                        dof_per_finger=dof_per_finger,
-                    )
+                    try:
+                        graph, isaac_spec = process_one_object_dexgraspnet(
+                            spec, args,
+                            seed_offset=seed_offset,
+                            num_fingers=nf,
+                            num_dof=num_dof,
+                            dof_per_finger=dof_per_finger,
+                        )
+                    except Exception as e:
+                        import traceback
+                        print(f"\n  [ERROR] DexGraspNet failed for {spec.name}: {e}")
+                        traceback.print_exc()
+                        graph, isaac_spec = None, None
                 else:
                     graph, isaac_spec = process_one_object(
                         spec, args,
