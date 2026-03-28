@@ -2,6 +2,39 @@
 Reward functions for the AnyGrasp-to-AnyGrasp environment.
 
 All functions follow the Isaac Lab RewardTerm signature:
+  FULL REWARD BREAKDOWN  (aligned with DexGen paper §3.2)
+
+  Goal-related rewards (encouraging goal-directed behavior):
+    object_pose_reward        +15.0   exp distance: object → target pose in hand
+    finger_joint_goal_reward   +8.0   exp distance: joints → goal joint angles
+    fingertip_tracking         +5.0   exp distance to goal per fingertip (auxiliary)
+    grasp_success             +50.0   binary bonus: all tips within ε
+
+  Style reward (DexGen paper: fingertip velocity penalty):
+    fingertip_velocity        -0.5    penalise fast fingertip motion
+
+  Safety / contact rewards:
+    fingertip_contact          +2.0   maintain contact during transition
+
+  Regularization (DexGen paper: action scale, torque, work):
+    torque_penalty            -0.002  penalise large joint torques
+    mechanical_work_penalty   -0.001  penalise mechanical work (τ·q̇)
+    action_rate               -0.01   penalise large action changes (jerk)
+
+  Stability penalties:
+    object_velocity           -0.5    penalise spinning / flinging object
+    object_drop             -200.0    heavy penalty on drop
+    object_left_hand         -100.0   penalty when object escapes from hand
+    joint_limit               -0.1    soft penalty near joint limits
+    wrist_height              -1.0    prevent wrist from hitting table
+
+  Reward scale discussion:
+    - object_pose_reward exp(-20*dist): at dist=5 cm → 0.37, at 0 → 1.0
+    - finger_joint_goal_reward exp(-5*||Δq||): at dist=0.2 rad → 0.37
+    - grasp_success fires only when ALL 4 tips are within 1 cm
+    - fingertip_velocity: relu(||v_tip|| - 0.1 m/s) per tip, summed
+    - torque_penalty: sum(||τ_i||) / num_joints
+    - mechanical_work_penalty: sum(|τ_i · q̇_i|) / num_joints
 func(env: ManagerBasedRLEnv, **kwargs) -> torch.Tensor  (num_envs,)
 
 # =======================================================================

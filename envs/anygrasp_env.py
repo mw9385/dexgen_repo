@@ -300,80 +300,79 @@ if _ISAACLAB_AVAILABLE:
 # ---------------------------------------------------------------------------
 
 if _ISAACLAB_AVAILABLE:
-  @configclass
-  class AnyGraspRewardsCfg:
-      object_pose_goal = RewTerm(
-          func=mdp_rewards.object_pose_goal_reward,
-          weight=15.0,
-          params={"pos_scale": 10.0, "rot_scale": 5.0},
-      )
-      finger_joint_goal = RewTerm(
-          func=mdp_rewards.finger_joint_goal_reward,
-          weight=5.0,
-          params={"scale": 5.0},
-      )
-      fingertip_tracking = RewTerm(
-          func=mdp_rewards.fingertip_tracking_reward,
-          weight=10.0,
-          params={"alpha": 20.0},
-      )
-      grasp_success = RewTerm(
-          func=mdp_rewards.grasp_success_reward,
-          weight=50.0,
-          params={"threshold": 0.01},
-      )
-  
-      # ─── 2. Style  ───
-  
-      fingertip_velocity = RewTerm(
-          func=mdp_rewards.fingertip_velocity_penalty,
-          weight=-0.5,
-      )
-  
-      # ─── 3. Regularization  ───
-  
-      action_scale = RewTerm(
-          func=mdp_rewards.action_scale_penalty,
-          weight=-0.005,
-      )
-      applied_torque = RewTerm(
-          func=mdp_rewards.applied_torque_penalty,
-          weight=-0.001,
-      )
-      mechanical_work = RewTerm(
-          func=mdp_rewards.mechanical_work_penalty,
-          weight=-0.002,
-      )
-      action_rate = RewTerm(
-          func=mdp_rewards.action_rate_penalty,
-          weight=-0.01,
-      )
-  
-      # ─── 4. Safety (논문 외 공학적 안정화) ───
-  
-      fingertip_contact = RewTerm(
-          func=mdp_rewards.fingertip_contact_reward,
-          weight=2.0,
-      )
-      object_velocity = RewTerm(
-          func=mdp_rewards.object_velocity_penalty,
-          weight=-0.5,
-          params={"lin_thresh": 0.1, "ang_thresh": 1.0},
-      )
-      object_drop = RewTerm(
-          func=mdp_rewards.object_drop_penalty,
-          weight=-200.0,
-          params={"min_height": 0.2},
-      )
-      joint_limit = RewTerm(
-          func=mdp_rewards.joint_limit_penalty,
-          weight=-0.1,
-      )
-      wrist_height = RewTerm(
-          func=mdp_rewards.wrist_height_penalty,
-          weight=-1.0,
-          params={"min_height": 0.1},
-      )
+    @configclass
+    class AnyGraspRewardsCfg:
+        # --- Goal-related (DexGen paper §3.2 goal reward) ---
+        object_pose = RewTerm(
+            func=mdp_rewards.object_pose_reward,
+            weight=15.0,
+            params={"alpha": 20.0},
+        )
+        finger_joint_goal = RewTerm(
+            func=mdp_rewards.finger_joint_goal_reward,
+            weight=8.0,
+            params={"alpha": 5.0},
+        )
+        fingertip_tracking = RewTerm(
+            func=mdp_rewards.fingertip_tracking_reward,
+            weight=5.0,
+            params={"alpha": 20.0},
+        )
+        grasp_success = RewTerm(
+            func=mdp_rewards.grasp_success_reward,
+            weight=50.0,
+            params={"threshold": 0.01},
+        )
+        # --- Style reward (DexGen paper: fingertip velocity) ---
+        fingertip_velocity = RewTerm(
+            func=mdp_rewards.fingertip_velocity_penalty,
+            weight=-0.5,
+            params={"vel_thresh": 0.1},
+        )
+        # --- Contact reward ---
+        fingertip_contact = RewTerm(
+            func=mdp_rewards.fingertip_contact_reward,
+            weight=2.0,
+        )
+        # --- Regularization (DexGen paper: torque, work, action scale) ---
+        torque = RewTerm(
+            func=mdp_rewards.torque_penalty,
+            weight=-0.002,
+        )
+        mechanical_work = RewTerm(
+            func=mdp_rewards.mechanical_work_penalty,
+            weight=-0.001,
+        )
+        action_rate = RewTerm(
+            func=mdp_rewards.action_rate_penalty,
+            weight=-0.01,
+        )
+        # --- Stability / safety ---
+        object_velocity = RewTerm(
+            func=mdp_rewards.object_velocity_penalty,
+            weight=-0.5,
+            params={"lin_thresh": 0.1, "ang_thresh": 1.0},
+        )
+        object_drop = RewTerm(
+            func=mdp_rewards.object_drop_penalty,
+            weight=-200.0,
+            params={"min_height": 0.2},
+        )
+        object_left_hand = RewTerm(
+            func=mdp_rewards.object_left_hand_penalty,
+            weight=-100.0,
+            params={"max_dist": 0.25},
+        )
+        joint_limit = RewTerm(
+            func=mdp_rewards.joint_limit_penalty,
+            weight=-0.1,
+        )
+        wrist_height = RewTerm(
+            func=mdp_rewards.wrist_height_penalty,
+            weight=-1.0,
+            params={"min_height": 0.1},
+        )
+
 
 # ---------------------------------------------------------------------------
 # Terminations & Events
@@ -384,6 +383,7 @@ if _ISAACLAB_AVAILABLE:
     class AnyGraspTerminationsCfg:
         time_out = DoneTerm(func=mdp_events.time_out, time_out=True)
         object_drop = DoneTerm(func=mdp_events.object_dropped, params={"min_height": 0.2})
+        object_left_hand = DoneTerm(func=mdp_events.object_left_hand, params={"max_dist": 0.25})
 
     @configclass
     class AnyGraspEventsCfg:
@@ -447,15 +447,15 @@ if _ISAACLAB_AVAILABLE:
                 }
 
             if self.reset_randomization is None:
-                # Keep resets close to the Stage 0 grasp-generation frame.
-                # The start grasp should come from grasp_set; reset-time
-                # randomization is intentionally small so it does not destroy
-                # that initial configuration before RL begins.
+                # Wrist jitter is intentionally non-zero so the policy learns to
+                # be robust to small variations in the initial grasp pose.
+                # Stage 0 data is valid for any wrist orientation because
+                # fingertip and object poses are stored in hand-relative frames.
                 self.reset_randomization = {
-                    "object_pos_jitter_std": 0.0,
-                    "object_rot_jitter_deg": 0.0,
-                    "wrist_pos_jitter_std": 0.0,
-                    "wrist_rot_std_deg": 0.0,
+                    "object_pos_jitter_std": 0.005,   # 5 mm position jitter
+                    "object_rot_jitter_deg": 5.0,     # ±5° object orientation jitter
+                    "wrist_pos_jitter_std": 0.01,     # 1 cm wrist position jitter
+                    "wrist_rot_std_deg": 20.0,        # ±20° wrist yaw randomization
                     "align_palm_up": True,
                 }
 

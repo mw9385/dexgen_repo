@@ -121,12 +121,18 @@ def apply_env_config(env_cfg, env_cfg_dict: dict):
     rewards_cfg = env_cfg_dict.get("rewards", {})
     if rewards_cfg:
         reward_terms = {
+            "object_pose": "object_pose",
+            "finger_joint_goal": "finger_joint_goal",
             "fingertip_tracking": "fingertip_tracking",
             "grasp_success": "grasp_success",
+            "fingertip_velocity": "fingertip_velocity",
             "fingertip_contact": "fingertip_contact",
+            "torque": "torque",
+            "mechanical_work": "mechanical_work",
             "action_rate": "action_rate",
             "object_velocity": "object_velocity",
             "object_drop": "object_drop",
+            "object_left_hand": "object_left_hand",
             "joint_limit": "joint_limit",
             "wrist_height": "wrist_height",
         }
@@ -352,6 +358,27 @@ def main():
     env_cfg.grasp_graph_path = args.grasp_graph
     if getattr(args, "headless", False):
         env_cfg.viewer = None
+
+    # Load object specs from the grasp graph so the environment spawns the
+    # same object pool that was used during Stage 0 grasp generation.
+    try:
+        import pickle
+        with open(args.grasp_graph, "rb") as _f:
+            _graph = pickle.load(_f)
+        from grasp_generation.rrt_expansion import MultiObjectGraspGraph
+        if isinstance(_graph, MultiObjectGraspGraph) and _graph.object_specs:
+            _specs = list(_graph.object_specs.values())
+            from envs.anygrasp_env import _build_object_spawner
+            env_cfg.scene.object = env_cfg.scene.object.replace(
+                spawn=_build_object_spawner(_specs)
+            )
+            print(f"[Stage 1] Loaded {len(_specs)} object spec(s) from grasp graph:")
+            for _s in _specs:
+                print(f"          - {_s.get('name','?')}  shape={_s.get('shape_type','?')}  size={_s.get('size',0):.3f}m")
+        else:
+            print("[Stage 1] Grasp graph has no MultiObjectGraspGraph specs; using default cube.")
+    except Exception as _e:
+        print(f"[Stage 1] WARNING: Could not load object specs from graph: {_e}")
 
     apply_env_config(env_cfg, cfg_file.get("env", {}))
     apply_dr_config(env_cfg, cfg_file.get("domain_randomization", {}))

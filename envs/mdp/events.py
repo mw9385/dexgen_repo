@@ -37,6 +37,20 @@ def object_dropped(env, min_height: float = 0.2) -> torch.Tensor:
     return obj.data.root_pos_w[:, 2] < min_height
 
 
+def object_left_hand(env, max_dist: float = 0.25) -> torch.Tensor:
+    """
+    True when the object has moved more than *max_dist* from the robot wrist.
+
+    Catches all escape directions (upward, sideways, downward) unlike the
+    height-only `object_dropped` predicate.  Use together with object_dropped
+    so the termination fires as soon as contact is lost.
+    """
+    robot = env.scene["robot"]
+    obj   = env.scene["object"]
+    dist  = torch.norm(obj.data.root_pos_w - robot.data.root_pos_w, dim=-1)
+    return dist > max_dist
+
+
 # ---------------------------------------------------------------------------
 # Main reset event
 # ---------------------------------------------------------------------------
@@ -57,7 +71,11 @@ def reset_to_random_grasp(
         return
 
     n = len(env_ids)
-    num_fingers = getattr(graph, "num_fingers", 4)
+    # env_num_fingers is the FIXED finger count the env was built with.
+    # All grasp data is padded/truncated to this count so tensors are uniform.
+    env_num_fingers = int(
+        (getattr(env.cfg, "hand", None) or {}).get("num_fingers", 4)
+    )
     rng = _get_reset_rng(env)
 
     # ------------------------------------------------------------------
@@ -69,11 +87,21 @@ def reset_to_random_grasp(
     start_idx_list, goal_idx_list = [], []
 
     sampled_obj_names = []
-    forced_object_name = _resolve_scene_graph_object_name(env, graph)
+    forced_object_name = _resolve_scene_graph_object_name(env, graph, env_num_fingers)
+
+    goal_joints_list = []
+    goal_object_pos_hand_list, goal_object_quat_hand_list = [], []
 
     for _ in range(n):
-        obj_name, start_fp, goal_fp, start_joints, start_object_pos_hand, start_object_quat_hand, start_idx, goal_idx = _sample_start_and_nn_goal(
-            graph, rng, object_name=forced_object_name
+        (
+            obj_name, start_fp, goal_fp,
+            start_joints, start_object_pos_hand, start_object_quat_hand,
+            goal_joints, goal_object_pos_hand, goal_object_quat_hand,
+            start_idx, goal_idx
+        ) = _sample_start_and_nn_goal(
+            graph, rng,
+            object_name=forced_object_name,
+            env_num_fingers=env_num_fingers,
         )
         sampled_obj_names.append(obj_name)
         start_fps_list.append(start_fp)
@@ -81,6 +109,9 @@ def reset_to_random_grasp(
         start_joints_list.append(start_joints)
         start_object_pos_hand_list.append(start_object_pos_hand)
         start_object_quat_hand_list.append(start_object_quat_hand)
+        goal_joints_list.append(goal_joints)
+        goal_object_pos_hand_list.append(goal_object_pos_hand)
+        goal_object_quat_hand_list.append(goal_object_quat_hand)
         start_idx_list.append(start_idx)
         goal_idx_list.append(goal_idx)
 
@@ -91,7 +122,7 @@ def reset_to_random_grasp(
         np.stack(goal_fps_list), device=env.device, dtype=torch.float32
     )   # (n, num_fingers, 3)
 
-    fp_dim = num_fingers * 3
+    fp_dim = env_num_fingers * 3
 
     # Store goal fingertip positions (object frame)
     if "target_fingertip_pos" not in env.extras:
@@ -114,6 +145,41 @@ def reset_to_random_grasp(
     env.extras["goal_grasp_idx"][env_ids] = torch.tensor(
         goal_idx_list, device=env.device, dtype=torch.long
     )
+
+    # Store goal joint angles for finger_joint_goal_reward
+    robot = env.scene["robot"]
+    num_dof = robot.data.default_joint_pos.shape[-1]
+    if "target_joint_angles" not in env.extras:
+        env.extras["target_joint_angles"] = robot.data.default_joint_pos[
+            :env.num_envs
+        ].clone()
+    for i, gj in enumerate(goal_joints_list):
+        if gj is not None:
+            env.extras["target_joint_angles"][env_ids[i]] = torch.tensor(
+                gj, device=env.device, dtype=torch.float32
+            )
+
+    # Store goal object pose in hand frame for object_pose_reward
+    if "target_object_pos_hand" not in env.extras:
+        env.extras["target_object_pos_hand"] = torch.zeros(
+            env.num_envs, 3, device=env.device
+        )
+    if "target_object_quat_hand" not in env.extras:
+        env.extras["target_object_quat_hand"] = torch.zeros(
+            env.num_envs, 4, device=env.device
+        )
+        env.extras["target_object_quat_hand"][:, 0] = 1.0  # identity quat
+
+    for i, (gp, gq) in enumerate(zip(goal_object_pos_hand_list, goal_object_quat_hand_list)):
+        if gp is not None:
+            env.extras["target_object_pos_hand"][env_ids[i]] = torch.tensor(
+                gp, device=env.device, dtype=torch.float32
+            )
+        if gq is not None:
+            env.extras["target_object_quat_hand"][env_ids[i]] = torch.tensor(
+                gq, device=env.device, dtype=torch.float32
+            )
+
     # ------------------------------------------------------------------
     has_exact_pose = any(
         pos is not None and quat is not None
@@ -183,14 +249,35 @@ def reset_to_random_grasp(
 # Start grasp sampling + nearest-neighbor goal selection
 # ---------------------------------------------------------------------------
 
+def _pad_fingertip_positions(fps: np.ndarray, target_nf: int) -> np.ndarray:
+    """
+    Pad or truncate (num_fingers, 3) array to (target_nf, 3).
+
+    Extra fingers (added by padding) are set to the last valid finger's
+    position so they have a neutral target and contribute no gradient.
+    """
+    nf = fps.shape[0]
+    if nf == target_nf:
+        return fps
+    if nf > target_nf:
+        return fps[:target_nf]
+    # pad by repeating last row
+    pad = np.tile(fps[-1:], (target_nf - nf, 1))
+    return np.concatenate([fps, pad], axis=0).astype(np.float32)
+
+
 def _sample_start_and_nn_goal(
     graph,
     rng: np.random.Generator,
     object_name: Optional[str] = None,
+    env_num_fingers: int = 4,
 ):
     """
     Sample a start grasp directly from the Stage 0 grasp_set and choose the
     nearest-neighbor grasp in fingertip-position space as the goal.
+
+    env_num_fingers: the env's fixed finger count.  Grasp fingertip_positions
+    are padded / truncated to match so all tensors have uniform shape.
     """
     from grasp_generation.rrt_expansion import MultiObjectGraspGraph, GraspGraph
 
@@ -204,15 +291,19 @@ def _sample_start_and_nn_goal(
     N = len(g)
     if N < 2:
         grasp = g.grasp_set[0]
+        _pos  = getattr(grasp, "object_pos_hand",  None)
+        _quat = getattr(grasp, "object_quat_hand", None)
+        _ja   = getattr(grasp, "joint_angles",      None)
+        _fps  = _pad_fingertip_positions(grasp.fingertip_positions.copy(), env_num_fingers)
         return (
-            obj_name,
-            grasp.fingertip_positions.copy(),
-            grasp.fingertip_positions.copy(),
-            getattr(grasp, "joint_angles", None),
-            getattr(grasp, "object_pos_hand", None),
-            getattr(grasp, "object_quat_hand", None),
-            0,
-            0,
+            obj_name, _fps, _fps,
+            _ja,
+            _pos.copy()  if _pos  is not None else None,
+            _quat.copy() if _quat is not None else None,
+            _ja,
+            _pos.copy()  if _pos  is not None else None,
+            _quat.copy() if _quat is not None else None,
+            0, 0,
         )
 
     start_idx = int(rng.integers(0, N))
@@ -220,17 +311,26 @@ def _sample_start_and_nn_goal(
     goal_idx = _sample_nearby_goal_index(g, start_idx, rng)
     goal_grasp = g.grasp_set[goal_idx]
 
-    start_joints = getattr(start_grasp, "joint_angles", None)
-    start_object_pos_hand = getattr(start_grasp, "object_pos_hand", None)
+    start_fps  = _pad_fingertip_positions(start_grasp.fingertip_positions.copy(), env_num_fingers)
+    goal_fps   = _pad_fingertip_positions(goal_grasp.fingertip_positions.copy(),  env_num_fingers)
+
+    start_joints           = getattr(start_grasp, "joint_angles",     None)
+    start_object_pos_hand  = getattr(start_grasp, "object_pos_hand",  None)
     start_object_quat_hand = getattr(start_grasp, "object_quat_hand", None)
+    goal_joints            = getattr(goal_grasp,  "joint_angles",     None)
+    goal_object_pos_hand   = getattr(goal_grasp,  "object_pos_hand",  None)
+    goal_object_quat_hand  = getattr(goal_grasp,  "object_quat_hand", None)
 
     return (
         obj_name,
-        start_grasp.fingertip_positions.copy(),
-        goal_grasp.fingertip_positions.copy(),
+        start_fps,
+        goal_fps,
         start_joints,
-        start_object_pos_hand.copy() if start_object_pos_hand is not None else None,
+        start_object_pos_hand.copy()  if start_object_pos_hand  is not None else None,
         start_object_quat_hand.copy() if start_object_quat_hand is not None else None,
+        goal_joints,
+        goal_object_pos_hand.copy()   if goal_object_pos_hand   is not None else None,
+        goal_object_quat_hand.copy()  if goal_object_quat_hand  is not None else None,
         int(start_idx),
         int(goal_idx),
     )
@@ -292,11 +392,16 @@ def _grasp_state_distance(grasp_a, grasp_b) -> float:
     return float(np.linalg.norm(fps_a - fps_b))
 
 
-def _resolve_scene_graph_object_name(env, graph) -> Optional[str]:
+def _resolve_scene_graph_object_name(
+    env, graph, env_num_fingers: int = 4
+) -> Optional[str]:
     """
     Choose the graph object that best matches the currently configured scene
-    object. This prevents sampling grasps for a different shape/size than the
-    object that actually exists in the simulator.
+    object AND the env's finger count.
+
+    When Stage 0 generates f=2/3/4 graphs with names like "cube_0.06_f2",
+    this ensures Stage 1 only samples from graphs whose num_fingers == env
+    finger count.
     """
     from grasp_generation.rrt_expansion import MultiObjectGraspGraph
 
@@ -332,12 +437,23 @@ def _resolve_scene_graph_object_name(env, graph) -> Optional[str]:
             size = float(radius) * 2.0
 
     if shape_type is None:
-        return None
+        # No shape match possible — fall back to matching only by num_fingers
+        best_name = None
+        for name, g in graph.graphs.items():
+            if g.num_fingers == env_num_fingers:
+                best_name = name
+                break
+        return best_name
 
-    best_name = None
+    # Primary: match shape_type + num_fingers; rank by size closeness
+    best_name  = None
     best_score = float("inf")
     for name, spec in graph.object_specs.items():
         if spec.get("shape_type") != shape_type:
+            continue
+        # Filter by num_fingers: only consider graphs matching env count
+        g = graph.graphs.get(name)
+        if g is not None and g.num_fingers != env_num_fingers:
             continue
 
         spec_size = spec.get("size")
@@ -348,6 +464,19 @@ def _resolve_scene_graph_object_name(env, graph) -> Optional[str]:
         if score < best_score:
             best_score = score
             best_name = name
+
+    # Fallback: if no matching num_fingers graph found, ignore finger filter
+    if best_name is None:
+        for name, spec in graph.object_specs.items():
+            if spec.get("shape_type") != shape_type:
+                continue
+            spec_size = spec.get("size")
+            if spec_size is None or size is None:
+                return name
+            score = abs(float(spec_size) - size)
+            if score < best_score:
+                best_score = score
+                best_name = name
 
     return best_name
 
