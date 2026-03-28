@@ -9,12 +9,22 @@ own GraspGraph. At RL training time the environment randomly selects an
 object + grasp pair from this combined graph every episode.
 
 Pipeline (per object):
-  1. Sample candidate grasps on the object surface (GraspSampler)
-  2. Score and filter by NFO quality (NetForceOptimizer)
-  3. Expand with RRT to reach target_size (RRTGraspExpander)
-  4. Seed joint angles for each grasp (heuristic initialization)
-  5. Refine stored joint angles inside Isaac Lab with multi-fingertip IK
-  6. Save a Stage-1-ready MultiObjectGraspGraph
+
+  Legacy method (--grasp_method legacy):
+    1. Sample candidate grasps on the object surface (GraspSampler)
+    2. Score and filter by NFO quality (NetForceOptimizer)
+    3. Expand with RRT to reach target_size (RRTGraspExpander)
+    4. Seed joint angles for each grasp (heuristic initialization)
+    5. Refine stored joint angles inside Isaac Lab with multi-fingertip IK
+    6. Save a Stage-1-ready MultiObjectGraspGraph
+
+  DexGraspNet method (--grasp_method dexgraspnet):
+    1. Export object mesh to DexGraspNet format
+    2. Run differentiable grasp optimisation (simulated annealing)
+    3. Filter by energy thresholds + convert to Grasp format
+    4. Build connectivity graph from flat grasp list
+    5. Refine stored joint angles inside Isaac Lab with multi-fingertip IK
+    6. Save a Stage-1-ready MultiObjectGraspGraph
 
 Usage:
     # Default: cube + sphere + cylinder, 3 sizes each
@@ -46,6 +56,7 @@ from grasp_generation import (
     GraspSampler, NetForceOptimizer, RRTGraspExpander,
     ObjectPool, MultiObjectGraspGraph,
 )
+from grasp_generation.rrt_expansion import build_graph_from_grasps
 
 
 def parse_args():
@@ -77,6 +88,21 @@ def parse_args():
                    help="Friction coefficient for NFO")
     p.add_argument("--fast_nfo", action=argparse.BooleanOptionalAction, default=None,
                    help="Use fast SVD approximation for NFO")
+
+    # Grasp generation method
+    p.add_argument("--grasp_method", type=str, default="legacy",
+                   choices=["legacy", "dexgraspnet"],
+                   help="Grasp generation method: "
+                        "'legacy' = GraspSampler + NFO + RRT, "
+                        "'dexgraspnet' = DexGraspNet differentiable optimisation")
+
+    # DexGraspNet-specific options (only used when --grasp_method=dexgraspnet)
+    p.add_argument("--dgn_batch_size", type=int, default=128,
+                   help="DexGraspNet batch size per optimisation run (default: 128)")
+    p.add_argument("--dgn_n_iter", type=int, default=6000,
+                   help="DexGraspNet optimisation iterations (default: 6000)")
+    p.add_argument("--dgn_gpu", type=str, default="0",
+                   help="GPU id for DexGraspNet (default: '0')")
 
     p.add_argument("--output_dir", type=str, default=None)
     p.add_argument("--seed", type=int, default=42)
@@ -682,6 +708,102 @@ def process_one_object(
 
 
 # ---------------------------------------------------------------------------
+# DexGraspNet pipeline (alternative to process_one_object)
+# ---------------------------------------------------------------------------
+
+def process_one_object_dexgraspnet(
+    spec,
+    args,
+    seed_offset: int,
+    num_fingers: int = 4,
+    num_dof: int = 16,
+    dof_per_finger: int = 4,
+) -> tuple:
+    """
+    Run DexGraspNet differentiable optimisation for one ObjectSpec.
+
+    Replaces the GraspSampler → NFO → RRT pipeline with:
+      1. Export mesh to DexGraspNet format
+      2. Run gradient-guided simulated annealing (DexGraspNet core)
+      3. Filter by energy thresholds
+      4. Convert to our Grasp format
+      5. Build connectivity graph
+
+    Returns (GraspGraph, isaac_lab_spec) or (None, None) on failure.
+    """
+    from grasp_generation.mesh_export import export_mesh_for_dexgraspnet
+    from grasp_generation.dexgraspnet_adapter import (
+        DexGraspNetConfig,
+        generate_grasps_dexgraspnet,
+    )
+
+    print(f"\n{'='*55}")
+    print(f"  Object:      {spec.name}  (shape={spec.shape_type}, size={spec.size:.3f}m)")
+    print(f"  Method:      DexGraspNet  |  num_fingers: {num_fingers}")
+    print(f"{'='*55}")
+
+    # Step 1: Export mesh for DexGraspNet
+    meshdata_root = Path(args.output_dir) / "meshdata"
+    obj_path, scale = export_mesh_for_dexgraspnet(
+        spec.mesh, spec.name, meshdata_root,
+    )
+    print(f"  [mesh] Exported to {obj_path} (scale={scale:.4f}m)")
+
+    # Load normalised mesh for contact normal computation
+    import trimesh
+    unit_mesh = trimesh.load(str(obj_path), force="mesh", process=False)
+
+    # Step 2-4: DexGraspNet optimisation + filter + convert
+    cfg = DexGraspNetConfig(
+        batch_size=args.dgn_batch_size,
+        n_iter=args.dgn_n_iter,
+        n_contact=num_fingers,
+        gpu=args.dgn_gpu,
+        seed=args.seed + seed_offset,
+    )
+
+    grasps = generate_grasps_dexgraspnet(
+        mesh=unit_mesh,
+        object_code=spec.name,
+        meshdata_root=str(meshdata_root),
+        object_scale=scale,
+        cfg=cfg,
+        target_num_grasps=args.num_grasps,
+        device="cuda",
+    )
+
+    if len(grasps) < 2:
+        print(f"  [!] Only {len(grasps)} grasps for {spec.name}, skipping.")
+        return None, None
+
+    # Step 5: Build connectivity graph
+    graph = build_graph_from_grasps(
+        grasps,
+        object_name=spec.name,
+        delta_max=spec.size * 0.60,
+        num_fingers=num_fingers,
+    )
+
+    # DexGraspNet already provides joint_angles — fill any missing ones
+    n_with_joints = sum(1 for g in graph.grasp_set.grasps if g.joint_angles is not None)
+    n_missing = len(graph) - n_with_joints
+    if n_missing > 0:
+        _attach_joint_angles_to_graph(graph, num_dof=num_dof, dof_per_finger=dof_per_finger)
+
+    print(f"  [result] {len(graph)} grasps, {graph.num_edges} edges")
+
+    isaac_spec = {
+        "name": spec.name,
+        "shape_type": spec.shape_type,
+        "size": spec.size,
+        "mass": spec.mass,
+        "color": spec.color,
+    }
+
+    return graph, isaac_spec
+
+
+# ---------------------------------------------------------------------------
 # Validation: verify grasp_graph.pkl is usable by RL
 # ---------------------------------------------------------------------------
 
@@ -849,6 +971,7 @@ def main():
         finger_counts = [int(num_fingers)]
 
         print(f"\n[Stage 0] Processing {len(pool)} objects × {finger_counts} finger configs")
+        print(f"[Stage 0] Method: {args.grasp_method}")
 
         # ------------------------------------------------------------------
         # Generate grasps for each object × each finger count
@@ -861,13 +984,22 @@ def main():
                 # Use a unique seed offset per (object, finger_count) pair
                 seed_offset = i * 100 + nf * 1000
 
-                graph, isaac_spec = process_one_object(
-                    spec, args,
-                    seed_offset=seed_offset,
-                    num_fingers=nf,
-                    num_dof=num_dof,
-                    dof_per_finger=dof_per_finger,
-                )
+                if args.grasp_method == "dexgraspnet":
+                    graph, isaac_spec = process_one_object_dexgraspnet(
+                        spec, args,
+                        seed_offset=seed_offset,
+                        num_fingers=nf,
+                        num_dof=num_dof,
+                        dof_per_finger=dof_per_finger,
+                    )
+                else:
+                    graph, isaac_spec = process_one_object(
+                        spec, args,
+                        seed_offset=seed_offset,
+                        num_fingers=nf,
+                        num_dof=num_dof,
+                        dof_per_finger=dof_per_finger,
+                    )
                 if graph is None:
                     continue
 

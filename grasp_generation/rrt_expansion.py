@@ -190,6 +190,76 @@ class MultiObjectGraspGraph:
 
 
 # ---------------------------------------------------------------------------
+# Standalone graph builder (used by DexGraspNet adapter path)
+# ---------------------------------------------------------------------------
+
+def build_graph_from_grasps(
+    grasps: List[Grasp],
+    object_name: str = "",
+    delta_max: float = 0.04,
+    num_fingers: int = 4,
+) -> GraspGraph:
+    """
+    Build a connectivity graph from a flat list of grasps.
+
+    This is used by the DexGraspNet adapter path which produces grasps
+    directly (without RRT expansion).  Edges connect grasp pairs whose
+    mean fingertip distance is below ``delta_max``.
+
+    Parameters
+    ----------
+    grasps : list[Grasp]
+    object_name : str
+    delta_max : float
+        Maximum mean fingertip distance for an edge.  Scaled by
+        ``1 + 0.35 * (num_fingers - 1)`` to match RRT convention.
+    num_fingers : int
+
+    Returns
+    -------
+    GraspGraph
+    """
+    grasp_set = GraspSet(grasps=list(grasps), object_name=object_name)
+    N = len(grasp_set)
+    if N == 0:
+        return GraspGraph(grasp_set=grasp_set, object_name=object_name,
+                          num_fingers=num_fingers)
+
+    # Same effective delta_max as RRTGraspExpander._build_graph
+    effective_delta_max = delta_max * (1.0 + 0.35 * max(num_fingers - 1, 0))
+
+    # Vectorised pairwise distance for efficiency
+    fps = np.stack([g.fingertip_positions for g in grasps])  # (N, F, 3)
+    edges = []
+    for i in range(N):
+        for j in range(i + 1, N):
+            dist = float(np.linalg.norm(fps[i] - fps[j], axis=-1).mean())
+            # Also consider object_pos_hand if available
+            ga, gb = grasps[i], grasps[j]
+            if ga.object_pos_hand is not None and gb.object_pos_hand is not None:
+                dist += 0.25 * float(np.linalg.norm(
+                    np.asarray(ga.object_pos_hand) - np.asarray(gb.object_pos_hand)
+                ))
+            if ga.object_quat_hand is not None and gb.object_quat_hand is not None:
+                qa = np.asarray(ga.object_quat_hand, dtype=np.float32)
+                qb = np.asarray(gb.object_quat_hand, dtype=np.float32)
+                dot = float(np.clip(abs(np.dot(qa, qb)), 0.0, 1.0))
+                dist += 0.01 * float(2.0 * np.arccos(dot))
+            if dist < effective_delta_max:
+                edges.append((i, j))
+
+    graph = GraspGraph(
+        grasp_set=grasp_set,
+        edges=edges,
+        object_name=object_name,
+        num_fingers=num_fingers,
+    )
+    print(f"[build_graph_from_grasps] {N} nodes, {len(edges)} edges "
+          f"(delta_max={effective_delta_max:.4f}m)")
+    return graph
+
+
+# ---------------------------------------------------------------------------
 # RRT Expander
 # ---------------------------------------------------------------------------
 
