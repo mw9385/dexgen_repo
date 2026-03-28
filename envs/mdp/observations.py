@@ -121,8 +121,8 @@ def fingertip_contact_binary(env) -> torch.Tensor:
     if sensor is None:
         return torch.zeros(env.num_envs, num_fingers, device=env.device)
 
-    # net_forces_w_history: (N, num_bodies, history, 3)
-    forces    = sensor.data.net_forces_w_history[:, :, 0, :]   # (N, F, 3)
+    forces = _sensor_force_vectors(sensor)
+    forces = forces[:, :num_fingers, :]
     force_mag = torch.norm(forces, dim=-1)                       # (N, F)
     return (force_mag > 0.5).float()
 
@@ -174,7 +174,8 @@ def fingertip_contact_forces(env) -> torch.Tensor:
     if sensor is None:
         return torch.zeros(env.num_envs, num_fingers * 3, device=env.device)
 
-    forces = sensor.data.net_forces_w_history[:, :, 0, :]   # (N, F, 3)
+    forces = _sensor_force_vectors(sensor)
+    forces = forces[:, :num_fingers, :]
     return (forces / 10.0).clamp(-3.0, 3.0).reshape(env.num_envs, -1)
 
 
@@ -203,10 +204,10 @@ def domain_randomization_params(env) -> torch.Tensor:
 
 # Fallback fingertip link names for Allegro Hand
 _ALLEGRO_TIP_NAMES = [
-    "link_3.0_tip",   # index
-    "link_7.0_tip",   # middle
-    "link_11.0_tip",  # ring
-    "link_15.0_tip",  # thumb
+    "index_link_3",   # index
+    "middle_link_3",  # middle
+    "ring_link_3",    # ring
+    "thumb_link_3",   # thumb
 ]
 
 # Cached fingertip body ID lookup  (keyed by robot object id)
@@ -238,6 +239,26 @@ def _get_fingertip_body_ids(robot, env=None) -> list:
             tip_names = _ALLEGRO_TIP_NAMES
         _FT_IDS_CACHE[key] = [robot.find_bodies(n)[0][0] for n in tip_names]
     return _FT_IDS_CACHE[key]
+
+
+def _sensor_force_vectors(sensor) -> torch.Tensor:
+    """
+    Return latest contact force vectors as (N, F, 3).
+
+    Isaac Lab exposes contact history as either:
+      - (N, history, F, 3), or
+      - (N, F, history, 3)
+    depending on version / wrapper path.
+    """
+    forces = sensor.data.net_forces_w_history
+    if forces.ndim != 4:
+        raise RuntimeError(f"Unexpected contact sensor force shape: {tuple(forces.shape)}")
+    if forces.shape[1] == 1:
+        return forces[:, 0, :, :]
+    if forces.shape[2] == 1:
+        return forces[:, :, 0, :]
+    # Fall back to treating dim 1 as history and using the latest frame.
+    return forces[:, -1, :, :]
 
 
 def _transform_points_to_local_frame(

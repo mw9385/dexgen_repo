@@ -9,7 +9,7 @@ env:
   task: DexGen-AnyGrasp-Allegro-v0
   num_envs: 512
   episode_length_s: 10.0
-  action_scale: 0.1              # joint position delta scale (rad)
+  action_scale: 1.0              # normalized [-1, 1] action mapped to full soft joint range
   decimation: 4                  # control at 30 Hz (120 Hz sim / 4)
 
   rewards:

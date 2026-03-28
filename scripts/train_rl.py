@@ -105,6 +105,36 @@ def apply_dr_config(env_cfg, dr_cfg: dict):
             obs.critic.fingertip_pos.noise.std = float(noise["fingertip_pos_std"])
 
 
+def apply_env_config(env_cfg, env_cfg_dict: dict):
+    if not env_cfg_dict:
+        return
+
+    if "episode_length_s" in env_cfg_dict:
+        env_cfg.episode_length_s = float(env_cfg_dict["episode_length_s"])
+    if "action_scale" in env_cfg_dict:
+        env_cfg.action_scale = float(env_cfg_dict["action_scale"])
+        env_cfg.actions.joint_pos.scale = env_cfg.action_scale
+    if "decimation" in env_cfg_dict:
+        env_cfg.decimation = int(env_cfg_dict["decimation"])
+        env_cfg.sim.render_interval = env_cfg.decimation
+
+    rewards_cfg = env_cfg_dict.get("rewards", {})
+    if rewards_cfg:
+        reward_terms = {
+            "fingertip_tracking": "fingertip_tracking",
+            "grasp_success": "grasp_success",
+            "fingertip_contact": "fingertip_contact",
+            "action_rate": "action_rate",
+            "object_velocity": "object_velocity",
+            "object_drop": "object_drop",
+            "joint_limit": "joint_limit",
+            "wrist_height": "wrist_height",
+        }
+        for cfg_name, term_name in reward_terms.items():
+            if cfg_name in rewards_cfg and hasattr(env_cfg.rewards, term_name):
+                getattr(env_cfg.rewards, term_name).weight = float(rewards_cfg[cfg_name])
+
+
 def _resolve_valid_minibatch_size(batch_size: int, requested_minibatch: int, seq_length: int) -> int:
     """Return the largest valid minibatch not exceeding the requested size."""
     # rl_games requires batch_size % minibatch_size == 0.
@@ -323,6 +353,7 @@ def main():
     if getattr(args, "headless", False):
         env_cfg.viewer = None
 
+    apply_env_config(env_cfg, cfg_file.get("env", {}))
     apply_dr_config(env_cfg, cfg_file.get("domain_randomization", {}))
 
     print(f"[Stage 1] Config:   {args.config}")
@@ -331,6 +362,7 @@ def main():
     print(f"[Stage 1] Max iterations: {args.max_iterations}")
     print(f"[Stage 1] Grasp graph: {args.grasp_graph}")
     print(f"[Stage 1] Log dir: {args.log_dir}")
+    print(f"[Stage 1] Action scale: {env_cfg.action_scale}")
     print("-" * 60)
 
     def create_env(**kwargs):

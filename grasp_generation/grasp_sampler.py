@@ -44,6 +44,9 @@ class Grasp:
     # None if IK was not solved during grasp generation.
     # When stored, events.py uses these directly instead of the heuristic IK.
     joint_angles: Optional[np.ndarray] = None
+    # Object pose in the hand-root frame for exact reset reproduction.
+    object_pos_hand: Optional[np.ndarray] = None
+    object_quat_hand: Optional[np.ndarray] = None
 
     @property
     def as_vector(self) -> np.ndarray:
@@ -58,6 +61,8 @@ class Grasp:
             "object_name": self.object_name,
             "object_scale": self.object_scale,
             "joint_angles": self.joint_angles,
+            "object_pos_hand": self.object_pos_hand,
+            "object_quat_hand": self.object_quat_hand,
         }
 
     @classmethod
@@ -422,7 +427,28 @@ class GraspSampler:
             quality=0.0,
             object_name=self.object_name,
             object_scale=self.object_scale,
+            object_pos_hand=self._sample_object_pose_in_hand(pts).astype(np.float32),
+            object_quat_hand=self._sample_random_quaternion().astype(np.float32),
         )
+
+    def _sample_object_pose_in_hand(self, points_obj: np.ndarray) -> np.ndarray:
+        """
+        Sample a coarse object pose in a hand-centric frame.
+
+        The grasp sampler does not have the full robot model, so this is only a
+        seed for tuple-space RRT. Stage 0 Isaac refinement later overwrites it
+        with an exact `(joint position, object pose)` tuple.
+        """
+        centroid = points_obj.mean(axis=0)
+        offset = self.rng.normal(0.0, self.MIN_FINGER_SPACING * 0.5, size=3)
+        return centroid + offset
+
+    def _sample_random_quaternion(self) -> np.ndarray:
+        q = self.rng.normal(size=4)
+        q /= np.linalg.norm(q) + 1e-8
+        if q[0] < 0.0:
+            q = -q
+        return q
 
 
 # ---------------------------------------------------------------------------

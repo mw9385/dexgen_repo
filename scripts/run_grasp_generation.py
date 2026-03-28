@@ -12,40 +12,35 @@ Pipeline (per object):
   1. Sample candidate grasps on the object surface (GraspSampler)
   2. Score and filter by NFO quality (NetForceOptimizer)
   3. Expand with RRT to reach target_size (RRTGraspExpander)
-  4. Solve approximate IK for each grasp → store joint_angles in Grasp
-  5. Merge all per-object graphs → MultiObjectGraspGraph
-
-IK approach (heuristic, no full robot model needed):
-  For each grasp, we compute a per-finger joint angle vector by mapping
-  the fingertip distance from the object centroid to a joint opening scale.
-  This is the same heuristic used in events.py as a fallback, but here we
-  pre-compute and store it so the RL reset is deterministic and consistent.
-
-  For higher accuracy, replace _solve_ik_for_grasp() with a proper IK
-  solver (e.g. pink, pinocchio, or Isaac Lab's built-in IK).
+  4. Seed joint angles for each grasp (heuristic initialization)
+  5. Refine stored joint angles inside Isaac Lab with multi-fingertip IK
+  6. Save a Stage-1-ready MultiObjectGraspGraph
 
 Usage:
     # Default: cube + sphere + cylinder, 3 sizes each
-    python scripts/run_grasp_generation.py
+    /workspace/IsaacLab/isaaclab.sh -p scripts/run_grasp_generation.py
 
     # Custom object pool
-    python scripts/run_grasp_generation.py \\
+    /workspace/IsaacLab/isaaclab.sh -p scripts/run_grasp_generation.py \\
         --shapes cube sphere \\
         --size_min 0.04 --size_max 0.09 --num_sizes 4 \\
         --num_grasps 300
 
     # Single custom mesh
-    python scripts/run_grasp_generation.py --mesh_path assets/mug.obj
+    /workspace/IsaacLab/isaaclab.sh -p scripts/run_grasp_generation.py --mesh_path assets/mug.obj
 """
 
 import argparse
 import sys
 from pathlib import Path
+import re
 
 import numpy as np
 import yaml
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from isaaclab.app import AppLauncher
 
 from grasp_generation import (
     GraspSampler, NetForceOptimizer, RRTGraspExpander,
@@ -94,6 +89,17 @@ def parse_args():
         "--num_fingers", type=int, default=None,
         help="Number of contact points per grasp (overrides config file hand.num_fingers)",
     )
+    p.add_argument("--refine_iterations", type=int, default=8,
+                   help="Isaac refinement iterations per grasp")
+    p.add_argument("--refine_step_gain", type=float, default=0.7,
+                   help="Differential IK step gain during Isaac refinement")
+    p.add_argument("--refine_damping", type=float, default=0.03,
+                   help="Damped least-squares coefficient during Isaac refinement")
+    p.add_argument("--refine_max_delta", type=float, default=0.15,
+                   help="Max per-iteration joint delta during Isaac refinement")
+    p.add_argument("--refine_pos_threshold", type=float, default=0.002,
+                   help="Early-stop fingertip error threshold during Isaac refinement")
+    AppLauncher.add_app_launcher_args(p)
     return p.parse_args()
 
 
@@ -172,6 +178,119 @@ def _attach_joint_angles_to_graph(graph, num_dof: int = 16, dof_per_finger: int 
     print(f"  [IK] Solved heuristic IK for {count} grasps in '{graph.object_name}'")
 
 
+def _make_env_for_object(spec: dict, args, num_fingers: int):
+    from isaaclab.envs import ManagerBasedRLEnv
+    from envs import AnyGraspEnvCfg, register_anygrasp_env
+
+    register_anygrasp_env()
+
+    env_cfg = AnyGraspEnvCfg()
+    env_cfg.scene.num_envs = 1
+    env_cfg.object_pool_specs = [spec]
+    env_cfg.reset_randomization["object_pos_jitter_std"] = 0.0
+    env_cfg.reset_randomization["object_rot_jitter_deg"] = 0.0
+    env_cfg.reset_randomization["wrist_pos_jitter_std"] = 0.0
+    env_cfg.reset_randomization["wrist_rot_std_deg"] = 0.0
+    env_cfg.reset_refinement["enabled"] = True
+    env_cfg.reset_refinement["iterations"] = int(args.refine_iterations)
+    env_cfg.reset_refinement["step_gain"] = float(args.refine_step_gain)
+    env_cfg.reset_refinement["damping"] = float(args.refine_damping)
+    env_cfg.reset_refinement["max_delta"] = float(args.refine_max_delta)
+    env_cfg.reset_refinement["pos_threshold"] = float(args.refine_pos_threshold)
+    env_cfg.reset_debug = {"enabled": False}
+    # Stage 0 refinement should not consume an existing Stage 1 grasp graph.
+    # We drive the hand/object state directly inside this script.
+    env_cfg.grasp_graph_path = "/tmp/stage0_refine_no_graph.pkl"
+    env_cfg.hand = dict(env_cfg.hand or {})
+    env_cfg.hand["num_fingers"] = int(num_fingers)
+    default_tip_links = ["index_link_3", "middle_link_3", "ring_link_3", "thumb_link_3"]
+    tip_links = default_tip_links[: int(num_fingers)]
+    env_cfg.hand["fingertip_links"] = tip_links
+    sensor_pattern = "|".join(re.escape(name) for name in tip_links)
+    env_cfg.scene.fingertip_contact_sensor = env_cfg.scene.fingertip_contact_sensor.replace(
+        prim_path=f"{{ENV_REGEX_NS}}/AllegroHand/({sensor_pattern})"
+    )
+    if getattr(args, "headless", False):
+        env_cfg.viewer = None
+
+    env = ManagerBasedRLEnv(env_cfg)
+    env.reset()
+    return env
+
+
+def _refine_object_graph_joints(graph, spec: dict, args) -> tuple[float, float]:
+    from envs.mdp import events as mdp_events
+    import torch
+
+    env = _make_env_for_object(spec, args, num_fingers=int(getattr(graph, "num_fingers", 4)))
+    env_ids = torch.tensor([0], device=env.device, dtype=torch.long)
+    residuals: list[float] = []
+
+    try:
+        for grasp in graph.grasp_set.grasps:
+            start_fps = torch.tensor(
+                grasp.fingertip_positions[None], device=env.device, dtype=torch.float32
+            )
+            mdp_events._randomise_object_pose(env, env_ids)
+            wrist_pos_w, wrist_quat_w = mdp_events._sample_wrist_pose_world(env, env_ids)
+            mdp_events._set_robot_root_pose(env, env_ids, wrist_pos_w, wrist_quat_w)
+
+            if grasp.joint_angles is not None:
+                mdp_events._set_robot_joints_direct(env, env_ids, [grasp.joint_angles])
+            else:
+                mdp_events._set_robot_to_fingertip_config(env, env_ids, start_fps)
+
+            solve_mean_err = None
+            for _ in range(3):
+                mdp_events._place_object_in_hand(env, env_ids, start_fps)
+                mdp_events._refine_hand_to_start_grasp(env, env_ids, start_fps)
+                solve_mean_err, solve_max_err = mdp_events._measure_grasp_contact_error(env, env_ids, start_fps)
+                if float(solve_max_err[0].item()) <= float(args.refine_pos_threshold):
+                    break
+
+            # Final exact snap with the refined hand state before storing the tuple.
+            mdp_events._place_object_in_hand(env, env_ids, start_fps)
+            solve_mean_err, solve_max_err = mdp_events._measure_grasp_contact_error(env, env_ids, start_fps)
+
+            # Persist a self-consistent grasp tuple: the stored fingertip positions
+            # must match the refined joint/object state that RL will later reset to.
+            robot = env.scene["robot"]
+            obj = env.scene["object"]
+            ft_ids = mdp_events._get_fingertip_body_ids_from_env(robot, env)
+            ft_world = robot.data.body_pos_w[env_ids][:, ft_ids, :].clone()
+            obj_pos = obj.data.root_pos_w[env_ids].clone()
+            obj_quat = obj.data.root_quat_w[env_ids].clone()
+            ft_obj = mdp_events._world_to_local_points(ft_world, obj_pos, obj_quat)[0]
+
+            grasp.fingertip_positions = ft_obj.detach().cpu().numpy().astype(np.float32)
+            grasp.joint_angles = (
+                robot.data.joint_pos[env_ids][0].detach().cpu().numpy().astype(np.float32)
+            )
+            robot_pos = robot.data.root_pos_w[env_ids]
+            robot_quat = robot.data.root_quat_w[env_ids]
+            obj_pos = obj.data.root_pos_w[env_ids]
+            obj_quat = obj.data.root_quat_w[env_ids]
+            obj_pos_hand = mdp_events._world_to_local_points(
+                obj_pos.unsqueeze(1), robot_pos, robot_quat
+            ).squeeze(1)[0]
+            obj_quat_hand = mdp_events._quat_multiply(
+                mdp_events._quat_conjugate(robot_quat), obj_quat
+            )[0]
+            grasp.object_pos_hand = obj_pos_hand.detach().cpu().numpy().astype(np.float32)
+            grasp.object_quat_hand = obj_quat_hand.detach().cpu().numpy().astype(np.float32)
+            residuals.append(float(solve_mean_err[0].item()))
+    finally:
+        env.close()
+
+    mean_residual = float(np.mean(residuals)) if residuals else 0.0
+    max_residual = float(np.max(residuals)) if residuals else 0.0
+    print(
+        f"  [IK] {graph.object_name}: refined {len(graph.grasp_set.grasps)} grasps, "
+        f"mean residual={mean_residual:.5f}m, max residual={max_residual:.5f}m"
+    )
+    return mean_residual, max_residual
+
+
 # ---------------------------------------------------------------------------
 # Per-object pipeline
 # ---------------------------------------------------------------------------
@@ -227,6 +346,7 @@ def process_one_object(
         # Scale delta_pos with object size so perturbations are proportional
         delta_pos=spec.size * 0.12,
         delta_max=spec.size * 0.60,
+        manifold_contact_count=num_fingers,
         seed=args.seed + seed_offset,
     )
     graph = expander.expand(filtered_set)
@@ -321,104 +441,114 @@ def validate_graph(graph_path: Path):
 
 def main():
     args = parse_args()
+    app_launcher = AppLauncher(args)
+    sim_app = app_launcher.app
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        # ------------------------------------------------------------------
+        # Load config file and resolve num_fingers / num_dof
+        # Priority: CLI --num_fingers > config hand.num_fingers > default 4
+        # ------------------------------------------------------------------
+        cfg_file = {}
+        cfg_path = Path(args.config)
+        if cfg_path.exists():
+            with open(cfg_path) as f:
+                cfg_file = yaml.safe_load(f) or {}
+            print(f"[Stage 0] Config: {cfg_path}")
+        else:
+            print(f"[Stage 0] Config not found at {cfg_path}, using defaults.")
 
-    # ------------------------------------------------------------------
-    # Load config file and resolve num_fingers / num_dof
-    # Priority: CLI --num_fingers > config hand.num_fingers > default 4
-    # ------------------------------------------------------------------
-    cfg_file = {}
-    cfg_path = Path(args.config)
-    if cfg_path.exists():
-        with open(cfg_path) as f:
-            cfg_file = yaml.safe_load(f) or {}
-        print(f"[Stage 0] Config: {cfg_path}")
-    else:
-        print(f"[Stage 0] Config not found at {cfg_path}, using defaults.")
+        hand_cfg = cfg_file.get("hand", {})
+        if args.num_fingers is not None:
+            num_fingers = args.num_fingers
+        else:
+            num_fingers = hand_cfg.get("num_fingers", 4)
 
-    hand_cfg = cfg_file.get("hand", {})
-    if args.num_fingers is not None:
-        num_fingers = args.num_fingers
-    else:
-        num_fingers = hand_cfg.get("num_fingers", 4)
+        num_dof        = hand_cfg.get("num_dof", 16)
+        dof_per_finger = hand_cfg.get("dof_per_finger", 4)
 
-    num_dof        = hand_cfg.get("num_dof", 16)
-    dof_per_finger = hand_cfg.get("dof_per_finger", 4)
+        print(f"[Stage 0] Hand:       {hand_cfg.get('name', 'allegro')}  "
+              f"(num_fingers={num_fingers}, num_dof={num_dof})")
 
-    print(f"[Stage 0] Hand:       {hand_cfg.get('name', 'allegro')}  "
-          f"(num_fingers={num_fingers}, num_dof={num_dof})")
+        # ------------------------------------------------------------------
+        # Build object pool
+        # ------------------------------------------------------------------
+        if args.mesh_path:
+            import trimesh
+            from grasp_generation.grasp_sampler import ObjectSpec
+            mesh = trimesh.load(args.mesh_path, force="mesh")
+            size = float(max(mesh.bounding_box.extents))
+            pool = ObjectPool([ObjectSpec(
+                name=Path(args.mesh_path).stem,
+                mesh=mesh,
+                shape_type="custom",
+                size=size,
+            )])
+        elif args.mesh_dir:
+            pool = ObjectPool.from_mesh_dir(args.mesh_dir)
+        else:
+            pool = ObjectPool.from_config(
+                shape_types=args.shapes,
+                size_range=(args.size_min, args.size_max),
+                num_sizes=args.num_sizes,
+                seed=args.seed,
+            )
 
-    # ------------------------------------------------------------------
-    # Build object pool
-    # ------------------------------------------------------------------
-    if args.mesh_path:
-        import trimesh
-        from grasp_generation.grasp_sampler import ObjectSpec
-        mesh = trimesh.load(args.mesh_path, force="mesh")
-        size = float(max(mesh.bounding_box.extents))
-        pool = ObjectPool([ObjectSpec(
-            name=Path(args.mesh_path).stem,
-            mesh=mesh,
-            shape_type="custom",
-            size=size,
-        )])
-    elif args.mesh_dir:
-        pool = ObjectPool.from_mesh_dir(args.mesh_dir)
-    else:
-        pool = ObjectPool.from_config(
-            shape_types=args.shapes,
-            size_range=(args.size_min, args.size_max),
-            num_sizes=args.num_sizes,
-            seed=args.seed,
-        )
+        print(f"\n[Stage 0] Processing {len(pool)} objects in pool")
 
-    print(f"\n[Stage 0] Processing {len(pool)} objects in pool")
+        # ------------------------------------------------------------------
+        # Generate grasps for each object
+        # ------------------------------------------------------------------
+        multi_graph = MultiObjectGraspGraph()
+        success_count = 0
 
-    # ------------------------------------------------------------------
-    # Generate grasps for each object
-    # ------------------------------------------------------------------
-    multi_graph = MultiObjectGraspGraph()
-    success_count = 0
+        for i, spec in enumerate(pool):
+            graph, isaac_spec = process_one_object(
+                spec, args,
+                seed_offset=i * 100,
+                num_fingers=num_fingers,
+                num_dof=num_dof,
+                dof_per_finger=dof_per_finger,
+            )
+            if graph is None:
+                continue
 
-    for i, spec in enumerate(pool):
-        graph, isaac_spec = process_one_object(
-            spec, args,
-            seed_offset=i * 100,
-            num_fingers=num_fingers,
-            num_dof=num_dof,
-            dof_per_finger=dof_per_finger,
-        )
-        if graph is not None:
+            _refine_object_graph_joints(graph, isaac_spec, args)
             multi_graph.add(graph, isaac_spec)
             success_count += 1
 
-    if success_count == 0:
-        print("\nERROR: No objects produced valid grasps. "
-              "Try --fast_nfo or lower --min_quality.")
-        sys.exit(1)
+        if success_count == 0:
+            print("\nERROR: No objects produced valid grasps. "
+                  "Try --fast_nfo or lower --min_quality.")
+            sys.exit(1)
 
-    # ------------------------------------------------------------------
-    # Save
-    # ------------------------------------------------------------------
-    graph_path = output_dir / "grasp_graph.pkl"
-    multi_graph.save(graph_path)
+        # ------------------------------------------------------------------
+        # Save
+        # ------------------------------------------------------------------
+        graph_path = output_dir / "grasp_graph.pkl"
+        multi_graph.save(graph_path)
 
-    # ------------------------------------------------------------------
-    # Validate the saved graph
-    # ------------------------------------------------------------------
-    validate_graph(graph_path)
+        # ------------------------------------------------------------------
+        # Validate the saved graph
+        # ------------------------------------------------------------------
+        validate_graph(graph_path)
 
-    # ------------------------------------------------------------------
-    # Summary
-    # ------------------------------------------------------------------
-    print(f"\n{'='*55}")
-    print(f" Stage 0 Complete")
-    print(f"{'='*55}")
-    multi_graph.summary()
-    print(f"\n  Saved: {graph_path}")
-    print(f"\nNext step:")
-    print(f"  python scripts/train_rl.py --grasp_graph {graph_path}")
+        # ------------------------------------------------------------------
+        # Summary
+        # ------------------------------------------------------------------
+        print(f"\n{'='*55}")
+        print(f" Stage 0 Complete")
+        print(f"{'='*55}")
+        multi_graph.summary()
+        print(f"\n  Saved: {graph_path}")
+        print(f"\nNext step:")
+        print(
+            "  /workspace/IsaacLab/isaaclab.sh -p scripts/train_rl.py "
+            f"--grasp_graph {graph_path} --num_envs 512 --headless"
+        )
+    finally:
+        sim_app.close()
 
 
 if __name__ == "__main__":

@@ -28,7 +28,7 @@ task:
   # Total: ~77 dims (exact depends on Isaac Lab version)
 
   # Action space: 16 joint position targets (Allegro has 16 DoF)
-  action_scale: 0.1
+  action_scale: 1.0
 
 # ------------------------------------------------------------------------------
 # RL Training (rl_games PPO)

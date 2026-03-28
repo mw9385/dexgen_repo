@@ -38,6 +38,7 @@ from .observations import (
     target_fingertip_positions,
     _get_fingertip_body_ids,
     _get_num_fingers,
+    _sensor_force_vectors,
 )
 
 
@@ -93,7 +94,9 @@ def fingertip_contact_reward(env) -> torch.Tensor:
     if sensor is None:
         return torch.zeros(env.num_envs, device=env.device)
 
-    forces    = sensor.data.net_forces_w_history[:, :, 0, :]  # (N, 4, 3)
+    nf = _get_num_fingers(env)
+    forces = _sensor_force_vectors(sensor)
+    forces = forces[:, :nf, :]
     force_mag = torch.norm(forces, dim=-1)                      # (N, 4)
     in_contact = (force_mag > 0.5).float()                      # 0.5 N threshold
     return in_contact.mean(dim=-1)                              # (N,)

@@ -25,6 +25,7 @@ Paper reference (DexterityGen §3.1):
 from __future__ import annotations
 
 import pickle
+from itertools import combinations
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -205,6 +206,7 @@ class RRTGraspExpander:
         min_quality: float = 0.005,
         target_size: int = 500,
         max_attempts_per_step: int = 20,
+        manifold_contact_count: Optional[int] = None,
         seed: int = 42,
     ):
         self.nfo = nfo or NetForceOptimizer(min_quality=min_quality, fast_mode=True)
@@ -213,6 +215,7 @@ class RRTGraspExpander:
         self.min_quality = min_quality
         self.target_size = target_size
         self.max_attempts = max_attempts_per_step
+        self.manifold_contact_count = manifold_contact_count
         self.rng = np.random.default_rng(seed)
 
     def expand(self, seed_set: GraspSet) -> GraspGraph:
@@ -241,36 +244,157 @@ class RRTGraspExpander:
 
     def _expand_step(self, grasps: List[Grasp]) -> Optional[Grasp]:
         for _ in range(self.max_attempts):
-            src = grasps[self.rng.integers(0, len(grasps))]
-            noise = self.rng.normal(0, self.delta_pos,
-                                    src.fingertip_positions.shape).astype(np.float32)
-            new_pos = src.fingertip_positions + noise
+            random_state = self._sample_random_state(grasps)
+            nearest = self._nearest_neighbor(random_state, grasps)
+            candidate = self._projected_step(nearest, random_state)
+            if candidate is None:
+                continue
 
-            # [Fix] Recompute contact normals from perturbed positions.
-            # Previously, normals were independently perturbed with random noise,
-            # making them physically inconsistent with the new fingertip positions.
-            # This caused the NFO quality check to pass for geometrically invalid
-            # grasps (e.g. normals pointing inward, or not opposing each other),
-            # polluting the GraspGraph with bad nodes that cause divergence in RL.
-            #
-            # Correct approach: normals should point FROM the object centroid
-            # TOWARD each fingertip (outward surface normal approximation).
-            # This is valid for convex objects and a good approximation for
-            # near-convex objects like cubes, spheres, cylinders.
-            new_normals = self._recompute_normals_from_positions(new_pos)
-
-            candidate = Grasp(
-                fingertip_positions=new_pos,
-                contact_normals=new_normals,
-                quality=0.0,
-                object_name=src.object_name,
-                object_scale=src.object_scale,
-            )
             q = self.nfo.evaluate(candidate)
             if q >= self.min_quality:
                 candidate.quality = q
                 return candidate
         return None
+
+    def _sample_random_state(self, grasps: List[Grasp]) -> Grasp:
+        src = grasps[self.rng.integers(0, len(grasps))]
+        pos_noise = self.rng.normal(0, self.delta_pos, src.fingertip_positions.shape).astype(np.float32)
+        new_pos = src.fingertip_positions + pos_noise
+        new_normals = self._recompute_normals_from_positions(new_pos)
+
+        object_pos_hand = None
+        if getattr(src, "object_pos_hand", None) is not None:
+            object_pos_hand = (
+                np.asarray(src.object_pos_hand, dtype=np.float32)
+                + self.rng.normal(0, self.delta_pos, size=3).astype(np.float32)
+            )
+
+        object_quat_hand = None
+        if getattr(src, "object_quat_hand", None) is not None:
+            delta_quat = self._sample_quat_noise()
+            object_quat_hand = self._quat_multiply(np.asarray(src.object_quat_hand, dtype=np.float32), delta_quat)
+
+        return Grasp(
+            fingertip_positions=new_pos,
+            contact_normals=new_normals,
+            quality=0.0,
+            object_name=src.object_name,
+            object_scale=src.object_scale,
+            object_pos_hand=object_pos_hand,
+            object_quat_hand=object_quat_hand,
+        )
+
+    def _nearest_neighbor(self, target: Grasp, grasps: List[Grasp]) -> Grasp:
+        dists = [self._grasp_distance(g, target) for g in grasps]
+        return grasps[int(np.argmin(dists))]
+
+    def _interpolate_state(self, src: Grasp, dst: Grasp) -> Grasp:
+        alpha = 0.35
+        new_pos = (1.0 - alpha) * src.fingertip_positions + alpha * dst.fingertip_positions
+        new_pos = new_pos.astype(np.float32)
+        new_normals = self._recompute_normals_from_positions(new_pos)
+
+        object_pos_hand = None
+        if getattr(src, "object_pos_hand", None) is not None and getattr(dst, "object_pos_hand", None) is not None:
+            object_pos_hand = (
+                (1.0 - alpha) * np.asarray(src.object_pos_hand, dtype=np.float32)
+                + alpha * np.asarray(dst.object_pos_hand, dtype=np.float32)
+            ).astype(np.float32)
+
+        object_quat_hand = None
+        if getattr(src, "object_quat_hand", None) is not None and getattr(dst, "object_quat_hand", None) is not None:
+            object_quat_hand = self._quat_slerp(
+                np.asarray(src.object_quat_hand, dtype=np.float32),
+                np.asarray(dst.object_quat_hand, dtype=np.float32),
+                alpha,
+            ).astype(np.float32)
+
+        return Grasp(
+            fingertip_positions=new_pos,
+            contact_normals=new_normals,
+            quality=0.0,
+            object_name=src.object_name,
+            object_scale=src.object_scale,
+            object_pos_hand=object_pos_hand,
+            object_quat_hand=object_quat_hand,
+        )
+
+    def _projected_step(self, xnode: Grasp, xsample: Grasp) -> Optional[Grasp]:
+        num_fingers = xnode.fingertip_positions.shape[0]
+        if self.manifold_contact_count is None:
+            keep_count = num_fingers
+        else:
+            keep_count = min(max(1, self.manifold_contact_count), num_fingers)
+        best = None
+        best_dist = float("inf")
+
+        for contact_set in combinations(range(num_fingers), keep_count):
+            candidate = self._project_to_contact_manifold(xnode, xsample, contact_set)
+            q = self.nfo.evaluate(candidate)
+            if q < self.min_quality:
+                continue
+            candidate.quality = q
+            dist = self._grasp_distance(candidate, xsample)
+            if dist < best_dist:
+                best = candidate
+                best_dist = dist
+
+        return best
+
+    def _project_to_contact_manifold(
+        self,
+        xnode: Grasp,
+        xsample: Grasp,
+        contact_set: tuple[int, ...],
+    ) -> Grasp:
+        alpha = 0.35
+        new_pos = np.array(xnode.fingertip_positions, copy=True)
+        for finger_idx in range(new_pos.shape[0]):
+            if finger_idx in contact_set:
+                continue
+            new_pos[finger_idx] = (
+                (1.0 - alpha) * xnode.fingertip_positions[finger_idx]
+                + alpha * xsample.fingertip_positions[finger_idx]
+            )
+        new_pos = new_pos.astype(np.float32)
+        new_normals = self._recompute_normals_from_positions(new_pos)
+
+        object_pos_hand = None
+        if getattr(xnode, "object_pos_hand", None) is not None and getattr(xsample, "object_pos_hand", None) is not None:
+            object_pos_hand = (
+                (1.0 - alpha) * np.asarray(xnode.object_pos_hand, dtype=np.float32)
+                + alpha * np.asarray(xsample.object_pos_hand, dtype=np.float32)
+            ).astype(np.float32)
+
+        object_quat_hand = None
+        if getattr(xnode, "object_quat_hand", None) is not None and getattr(xsample, "object_quat_hand", None) is not None:
+            object_quat_hand = self._quat_slerp(
+                np.asarray(xnode.object_quat_hand, dtype=np.float32),
+                np.asarray(xsample.object_quat_hand, dtype=np.float32),
+                alpha,
+            ).astype(np.float32)
+
+        return Grasp(
+            fingertip_positions=new_pos,
+            contact_normals=new_normals,
+            quality=0.0,
+            object_name=xnode.object_name,
+            object_scale=xnode.object_scale,
+            object_pos_hand=object_pos_hand,
+            object_quat_hand=object_quat_hand,
+        )
+
+    def _grasp_distance(self, grasp_a: Grasp, grasp_b: Grasp) -> float:
+        tip_delta = grasp_a.fingertip_positions - grasp_b.fingertip_positions
+        pos_dist = float(np.linalg.norm(tip_delta, axis=-1).mean())
+        if getattr(grasp_a, "object_pos_hand", None) is not None and getattr(grasp_b, "object_pos_hand", None) is not None:
+            pos_dist += 0.25 * float(np.linalg.norm(np.asarray(grasp_a.object_pos_hand) - np.asarray(grasp_b.object_pos_hand)))
+        if getattr(grasp_a, "object_quat_hand", None) is not None and getattr(grasp_b, "object_quat_hand", None) is not None:
+            qa = np.asarray(grasp_a.object_quat_hand, dtype=np.float32)
+            qb = np.asarray(grasp_b.object_quat_hand, dtype=np.float32)
+            quat_dot = float(np.clip(abs(np.dot(qa, qb)), 0.0, 1.0))
+            pos_dist += 0.01 * float(2.0 * np.arccos(quat_dot))
+        return pos_dist
 
     def _recompute_normals_from_positions(self, positions: np.ndarray) -> np.ndarray:
         """
@@ -299,19 +423,54 @@ class RRTGraspExpander:
         norms = np.linalg.norm(new_normals, axis=-1, keepdims=True)
         return new_normals / (norms + 1e-8)
 
+    def _sample_quat_noise(self) -> np.ndarray:
+        axis = self.rng.normal(size=3).astype(np.float32)
+        axis /= np.linalg.norm(axis) + 1e-8
+        angle = float(self.rng.normal(0.0, 0.25))
+        half = angle * 0.5
+        quat = np.array([np.cos(half), *(axis * np.sin(half))], dtype=np.float32)
+        return quat / (np.linalg.norm(quat) + 1e-8)
+
+    def _quat_multiply(self, q1: np.ndarray, q2: np.ndarray) -> np.ndarray:
+        w1, x1, y1, z1 = q1
+        w2, x2, y2, z2 = q2
+        out = np.array([
+            w1*w2 - x1*x2 - y1*y2 - z1*z2,
+            w1*x2 + x1*w2 + y1*z2 - z1*y2,
+            w1*y2 - x1*z2 + y1*w2 + z1*x2,
+            w1*z2 + x1*y2 - y1*x2 + z1*w2,
+        ], dtype=np.float32)
+        return out / (np.linalg.norm(out) + 1e-8)
+
+    def _quat_slerp(self, q0: np.ndarray, q1: np.ndarray, alpha: float) -> np.ndarray:
+        q0 = q0 / (np.linalg.norm(q0) + 1e-8)
+        q1 = q1 / (np.linalg.norm(q1) + 1e-8)
+        dot = float(np.dot(q0, q1))
+        if dot < 0.0:
+            q1 = -q1
+            dot = -dot
+        if dot > 0.9995:
+            out = q0 + alpha * (q1 - q0)
+            return out / (np.linalg.norm(out) + 1e-8)
+        theta_0 = np.arccos(np.clip(dot, -1.0, 1.0))
+        sin_theta_0 = np.sin(theta_0)
+        theta = theta_0 * alpha
+        sin_theta = np.sin(theta)
+        s0 = np.sin(theta_0 - theta) / (sin_theta_0 + 1e-8)
+        s1 = sin_theta / (sin_theta_0 + 1e-8)
+        out = s0 * q0 + s1 * q1
+        return out / (np.linalg.norm(out) + 1e-8)
+
     def _build_graph(self, grasp_set: GraspSet) -> GraspGraph:
-        positions = grasp_set.as_array()   # (N, num_fingers*3)
         N = len(grasp_set)
         # Infer num_fingers from actual grasp data (robust to any hand)
         num_fingers = grasp_set.grasps[0].fingertip_positions.shape[0] if N > 0 else 4
+        effective_delta_max = self.delta_max * (1.0 + 0.35 * max(num_fingers - 1, 0))
         edges = []
         for i in range(N):
-            diffs = positions[i + 1:] - positions[i]
-            dists = np.linalg.norm(
-                diffs.reshape(-1, num_fingers, 3), axis=-1
-            ).mean(axis=-1)
-            for k in np.where(dists < self.delta_max)[0]:
-                edges.append((i, i + 1 + k))
+            for j in range(i + 1, N):
+                if self._grasp_distance(grasp_set.grasps[i], grasp_set.grasps[j]) < effective_delta_max:
+                    edges.append((i, j))
         return GraspGraph(
             grasp_set=grasp_set,
             edges=edges,

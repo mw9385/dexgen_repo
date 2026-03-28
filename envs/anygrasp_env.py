@@ -54,6 +54,7 @@ from __future__ import annotations
 
 from dataclasses import MISSING
 from typing import List, Optional
+import re
 
 import torch
 
@@ -70,7 +71,7 @@ try:
         TerminationTermCfg as DoneTerm,
     )
     # Isaac Lab v2.x Action Configuration
-    from isaaclab.envs.mdp import JointPositionActionCfg
+    from isaaclab.envs.mdp import JointPositionToLimitsActionCfg
     
     from isaaclab.scene import InteractiveSceneCfg
     from isaaclab.sensors import ContactSensorCfg
@@ -78,9 +79,9 @@ try:
     from isaaclab.utils.noise import AdditiveGaussianNoiseCfg as GaussianNoise
 
     try:
-        from isaaclab.envs.mdp import JointPositionActionCfg
+        from isaaclab.envs.mdp import JointPositionToLimitsActionCfg
     except ImportError:
-        from isaaclab.envs.mdp.actions import JointPositionActionCfg
+        from isaaclab.envs.mdp.actions import JointPositionToLimitsActionCfg
 
     try:
         from isaaclab_assets.robots.allegro_hand import ALLEGRO_HAND_CFG
@@ -286,11 +287,11 @@ if _ISAACLAB_AVAILABLE:
 if _ISAACLAB_AVAILABLE:
     @configclass
     class AnyGraspActionsCfg:
-        """Joint-position targets for the Allegro Hand (16 DOF)."""
-        joint_pos = JointPositionActionCfg(
+        """Normalized joint-position actions mapped to Allegro joint limits."""
+        joint_pos = JointPositionToLimitsActionCfg(
             asset_name="robot",
             joint_names=[".*"],
-            use_default_offset=True,
+            rescale_to_limits=True,
         )
 
 
@@ -388,10 +389,11 @@ if _ISAACLAB_AVAILABLE:
         object_pool_specs:   list = None   # type: ignore
         wrist_randomization: dict = None   # type: ignore
         reset_randomization: dict = None   # type: ignore
+        reset_refinement:   dict = None   # type: ignore
         hand:                dict = None   # type: ignore
 
         episode_length_s: float = 10.0
-        action_scale:     float = 0.1
+        action_scale:     float = 1.0
         decimation:       int   = 4
 
         def __post_init__(self):
@@ -420,15 +422,38 @@ if _ISAACLAB_AVAILABLE:
                     "object_rot_jitter_deg": 0.0,
                     "wrist_pos_jitter_std": 0.0,
                     "wrist_rot_std_deg": 0.0,
+                    "align_palm_up": True,
+                }
+
+            if self.reset_refinement is None:
+                self.reset_refinement = {
+                    "enabled": True,
+                    "iterations": 3,
+                    "step_gain": 0.6,
+                    "damping": 0.05,
+                    "max_delta": 0.2,
+                    "pos_threshold": 0.005,
                 }
 
             if self.hand is None:
                 self.hand = {
                     "name": "allegro", "num_fingers": 4, "num_dof": 16, "dof_per_finger": 4,
-                    "fingertip_links": ["index_link_3", "middle_biotac_tip", "ring_biotac_tip", "thumb_biotac_tip"],
+                    "fingertip_links": ["index_link_3", "middle_link_3", "ring_link_3", "thumb_link_3"],
                 }
+            else:
+                self.hand = dict(self.hand)
+
+            default_tip_links = ["index_link_3", "middle_link_3", "ring_link_3", "thumb_link_3"]
+            requested_fingers = int(self.hand.get("num_fingers", len(default_tip_links)))
+            tip_links = list(self.hand.get("fingertip_links", default_tip_links))[:requested_fingers]
+            self.hand["fingertip_links"] = tip_links
+
+            sensor_pattern = "|".join(re.escape(name) for name in tip_links)
+            self.scene.fingertip_contact_sensor = self.scene.fingertip_contact_sensor.replace(
+                prim_path=f"{{ENV_REGEX_NS}}/AllegroHand/({sensor_pattern})"
+            )
             
-            # [Fix] Apply action_scale to the joint position action term
+            # action_scale=1.0 maps policy output [-1, 1] to the full soft joint range.
             self.actions.joint_pos.scale = self.action_scale
 
 

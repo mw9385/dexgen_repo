@@ -23,10 +23,10 @@ hand:
   num_dof: 16
   dof_per_finger: 4
   fingertip_links:
-    - link_3.0_tip    # index
-    - link_7.0_tip    # middle
-    - link_11.0_tip   # ring
-    - link_15.0_tip   # thumb
+    - index_link_3    # index
+    - middle_link_3   # middle
+    - ring_link_3     # ring
+    - thumb_link_3    # thumb
 
 # Object pool — generates grasps for all combinations of shape × size
 object_pool:

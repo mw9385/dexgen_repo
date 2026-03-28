@@ -11,7 +11,8 @@
 #   ./docker/run.sh build
 #   ./docker/run.sh up
 #   ./docker/run.sh exec bash
-#   ./docker/run.sh train_rl --num_envs 512 --headless
+#   # inside container:
+#   # /workspace/IsaacLab/isaaclab.sh -p scripts/train_rl.py --num_envs 512 --headless
 # ==============================================================================
 
 services:
@@ -22,7 +23,7 @@ services:
       network: host
       args:
         ISAACSIM_VERSION: "5.1.0"
-        ISAACLAB_VERSION: "v2.3.2"    # [수정됨] Isaac Sim 5.1.0과 호환되는 Isaac Lab 버전
+        ISAACLAB_TAG: "v2.3.2"        # Isaac Sim 5.1.0과 호환되는 Isaac Lab 버전
     image: dexgen:latest
     container_name: dexgen
     entrypoint: ["/bin/bash", "-lc"]
