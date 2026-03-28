@@ -178,14 +178,14 @@ def _attach_joint_angles_to_graph(graph, num_dof: int = 16, dof_per_finger: int 
     print(f"  [IK] Solved heuristic IK for {count} grasps in '{graph.object_name}'")
 
 
-def _make_env_for_object(spec: dict, args, num_fingers: int):
+def _make_env_for_object(spec: dict, args, num_fingers: int, num_envs: int = 1):
     from isaaclab.envs import ManagerBasedRLEnv
     from envs import AnyGraspEnvCfg, register_anygrasp_env
 
     register_anygrasp_env()
 
     env_cfg = AnyGraspEnvCfg()
-    env_cfg.scene.num_envs = 1
+    env_cfg.scene.num_envs = num_envs
     env_cfg.object_pool_specs = [spec]
     env_cfg.reset_randomization["object_pos_jitter_std"] = 0.0
     env_cfg.reset_randomization["object_rot_jitter_deg"] = 0.0
@@ -218,74 +218,158 @@ def _make_env_for_object(spec: dict, args, num_fingers: int):
     return env
 
 
+# Allegro fingertip tip-link sphere radius: body center is this far outside
+# the object surface when the finger is in contact.  Applying this offset
+# converts surface contact points (from GraspSampler) to fingertip body-
+# center targets so the differential IK does not drive tips *into* the mesh.
+_FINGERTIP_STANDOFF = 0.012   # metres
+
+
+# Number of environments created for parallel grasp refinement.
+# Larger values use more GPU memory; 16 works well for most GPUs.
+_REFINE_BATCH_SIZE = 16
+
+
 def _refine_object_graph_joints(graph, spec: dict, args) -> tuple[float, float]:
+    """
+    Refine joint angles and object pose for every grasp in *graph* using
+    batched parallel Isaac Lab simulation.
+
+    Key fixes vs. the previous single-env sequential version:
+      1. Standoff offset: GraspSampler produces surface contact points; we
+         add contact_normal * _FINGERTIP_STANDOFF so the IK target is the
+         fingertip *body centre*, not the surface.  This prevents the tip
+         from being driven into the mesh.
+      2. Batch parallelism: _REFINE_BATCH_SIZE envs run in parallel so GPU
+         utilisation is much higher than one-at-a-time.
+      3. Viewer update: after each batch the viewer is advanced one render
+         step so the user can watch grasps being refined in real time.
+    """
     from envs.mdp import events as mdp_events
     import torch
 
-    env = _make_env_for_object(spec, args, num_fingers=int(getattr(graph, "num_fingers", 4)))
-    env_ids = torch.tensor([0], device=env.device, dtype=torch.long)
+    num_fingers = int(getattr(graph, "num_fingers", 4))
+    headless = getattr(args, "headless", False)
+
+    env = _make_env_for_object(
+        spec, args, num_fingers=num_fingers, num_envs=_REFINE_BATCH_SIZE
+    )
+
+    grasps = graph.grasp_set.grasps
     residuals: list[float] = []
 
     try:
-        for grasp in graph.grasp_set.grasps:
-            start_fps = torch.tensor(
-                grasp.fingertip_positions[None], device=env.device, dtype=torch.float32
-            )
+        total = len(grasps)
+        for batch_start in range(0, total, _REFINE_BATCH_SIZE):
+            batch = grasps[batch_start : batch_start + _REFINE_BATCH_SIZE]
+            n = len(batch)
+            env_ids = torch.arange(n, device=env.device, dtype=torch.long)
+
+            # ----------------------------------------------------------------
+            # Build batched tensors for this batch
+            # ----------------------------------------------------------------
+            fps_arr  = np.stack([g.fingertip_positions for g in batch])   # (n,F,3)
+            norm_arr = np.stack([g.contact_normals      for g in batch])   # (n,F,3)
+
+            # Surface contact points in object frame (from GraspSampler)
+            start_fps_surface = torch.tensor(fps_arr,  device=env.device, dtype=torch.float32)
+            contact_norms     = torch.tensor(norm_arr, device=env.device, dtype=torch.float32)
+
+            # Fingertip body-centre targets: surface + outward_normal * standoff
+            # This is what the IK and SVD alignment must reach — not the surface.
+            start_fps_body = start_fps_surface + contact_norms * _FINGERTIP_STANDOFF
+
+            # ----------------------------------------------------------------
+            # Initialise each environment in the batch
+            # ----------------------------------------------------------------
             mdp_events._randomise_object_pose(env, env_ids)
             wrist_pos_w, wrist_quat_w = mdp_events._sample_wrist_pose_world(env, env_ids)
             mdp_events._set_robot_root_pose(env, env_ids, wrist_pos_w, wrist_quat_w)
 
-            if grasp.joint_angles is not None:
-                mdp_events._set_robot_joints_direct(env, env_ids, [grasp.joint_angles])
+            joint_list = [g.joint_angles for g in batch]
+            if any(j is not None for j in joint_list):
+                mdp_events._set_robot_joints_direct(env, env_ids, joint_list)
             else:
-                mdp_events._set_robot_to_fingertip_config(env, env_ids, start_fps)
+                mdp_events._set_robot_to_fingertip_config(env, env_ids, start_fps_body)
 
-            # Refine hand first (object stays at canonical position so IK targets
-            # are meaningful), then snap the object once the hand has converged.
+            # ----------------------------------------------------------------
+            # Differential IK refinement (all n envs in parallel)
+            # ----------------------------------------------------------------
             for _ in range(3):
-                mdp_events._refine_hand_to_start_grasp(env, env_ids, start_fps)
-                _, solve_max_err = mdp_events._measure_grasp_contact_error(env, env_ids, start_fps)
-                if float(solve_max_err[0].item()) <= float(args.refine_pos_threshold):
+                mdp_events._refine_hand_to_start_grasp(env, env_ids, start_fps_body)
+                _, solve_max_err = mdp_events._measure_grasp_contact_error(
+                    env, env_ids, start_fps_body
+                )
+                if float(solve_max_err.max().item()) <= float(args.refine_pos_threshold):
                     break
 
-            # Final snap: place object to match the refined hand, then measure.
-            mdp_events._place_object_in_hand(env, env_ids, start_fps)
-            solve_mean_err, solve_max_err = mdp_events._measure_grasp_contact_error(env, env_ids, start_fps)
-
-            # Persist a self-consistent grasp tuple: the stored fingertip positions
-            # must match the refined joint/object state that RL will later reset to.
-            robot = env.scene["robot"]
-            obj = env.scene["object"]
-            ft_ids = mdp_events._get_fingertip_body_ids_from_env(robot, env)
-            ft_world = robot.data.body_pos_w[env_ids][:, ft_ids, :].clone()
-            obj_pos = obj.data.root_pos_w[env_ids].clone()
-            obj_quat = obj.data.root_quat_w[env_ids].clone()
-            ft_obj = mdp_events._world_to_local_points(ft_world, obj_pos, obj_quat)[0]
-
-            grasp.fingertip_positions = ft_obj.detach().cpu().numpy().astype(np.float32)
-            grasp.joint_angles = (
-                robot.data.joint_pos[env_ids][0].detach().cpu().numpy().astype(np.float32)
+            # Final snap: place each object to match its refined hand pose.
+            mdp_events._place_object_in_hand(env, env_ids, start_fps_body)
+            solve_mean_err, solve_max_err = mdp_events._measure_grasp_contact_error(
+                env, env_ids, start_fps_body
             )
-            robot_pos = robot.data.root_pos_w[env_ids]
-            robot_quat = robot.data.root_quat_w[env_ids]
-            obj_pos = obj.data.root_pos_w[env_ids]
-            obj_quat = obj.data.root_quat_w[env_ids]
-            obj_pos_hand = mdp_events._world_to_local_points(
-                obj_pos.unsqueeze(1), robot_pos, robot_quat
-            ).squeeze(1)[0]
-            obj_quat_hand = mdp_events._quat_multiply(
-                mdp_events._quat_conjugate(robot_quat), obj_quat
-            )[0]
-            grasp.object_pos_hand = obj_pos_hand.detach().cpu().numpy().astype(np.float32)
-            grasp.object_quat_hand = obj_quat_hand.detach().cpu().numpy().astype(np.float32)
-            residuals.append(float(solve_mean_err[0].item()))
+
+            # Advance the viewer so the user can see the captured grasp state.
+            if not headless:
+                env.sim.step(render=True)
+
+            # ----------------------------------------------------------------
+            # Extract per-env results and store back into the Grasp objects
+            # ----------------------------------------------------------------
+            robot = env.scene["robot"]
+            obj   = env.scene["object"]
+            ft_ids = mdp_events._get_fingertip_body_ids_from_env(robot, env)
+
+            ft_world   = robot.data.body_pos_w[env_ids][:, ft_ids, :].clone()  # (n,F,3)
+            obj_pos    = obj.data.root_pos_w[env_ids].clone()                  # (n,3)
+            obj_quat   = obj.data.root_quat_w[env_ids].clone()                 # (n,4)
+            robot_pos  = robot.data.root_pos_w[env_ids].clone()                # (n,3)
+            robot_quat = robot.data.root_quat_w[env_ids].clone()               # (n,4)
+
+            for i, grasp in enumerate(batch):
+                # Fingertip body-centre positions in object frame
+                ft_obj_i = mdp_events._world_to_local_points(
+                    ft_world[i : i + 1], obj_pos[i : i + 1], obj_quat[i : i + 1]
+                )[0]
+                grasp.fingertip_positions = (
+                    ft_obj_i.detach().cpu().numpy().astype(np.float32)
+                )
+                # Refined joint angles
+                grasp.joint_angles = (
+                    robot.data.joint_pos[env_ids[i] : env_ids[i] + 1][0]
+                    .detach().cpu().numpy().astype(np.float32)
+                )
+                # Object pose in hand frame
+                obj_pos_hand = mdp_events._world_to_local_points(
+                    obj_pos[i : i + 1].unsqueeze(1),
+                    robot_pos[i : i + 1],
+                    robot_quat[i : i + 1],
+                ).squeeze(1)[0]
+                obj_quat_hand = mdp_events._quat_multiply(
+                    mdp_events._quat_conjugate(robot_quat[i : i + 1]),
+                    obj_quat[i : i + 1],
+                )[0]
+                grasp.object_pos_hand = (
+                    obj_pos_hand.detach().cpu().numpy().astype(np.float32)
+                )
+                grasp.object_quat_hand = (
+                    obj_quat_hand.detach().cpu().numpy().astype(np.float32)
+                )
+                residuals.append(float(solve_mean_err[i].item()))
+
+            done = min(batch_start + _REFINE_BATCH_SIZE, total)
+            print(
+                f"  [batch] {done}/{total} grasps refined  "
+                f"batch_mean={solve_mean_err.mean():.4f}m  "
+                f"batch_max={solve_max_err.max():.4f}m"
+            )
     finally:
         env.close()
 
     mean_residual = float(np.mean(residuals)) if residuals else 0.0
-    max_residual = float(np.max(residuals)) if residuals else 0.0
+    max_residual  = float(np.max(residuals))  if residuals else 0.0
     print(
-        f"  [IK] {graph.object_name}: refined {len(graph.grasp_set.grasps)} grasps, "
+        f"  [IK] {graph.object_name}: refined {len(grasps)} grasps, "
         f"mean residual={mean_residual:.5f}m, max residual={max_residual:.5f}m"
     )
     return mean_residual, max_residual
