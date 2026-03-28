@@ -318,18 +318,19 @@ def _refine_object_graph_joints(graph, spec: dict, args) -> tuple[float, float]:
             # avoids the "hand stuck at z=0.6 far above the object" failure.
             _WRIST_STANDOFF_S0 = 0.20  # metres
             wrist_pos_w  = obj_pos_w + avg_norm_w * _WRIST_STANDOFF_S0  # (n,3)
-            # Apply per-grasp Gaussian yaw noise (std=20°) around Z axis.
-            # Stage 1 training uses the same distribution (_add_rotation_noise
-            # in events.py: Gaussian yaw, std = wrist_rot_std_deg=20°).
-            # Matching distributions prevents out-of-distribution resets.
+            # Apply per-grasp uniform yaw so Stage 0 data covers the full
+            # wrist_rot_std_deg=20° range used in Stage 1 training.
+            # Bounded uniform is safer than Gaussian here: IK convergence is
+            # sensitive to large initial yaw offsets, so capping at ±20° keeps
+            # all envs in a reachable starting configuration.
             # Wrist yaw is safe to randomize because fingertip and object poses
             # are stored in hand-relative frames, so the grasp geometry is
             # frame-invariant.
             base_quat    = robot.data.default_root_state[env_ids, 3:7].clone()
             yaw_noise_rad = np.deg2rad(20.0)
             yaw_angles = (
-                torch.randn(n, device=env.device) * yaw_noise_rad
-            )  # Gaussian(0, 20°) per env — matches Stage 1 _add_rotation_noise
+                torch.rand(n, device=env.device) * 2.0 * yaw_noise_rad - yaw_noise_rad
+            )  # Uniform(-20°, +20°) — bounded to keep hand in IK-reachable region
             # Build axis-angle around Z (yaw): [sin(θ/2)*ẑ, cos(θ/2)]
             _half = yaw_angles * 0.5
             _zero = torch.zeros(n, device=env.device)
@@ -369,14 +370,23 @@ def _refine_object_graph_joints(graph, spec: dict, args) -> tuple[float, float]:
             # Candidate yaw offsets for retry (spread around the circle)
             _RETRY_YAWS_DEG = [0.0, 45.0, 90.0, 135.0, 180.0, 225.0, 270.0, 315.0]
 
-            # Best residuals seen so far for each env in this batch
-            best_max_err = torch.full((n,), float("inf"), device=env.device)
-            best_joint_pos  = robot.data.joint_pos[env_ids].clone()   # (n, D)
-            best_obj_pos_w  = obj.data.root_pos_w[env_ids].clone()    # (n, 3)
-            best_obj_quat_w = obj.data.root_quat_w[env_ids].clone()   # (n, 4)
+            # Save ORIGINAL object poses before any IK or snapping.
+            # These are used to restore the object to its canonical position
+            # before each retry re-init so that the wrist standoff computation
+            # is relative to the real object, not a displaced snapped position.
+            orig_obj_pos_w  = obj.data.root_pos_w[env_ids].clone()    # (n, 3)
+            orig_obj_quat_w = obj.data.root_quat_w[env_ids].clone()   # (n, 4)
+
+            # Best IK result seen so far (track joints only — object pose is
+            # determined by _place_object_in_hand after all passes complete).
+            best_max_err   = torch.full((n,), float("inf"), device=env.device)
+            best_joint_pos = robot.data.joint_pos[env_ids].clone()   # (n, D)
 
             for retry_idx in range(retry_passes):
-                # -- inner IK passes ----------------------------------------
+                # ---- inner IK passes (no object snapping) ------------------
+                # The object stays at its CANONICAL position throughout so that
+                # the IK targets (start_fps_body in object frame, converted to
+                # world frame via current object pose) are always correct.
                 for _ in range(outer_loops):
                     mdp_events._refine_hand_to_start_grasp(env, env_ids, start_fps_body)
                     _, cur_max_err = mdp_events._measure_grasp_contact_error(
@@ -386,21 +396,18 @@ def _refine_object_graph_joints(graph, spec: dict, args) -> tuple[float, float]:
                     if float(cur_max_err.max().item()) <= pos_thresh:
                         break
 
-                # Final object snap + measure
-                mdp_events._place_object_in_hand(env, env_ids, start_fps_body)
+                # Measure without snapping (object still at canonical position)
                 cur_mean_err, cur_max_err = mdp_events._measure_grasp_contact_error(
                     env, env_ids, start_fps_body
                 )
 
-                # Update best-so-far for each env
+                # Update best-so-far joints for each env
                 improved = cur_max_err < best_max_err
                 if improved.any():
-                    best_max_err[improved] = cur_max_err[improved].clone()
+                    best_max_err[improved]   = cur_max_err[improved].clone()
                     best_joint_pos[improved] = robot.data.joint_pos[env_ids][improved].clone()
-                    best_obj_pos_w[improved]  = obj.data.root_pos_w[env_ids][improved].clone()
-                    best_obj_quat_w[improved] = obj.data.root_quat_w[env_ids][improved].clone()
 
-                # Check if all envs converged
+                # All envs converged — no need for more passes
                 if float(best_max_err.max().item()) <= pos_thresh:
                     break
 
@@ -423,10 +430,20 @@ def _refine_object_graph_joints(graph, spec: dict, args) -> tuple[float, float]:
                     base_q = robot.data.default_root_state[retry_env_ids, 3:7].clone()
                     new_quat = _qmul(retry_yaw_q, base_q)
 
-                    # Keep wrist standoff position unchanged (relative to object)
-                    # by recomputing from the average contact normal
-                    obj_p_retry  = obj.data.root_pos_w[retry_env_ids].clone()
-                    obj_q_retry  = obj.data.root_quat_w[retry_env_ids].clone()
+                    # Restore ORIGINAL object pose for high-residual envs before
+                    # recomputing wrist standoff.  Without this, the standoff is
+                    # computed relative to the IK-displaced object position, which
+                    # places the wrist far from the real target (cascade failure).
+                    restore_state = obj.data.root_state_w[retry_env_ids].clone()
+                    restore_state[:, :3] = orig_obj_pos_w[high_mask]
+                    restore_state[:, 3:7] = orig_obj_quat_w[high_mask]
+                    restore_state[:, 7:] = 0.0
+                    obj.write_root_state_to_sim(restore_state, env_ids=retry_env_ids)
+                    obj.update(0.0)
+
+                    # Compute new wrist position relative to RESTORED object
+                    obj_p_retry  = orig_obj_pos_w[high_mask]
+                    obj_q_retry  = orig_obj_quat_w[high_mask]
                     cn_retry     = contact_norms[high_mask]
                     avg_n_obj_r  = cn_retry.mean(dim=1)
                     avg_n_obj_r  = avg_n_obj_r / (avg_n_obj_r.norm(dim=-1, keepdim=True) + 1e-8)
@@ -438,18 +455,23 @@ def _refine_object_graph_joints(graph, spec: dict, args) -> tuple[float, float]:
                         env, retry_env_ids, start_fps_body[high_mask]
                     )
 
-            # Restore best joint / object poses for each env
+            # Restore best joint positions found across all passes
             robot.write_joint_state_to_sim(
                 best_joint_pos,
                 torch.zeros_like(best_joint_pos),
                 env_ids=env_ids,
             )
+            # Restore canonical object position before the final snap
             obj_state = obj.data.root_state_w[env_ids].clone()
-            obj_state[:, :3] = best_obj_pos_w
-            obj_state[:, 3:7] = best_obj_quat_w
+            obj_state[:, :3] = orig_obj_pos_w
+            obj_state[:, 3:7] = orig_obj_quat_w
+            obj_state[:, 7:] = 0.0
             obj.write_root_state_to_sim(obj_state, env_ids=env_ids)
             robot.update(0.0)
             obj.update(0.0)
+
+            # Snap object to the best-found hand configuration (single final snap)
+            mdp_events._place_object_in_hand(env, env_ids, start_fps_body)
 
             solve_mean_err, solve_max_err = mdp_events._measure_grasp_contact_error(
                 env, env_ids, start_fps_body
