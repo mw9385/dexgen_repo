@@ -191,14 +191,14 @@ def reset_to_random_grasp(
             )
 
     # ------------------------------------------------------------------
+    # 2. Set robot root pose (wrist/forearm) and joint angles.
+    # ------------------------------------------------------------------
     has_exact_pose = any(
         pos is not None and quat is not None
         for pos, quat in zip(start_object_pos_hand_list, start_object_quat_hand_list)
     )
+    has_joints = any(j is not None for j in start_joints_list)
 
-    # ------------------------------------------------------------------
-    # 2. Reconstruct the exact grasp tuple when available.
-    # ------------------------------------------------------------------
     if has_exact_pose:
         wrist_pos_w, wrist_quat_w = _sample_wrist_pose_world(env, env_ids)
         _set_robot_root_pose(env, env_ids, wrist_pos_w, wrist_quat_w)
@@ -206,57 +206,51 @@ def reset_to_random_grasp(
         _randomise_object_pose(env, env_ids)
         _randomise_wrist_pose(env, env_ids)
 
-    # ------------------------------------------------------------------
-    # 4. Set robot joints
-    #    Priority: stored joint angles > IK approximation
-    # ------------------------------------------------------------------
-    has_joints = any(j is not None for j in start_joints_list)
     if has_joints:
         _set_robot_joints_direct(env, env_ids, start_joints_list)
     else:
         _set_robot_to_fingertip_config(env, env_ids, start_fps)
 
     # ------------------------------------------------------------------
-    if has_exact_pose:
-        _set_object_pose_from_grasp(
-            env, env_ids, start_object_pos_hand_list, start_object_quat_hand_list
-        )
-        solve_mean_err, solve_max_err = _measure_grasp_contact_error(env, env_ids, start_fps)
-    else:
-        solve_mean_err, solve_max_err = _place_object_in_hand(env, env_ids, start_fps)
+    # 3. Place object.
+    #    ALWAYS use _place_object_in_hand (fingertip-matching) rather than
+    #    the stored object_pos_hand.  This avoids frame mismatches between
+    #    DexGraspNet (root = palm body) and Isaac Lab (root = forearm body).
+    #    After writing root + joints we must update body transforms first.
+    # ------------------------------------------------------------------
+    robot = env.scene["robot"]
+    robot.update(0.0)
+
+    solve_mean_err, solve_max_err = _place_object_in_hand(env, env_ids, start_fps)
+    if not has_exact_pose:
         _refine_hand_to_start_grasp(env, env_ids, start_fps)
         solve_mean_err, solve_max_err = _measure_grasp_contact_error(env, env_ids, start_fps)
 
     # ------------------------------------------------------------------
-    # 7. Compute target_object_pos/quat_hand from sim state as fallback.
-    #    For graphs generated without stored object_pos_hand (old Stage 0),
-    #    use the CURRENT object-in-hand pose.  Since the object doesn't move
-    #    during AnyGrasp-to-AnyGrasp, this equals the ideal target pose.
-    #    For new graphs with stored goal data, the extras were already set
-    #    above from goal_object_pos_hand_list and those take priority.
+    # 7. Compute target_object_pos/quat_hand from the ACTUAL sim state.
+    #    The stored goal_object_pos_hand from DexGraspNet is relative to
+    #    the PALM body (DexGraspNet root), but the reward function
+    #    (object_pose_tracking_reward) uses robot.data.root_pos_w which
+    #    is the FOREARM/articulation root in Isaac Lab.  To avoid this
+    #    frame mismatch, ALWAYS compute from the sim state.  Since the
+    #    object was just placed via _place_object_in_hand, the current
+    #    sim pose is consistent with the articulation root frame.
     # ------------------------------------------------------------------
     robot_for_goal = env.scene["robot"]
     obj_for_goal   = env.scene["object"]
+    obj_for_goal.update(0.0)
     for i in range(n):
-        # Only fill in the fallback if we don't already have a valid goal
-        has_valid_goal = (
-            goal_object_pos_hand_list[i] is not None
-            and goal_object_quat_hand_list[i] is not None
-        )
-        if not has_valid_goal:
-            # Compute current object position in hand (wrist) frame
-            rp_w = robot_for_goal.data.root_pos_w[env_ids[i]]   # (3,)
-            rq_w = robot_for_goal.data.root_quat_w[env_ids[i]]  # (4,)
-            op_w = obj_for_goal.data.root_pos_w[env_ids[i]]     # (3,)
-            oq_w = obj_for_goal.data.root_quat_w[env_ids[i]]    # (4,)
-            rel  = op_w - rp_w
-            cur_obj_pos_hand = quat_apply_inverse(rq_w.unsqueeze(0), rel.unsqueeze(0))[0]
-            env.extras["target_object_pos_hand"][env_ids[i]] = cur_obj_pos_hand.clone()
-            # Object quat in hand frame
-            cur_obj_quat_hand = _quat_multiply(
-                _quat_conjugate(rq_w.unsqueeze(0)), oq_w.unsqueeze(0)
-            )[0]
-            env.extras["target_object_quat_hand"][env_ids[i]] = cur_obj_quat_hand.clone()
+        rp_w = robot_for_goal.data.root_pos_w[env_ids[i]]   # (3,)
+        rq_w = robot_for_goal.data.root_quat_w[env_ids[i]]  # (4,)
+        op_w = obj_for_goal.data.root_pos_w[env_ids[i]]     # (3,)
+        oq_w = obj_for_goal.data.root_quat_w[env_ids[i]]    # (4,)
+        rel  = op_w - rp_w
+        cur_obj_pos_hand = quat_apply_inverse(rq_w.unsqueeze(0), rel.unsqueeze(0))[0]
+        env.extras["target_object_pos_hand"][env_ids[i]] = cur_obj_pos_hand.clone()
+        cur_obj_quat_hand = _quat_multiply(
+            _quat_conjugate(rq_w.unsqueeze(0)), oq_w.unsqueeze(0)
+        )[0]
+        env.extras["target_object_quat_hand"][env_ids[i]] = cur_obj_quat_hand.clone()
 
     # ------------------------------------------------------------------
     # 8. Initialise action buffers (fixes last_action always being 0)
