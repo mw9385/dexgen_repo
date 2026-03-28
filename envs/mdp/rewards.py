@@ -81,24 +81,53 @@ def object_pose_goal_reward(env, pos_scale: float = 10.0, rot_scale: float = 5.0
     [NEW] Object pose가 목표 grasp의 object pose에 가까운지.
     DexGen goal-related reward의 핵심.
 
-    Position: exp(-pos_scale * ||p - p*||)
-    Rotation: exp(-rot_scale * (1 - |<q, q*>|))
+    Position: exp(-pos_scale * ||p_hand - p*_hand||)   ← hand frame에서 비교
+    Rotation: exp(-rot_scale * (1 - |<q_hand, q*_hand>|))
 
     Returns: (N,) in [0, 2]
 
-    Requires: env.goal_object_pos (N,3), env.goal_object_quat (N,4)
+    env.extras["target_object_pos_hand"]:  (N, 3) goal object pos in wrist frame
+    env.extras["target_object_quat_hand"]: (N, 4) goal object quat in wrist frame
+    (set by reset_to_random_grasp; fallback = current sim state when not in graph)
     """
-    obj = env.scene["object"]
-    current_pos = obj.data.root_pos_w
-    current_quat = obj.data.root_quat_w
-    goal_pos = env.goal_object_pos
-    goal_quat = env.goal_object_quat
+    from isaaclab.utils.math import quat_apply_inverse
 
-    d_pos = torch.norm(current_pos - goal_pos, dim=-1)
-    quat_dot = torch.sum(current_quat * goal_quat, dim=-1).abs()
-    d_rot = 1.0 - quat_dot.clamp(0.0, 1.0)
+    goal_pos  = env.extras.get("target_object_pos_hand")
+    goal_quat = env.extras.get("target_object_quat_hand")
+    if goal_pos is None:
+        return torch.zeros(env.num_envs, device=env.device)
 
-    return torch.exp(-pos_scale * d_pos) + torch.exp(-rot_scale * d_rot)
+    robot = env.scene["robot"]
+    obj   = env.scene["object"]
+
+    # Current object position / orientation expressed in wrist (hand root) frame
+    rel_pos      = obj.data.root_pos_w - robot.data.root_pos_w          # (N, 3)
+    cur_pos_hand = quat_apply_inverse(robot.data.root_quat_w, rel_pos)  # (N, 3)
+
+    d_pos = torch.norm(cur_pos_hand - goal_pos, dim=-1)                 # (N,)
+
+    if goal_quat is not None:
+        # Current object quat in hand frame: q_hand = q_wrist_inv * q_obj
+        qw = robot.data.root_quat_w    # (N, 4) w,x,y,z
+        qo = obj.data.root_quat_w      # (N, 4)
+        # quat conjugate: negate xyz
+        qw_inv = torch.cat([qw[:, :1], -qw[:, 1:]], dim=-1)
+        # simple quat mul (w,x,y,z convention)
+        def _qmul(a, b):
+            aw, ax, ay, az = a[:, 0], a[:, 1], a[:, 2], a[:, 3]
+            bw, bx, by, bz = b[:, 0], b[:, 1], b[:, 2], b[:, 3]
+            return torch.stack([
+                aw*bw - ax*bx - ay*by - az*bz,
+                aw*bx + ax*bw + ay*bz - az*by,
+                aw*by - ax*bz + ay*bw + az*bx,
+                aw*bz + ax*by - ay*bx + az*bw,
+            ], dim=-1)
+        cur_quat_hand = _qmul(qw_inv, qo)                               # (N, 4)
+        quat_dot = torch.sum(cur_quat_hand * goal_quat, dim=-1).abs().clamp(0.0, 1.0)
+        d_rot = 1.0 - quat_dot
+        return torch.exp(-pos_scale * d_pos) + torch.exp(-rot_scale * d_rot)
+
+    return torch.exp(-pos_scale * d_pos)
 
 
 def finger_joint_goal_reward(env, scale: float = 5.0) -> torch.Tensor:
@@ -106,17 +135,28 @@ def finger_joint_goal_reward(env, scale: float = 5.0) -> torch.Tensor:
     [NEW] Joint positions가 목표 grasp의 joint config에 가까운지.
     Fingertip position만으로는 joint ambiguity가 남음.
 
-    reward = exp(-scale * ||q - q*||)
+    reward = exp(-scale * ||q_norm - q*_norm||)   ← normalised joint space
 
     Returns: (N,) in [0, 1]
 
-    Requires: env.goal_joint_positions (N, 16)
+    env.extras["target_joint_angles"]: (N, 16) goal joint angles in rad
+    (set by reset_to_random_grasp from goal grasp's stored joint_angles)
     """
-    robot = env.scene["robot"]
-    current_joints = robot.data.joint_pos
-    goal_joints = env.goal_joint_positions
+    goal_joints = env.extras.get("target_joint_angles")
+    if goal_joints is None:
+        return torch.zeros(env.num_envs, device=env.device)
 
-    d_joint = torch.norm(current_joints - goal_joints, dim=-1)
+    robot  = env.scene["robot"]
+    q      = robot.data.joint_pos                              # (N, D)
+    q_low  = robot.data.soft_joint_pos_limits[..., 0]         # (N, D)
+    q_high = robot.data.soft_joint_pos_limits[..., 1]         # (N, D)
+    q_range = (q_high - q_low).clamp(min=1e-6)
+
+    # Normalise both to [0,1] so joint range differences don't dominate
+    q_norm    = (q            - q_low) / q_range
+    q_goal_n  = (goal_joints  - q_low) / q_range
+
+    d_joint = torch.norm(q_norm - q_goal_n, dim=-1)           # (N,)
     return torch.exp(-scale * d_joint)
 
 
@@ -150,10 +190,11 @@ def fingertip_velocity_penalty(env) -> torch.Tensor:
 
     Returns: (N,) >= 0
     """
-    robot = env.scene["robot"]
-    tip_ids = _get_fingertip_body_ids(env)
-    tip_vels = robot.data.body_lin_vel_w[:, tip_ids, :]
-    return (tip_vels ** 2).sum(dim=-1).sum(dim=-1)
+    robot   = env.scene["robot"]
+    nf      = _get_num_fingers(env)
+    tip_ids = _get_fingertip_body_ids(robot, env)[:nf]
+    tip_vels = robot.data.body_lin_vel_w[:, tip_ids, :]    # (N, F, 3)
+    return (tip_vels ** 2).sum(dim=-1).sum(dim=-1)          # (N,)
 
 # ═══════════════════════════════════════════════════════════
 # 3. REGULARIZATION
