@@ -89,16 +89,22 @@ def parse_args():
         "--num_fingers", type=int, default=None,
         help="Number of contact points per grasp (overrides config file hand.num_fingers)",
     )
-    p.add_argument("--refine_iterations", type=int, default=8,
-                   help="Isaac refinement iterations per grasp")
-    p.add_argument("--refine_step_gain", type=float, default=0.7,
-                   help="Differential IK step gain during Isaac refinement")
-    p.add_argument("--refine_damping", type=float, default=0.03,
-                   help="Damped least-squares coefficient during Isaac refinement")
-    p.add_argument("--refine_max_delta", type=float, default=0.15,
-                   help="Max per-iteration joint delta during Isaac refinement")
-    p.add_argument("--refine_pos_threshold", type=float, default=0.002,
-                   help="Early-stop fingertip error threshold during Isaac refinement")
+    p.add_argument("--refine_iterations", type=int, default=25,
+                   help="Isaac refinement iterations per inner IK loop (default: 25)")
+    p.add_argument("--refine_step_gain", type=float, default=0.6,
+                   help="Differential IK step gain (default: 0.6)")
+    p.add_argument("--refine_damping", type=float, default=0.01,
+                   help="Damped least-squares coefficient (default: 0.01, lower = more aggressive)")
+    p.add_argument("--refine_max_delta", type=float, default=0.12,
+                   help="Max per-iteration joint delta (default: 0.12 rad)")
+    p.add_argument("--refine_pos_threshold", type=float, default=0.001,
+                   help="Per-env convergence threshold in metres (default: 1 mm)")
+    p.add_argument("--refine_outer_loops", type=int, default=20,
+                   help="Outer IK loop count (default: 20, was 6)")
+    p.add_argument("--refine_retry_passes", type=int, default=3,
+                   help="Re-init & retry passes for high-residual grasps (default: 3)")
+    p.add_argument("--refine_discard_threshold", type=float, default=0.005,
+                   help="Discard grasps whose final residual exceeds this (default: 5 mm)")
     AppLauncher.add_app_launcher_args(p)
     return p.parse_args()
 
@@ -257,7 +263,8 @@ def _refine_object_graph_joints(graph, spec: dict, args) -> tuple[float, float]:
     import torch
 
     num_fingers = int(getattr(graph, "num_fingers", 4))
-    headless = getattr(args, "headless", False)
+    headless    = getattr(args, "headless", False)
+    discard_thresh = float(getattr(args, "refine_discard_threshold", 0.005))
 
     env = _make_env_for_object(
         spec, args, num_fingers=num_fingers, num_envs=_REFINE_BATCH_SIZE
@@ -311,16 +318,18 @@ def _refine_object_graph_joints(graph, spec: dict, args) -> tuple[float, float]:
             # avoids the "hand stuck at z=0.6 far above the object" failure.
             _WRIST_STANDOFF_S0 = 0.20  # metres
             wrist_pos_w  = obj_pos_w + avg_norm_w * _WRIST_STANDOFF_S0  # (n,3)
-            # Apply per-grasp random yaw so Stage 0 data covers the full
-            # wrist_rot_std_deg=20° distribution used in Stage 1 training.
+            # Apply per-grasp Gaussian yaw noise (std=20°) around Z axis.
+            # Stage 1 training uses the same distribution (_add_rotation_noise
+            # in events.py: Gaussian yaw, std = wrist_rot_std_deg=20°).
+            # Matching distributions prevents out-of-distribution resets.
             # Wrist yaw is safe to randomize because fingertip and object poses
             # are stored in hand-relative frames, so the grasp geometry is
             # frame-invariant.
             base_quat    = robot.data.default_root_state[env_ids, 3:7].clone()
             yaw_noise_rad = np.deg2rad(20.0)
             yaw_angles = (
-                torch.rand(n, device=env.device) * 2.0 * yaw_noise_rad - yaw_noise_rad
-            )  # Uniform(-20°, +20°) per env
+                torch.randn(n, device=env.device) * yaw_noise_rad
+            )  # Gaussian(0, 20°) per env — matches Stage 1 _add_rotation_noise
             # Build axis-angle around Z (yaw): [sin(θ/2)*ẑ, cos(θ/2)]
             _half = yaw_angles * 0.5
             _zero = torch.zeros(n, device=env.device)
@@ -340,22 +349,108 @@ def _refine_object_graph_joints(graph, spec: dict, args) -> tuple[float, float]:
                 mdp_events._set_robot_to_fingertip_config(env, env_ids, start_fps_body)
 
             # ----------------------------------------------------------------
-            # Differential IK refinement (all n envs in parallel)
+            # Differential IK refinement — multi-pass with retry
             # ----------------------------------------------------------------
-            # Run up to 6 outer rounds of the inner IK loop; early-stop per-env
-            # when every env's per-finger max error is below the threshold.
-            for _ in range(6):
-                mdp_events._refine_hand_to_start_grasp(env, env_ids, start_fps_body)
-                _, solve_max_err = mdp_events._measure_grasp_contact_error(
+            # Strategy:
+            #   1. Run up to refine_outer_loops × inner IK passes.
+            #      Early-stop only when ALL envs are below threshold
+            #      (not mean-based, which lets outliers hide).
+            #   2. After each pass, identify high-residual envs and re-init
+            #      them with a fresh wrist orientation drawn from a grid of
+            #      yaw angles.  Keep the best result per env (lowest max-err).
+            #   3. After all passes, discard grasps that still exceed the
+            #      discard_threshold — they will not produce good RL episodes.
+
+            outer_loops      = int(getattr(args, "refine_outer_loops",     20))
+            retry_passes     = int(getattr(args, "refine_retry_passes",     3))
+            discard_thresh   = float(getattr(args, "refine_discard_threshold", 0.005))
+            pos_thresh       = float(args.refine_pos_threshold)
+
+            # Candidate yaw offsets for retry (spread around the circle)
+            _RETRY_YAWS_DEG = [0.0, 45.0, 90.0, 135.0, 180.0, 225.0, 270.0, 315.0]
+
+            # Best residuals seen so far for each env in this batch
+            best_max_err = torch.full((n,), float("inf"), device=env.device)
+            best_joint_pos  = robot.data.joint_pos[env_ids].clone()   # (n, D)
+            best_obj_pos_w  = obj.data.root_pos_w[env_ids].clone()    # (n, 3)
+            best_obj_quat_w = obj.data.root_quat_w[env_ids].clone()   # (n, 4)
+
+            for retry_idx in range(retry_passes):
+                # -- inner IK passes ----------------------------------------
+                for _ in range(outer_loops):
+                    mdp_events._refine_hand_to_start_grasp(env, env_ids, start_fps_body)
+                    _, cur_max_err = mdp_events._measure_grasp_contact_error(
+                        env, env_ids, start_fps_body
+                    )
+                    # Strict per-env early-stop: ALL envs must converge
+                    if float(cur_max_err.max().item()) <= pos_thresh:
+                        break
+
+                # Final object snap + measure
+                mdp_events._place_object_in_hand(env, env_ids, start_fps_body)
+                cur_mean_err, cur_max_err = mdp_events._measure_grasp_contact_error(
                     env, env_ids, start_fps_body
                 )
-                # Use mean-of-per-env-max so one outlier env does not block
-                # early exit for the whole batch.
-                if float(solve_max_err.mean().item()) <= float(args.refine_pos_threshold) * 3:
+
+                # Update best-so-far for each env
+                improved = cur_max_err < best_max_err
+                if improved.any():
+                    best_max_err[improved] = cur_max_err[improved].clone()
+                    best_joint_pos[improved] = robot.data.joint_pos[env_ids][improved].clone()
+                    best_obj_pos_w[improved]  = obj.data.root_pos_w[env_ids][improved].clone()
+                    best_obj_quat_w[improved] = obj.data.root_quat_w[env_ids][improved].clone()
+
+                # Check if all envs converged
+                if float(best_max_err.max().item()) <= pos_thresh:
                     break
 
-            # Final snap: place each object to match its refined hand pose.
-            mdp_events._place_object_in_hand(env, env_ids, start_fps_body)
+                if retry_idx < retry_passes - 1:
+                    # Identify still-struggling envs and re-init with a new yaw
+                    high_mask = best_max_err > pos_thresh
+                    if not high_mask.any():
+                        break
+                    retry_env_ids = env_ids[high_mask]
+                    nr = int(high_mask.sum().item())
+
+                    yaw_deg = float(_RETRY_YAWS_DEG[retry_idx % len(_RETRY_YAWS_DEG)])
+                    yaw_rad = np.deg2rad(yaw_deg)
+                    half = torch.full((nr,), yaw_rad / 2.0, device=env.device)
+                    zero = torch.zeros(nr, device=env.device)
+                    retry_yaw_q = torch.stack(
+                        [torch.cos(half), zero, zero, torch.sin(half)], dim=-1
+                    )
+                    from isaaclab.utils.math import quat_mul as _qmul
+                    base_q = robot.data.default_root_state[retry_env_ids, 3:7].clone()
+                    new_quat = _qmul(retry_yaw_q, base_q)
+
+                    # Keep wrist standoff position unchanged (relative to object)
+                    # by recomputing from the average contact normal
+                    obj_p_retry  = obj.data.root_pos_w[retry_env_ids].clone()
+                    obj_q_retry  = obj.data.root_quat_w[retry_env_ids].clone()
+                    cn_retry     = contact_norms[high_mask]
+                    avg_n_obj_r  = cn_retry.mean(dim=1)
+                    avg_n_obj_r  = avg_n_obj_r / (avg_n_obj_r.norm(dim=-1, keepdim=True) + 1e-8)
+                    avg_n_w_r    = _quat_apply(obj_q_retry, avg_n_obj_r)
+                    new_pos      = obj_p_retry + avg_n_w_r * _WRIST_STANDOFF_S0
+
+                    mdp_events._set_robot_root_pose(env, retry_env_ids, new_pos, new_quat)
+                    mdp_events._set_robot_to_fingertip_config(
+                        env, retry_env_ids, start_fps_body[high_mask]
+                    )
+
+            # Restore best joint / object poses for each env
+            robot.write_joint_state_to_sim(
+                best_joint_pos,
+                torch.zeros_like(best_joint_pos),
+                env_ids=env_ids,
+            )
+            obj_state = obj.data.root_state_w[env_ids].clone()
+            obj_state[:, :3] = best_obj_pos_w
+            obj_state[:, 3:7] = best_obj_quat_w
+            obj.write_root_state_to_sim(obj_state, env_ids=env_ids)
+            robot.update(0.0)
+            obj.update(0.0)
+
             solve_mean_err, solve_max_err = mdp_events._measure_grasp_contact_error(
                 env, env_ids, start_fps_body
             )
@@ -377,7 +472,18 @@ def _refine_object_graph_joints(graph, spec: dict, args) -> tuple[float, float]:
             robot_pos  = robot.data.root_pos_w[env_ids].clone()                # (n,3)
             robot_quat = robot.data.root_quat_w[env_ids].clone()               # (n,4)
 
+            discarded = 0
             for i, grasp in enumerate(batch):
+                # Grasps whose final residual exceeds the discard threshold
+                # are marked as invalid (joint_angles=None) so downstream
+                # code skips them.  This prevents polluting the graph with
+                # grasps that never converged.
+                if float(solve_max_err[i].item()) > discard_thresh:
+                    grasp.joint_angles = None   # signal: unusable
+                    residuals.append(float(solve_max_err[i].item()))
+                    discarded += 1
+                    continue
+
                 # Fingertip body-centre positions in object frame
                 ft_obj_i = mdp_events._world_to_local_points(
                     ft_world[i : i + 1], obj_pos[i : i + 1], obj_quat[i : i + 1]
@@ -409,18 +515,51 @@ def _refine_object_graph_joints(graph, spec: dict, args) -> tuple[float, float]:
                 residuals.append(float(solve_mean_err[i].item()))
 
             done = min(batch_start + _REFINE_BATCH_SIZE, total)
+            converged_n = n - discarded
             print(
-                f"  [batch] {done}/{total} grasps refined  "
+                f"  [batch] {done}/{total}  "
+                f"converged={converged_n}/{n}  "
+                f"discarded={discarded}  "
                 f"batch_mean={solve_mean_err.mean():.4f}m  "
                 f"batch_max={solve_max_err.max():.4f}m"
             )
     finally:
         env.close()
 
-    mean_residual = float(np.mean(residuals)) if residuals else 0.0
-    max_residual  = float(np.max(residuals))  if residuals else 0.0
+    # Remove discarded grasps (joint_angles=None means IK failed to converge)
+    before_count = len(grasps)
+    valid_grasps = [g for g in grasps if g.joint_angles is not None]
+    removed = before_count - len(valid_grasps)
+    if removed:
+        graph.grasp_set.grasps = valid_grasps
+        # Rebuild edges — existing edge indices are now stale
+        from grasp_generation.rrt_expansion import GraspSet
+        old_edges = graph.edges
+        valid_set = set(range(len(valid_grasps)))
+        # Map old indices to new ones via the surviving grasps
+        old_to_new = {}
+        vi = 0
+        for old_i, g in enumerate(grasps):
+            if g.joint_angles is not None:
+                old_to_new[old_i] = vi
+                vi += 1
+        new_edges = [
+            (old_to_new[a], old_to_new[b])
+            for a, b in old_edges
+            if a in old_to_new and b in old_to_new
+        ]
+        graph.edges = new_edges
+        print(
+            f"  [filter] Removed {removed} unconverged grasps "
+            f"({len(valid_grasps)} remain, {len(new_edges)} edges)"
+        )
+
+    good_residuals = [r for r in residuals if r <= discard_thresh]
+    mean_residual = float(np.mean(good_residuals)) if good_residuals else 0.0
+    max_residual  = float(np.max(good_residuals))  if good_residuals else 0.0
     print(
-        f"  [IK] {graph.object_name}: refined {len(grasps)} grasps, "
+        f"  [IK] {graph.object_name}: {len(valid_grasps)} valid grasps, "
+        f"{removed} discarded, "
         f"mean residual={mean_residual:.5f}m, max residual={max_residual:.5f}m"
     )
     return mean_residual, max_residual
