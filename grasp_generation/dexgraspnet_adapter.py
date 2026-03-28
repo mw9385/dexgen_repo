@@ -42,10 +42,21 @@ _ROTATION_NAMES = ["WRJRx", "WRJRy", "WRJRz"]
 
 
 def _ensure_dexgraspnet_on_path():
-    """Add DexGraspNet to sys.path if not already present."""
+    """Add DexGraspNet to sys.path and ensure __init__.py files exist.
+
+    DexGraspNet's source tree ships without __init__.py in its utils/
+    directory.  We create them at runtime so that ``from utils.hand_model
+    import HandModel`` works when the grasp_generation dir is on sys.path.
+    """
     gen_str = str(_DEXGRASPNET_GEN)
     if gen_str not in sys.path:
         sys.path.insert(0, gen_str)
+
+    # Create missing __init__.py files so Python treats dirs as packages
+    for subdir in [_DEXGRASPNET_GEN, _DEXGRASPNET_GEN / "utils"]:
+        init_file = subdir / "__init__.py"
+        if not init_file.exists() and subdir.is_dir():
+            init_file.write_text("")
 
 
 # ---------------------------------------------------------------------------
