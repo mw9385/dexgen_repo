@@ -303,9 +303,25 @@ def _refine_object_graph_joints(graph, spec: dict, args) -> tuple[float, float]:
             # avoids the "hand stuck at z=0.6 far above the object" failure.
             _WRIST_STANDOFF_S0 = 0.20  # metres
             wrist_pos_w  = obj_pos_w + avg_norm_w * _WRIST_STANDOFF_S0  # (n,3)
-            # Keep the same rotation as the scene's default_root_state so that
-            # the stored object_pos_hand reproduces correctly in Stage 1.
-            wrist_quat_w = robot.data.default_root_state[env_ids, 3:7].clone()
+            # Apply per-grasp random yaw so Stage 0 data covers the full
+            # wrist_rot_std_deg=20° distribution used in Stage 1 training.
+            # Wrist yaw is safe to randomize because fingertip and object poses
+            # are stored in hand-relative frames, so the grasp geometry is
+            # frame-invariant.
+            base_quat    = robot.data.default_root_state[env_ids, 3:7].clone()
+            yaw_noise_rad = np.deg2rad(20.0)
+            yaw_angles = (
+                torch.rand(n, device=env.device) * 2.0 * yaw_noise_rad - yaw_noise_rad
+            )  # Uniform(-20°, +20°) per env
+            # Build axis-angle around Z (yaw): [sin(θ/2)*ẑ, cos(θ/2)]
+            _half = yaw_angles * 0.5
+            _zero = torch.zeros(n, device=env.device)
+            yaw_quats = torch.stack(
+                [torch.cos(_half), _zero, _zero, torch.sin(_half)], dim=-1
+            )  # (n, 4) wxyz
+            # Compose: q_final = yaw_quat * base_quat
+            from isaaclab.utils.math import quat_mul as _quat_mul
+            wrist_quat_w = _quat_mul(yaw_quats, base_quat)
 
             mdp_events._set_robot_root_pose(env, env_ids, wrist_pos_w, wrist_quat_w)
 
@@ -606,33 +622,53 @@ def main():
                 seed=args.seed,
             )
 
-        print(f"\n[Stage 0] Processing {len(pool)} objects in pool")
+        # Determine which finger counts to process.
+        # If a specific --num_fingers was requested, only do that one.
+        # Otherwise, generate grasps for 2, 3, and 4 fingers so the policy
+        # is trained on diverse contact configurations.
+        if args.num_fingers is not None:
+            finger_counts = [int(args.num_fingers)]
+        else:
+            finger_counts = [2, 3, 4]
+
+        print(f"\n[Stage 0] Processing {len(pool)} objects × {finger_counts} finger configs")
 
         # ------------------------------------------------------------------
-        # Generate grasps for each object
+        # Generate grasps for each object × each finger count
         # ------------------------------------------------------------------
         multi_graph = MultiObjectGraspGraph()
         success_count = 0
 
         for i, spec in enumerate(pool):
-            graph, isaac_spec = process_one_object(
-                spec, args,
-                seed_offset=i * 100,
-                num_fingers=num_fingers,
-                num_dof=num_dof,
-                dof_per_finger=dof_per_finger,
-            )
-            if graph is None:
-                continue
+            for nf in finger_counts:
+                # Use a unique seed offset per (object, finger_count) pair
+                seed_offset = i * 100 + nf * 1000
 
-            _refine_object_graph_joints(graph, isaac_spec, args)
-            multi_graph.add(graph, isaac_spec)
-            success_count += 1
+                graph, isaac_spec = process_one_object(
+                    spec, args,
+                    seed_offset=seed_offset,
+                    num_fingers=nf,
+                    num_dof=num_dof,
+                    dof_per_finger=dof_per_finger,
+                )
+                if graph is None:
+                    continue
 
-            # Checkpoint after each object so partial results survive interruption.
-            graph_path = output_dir / "grasp_graph.pkl"
-            multi_graph.save(graph_path)
-            print(f"  [checkpoint] {success_count} object(s) saved → {graph_path}")
+                # Tag the graph object name to distinguish finger configs
+                graph.object_name = f"{spec.name}_f{nf}"
+                isaac_spec_tagged  = dict(isaac_spec)
+                isaac_spec_tagged["name"] = graph.object_name
+                # Also tag num_fingers so downstream Stage 1 env can adapt
+                isaac_spec_tagged["num_fingers"] = nf
+
+                _refine_object_graph_joints(graph, isaac_spec, args)
+                multi_graph.add(graph, isaac_spec_tagged)
+                success_count += 1
+
+                # Checkpoint after each (object, finger) so partial results survive.
+                graph_path = output_dir / "grasp_graph.pkl"
+                multi_graph.save(graph_path)
+                print(f"  [checkpoint] {success_count} graph(s) saved → {graph_path}")
 
         if success_count == 0:
             print("\nERROR: No objects produced valid grasps. "
