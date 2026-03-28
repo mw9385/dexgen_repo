@@ -240,15 +240,15 @@ def _refine_object_graph_joints(graph, spec: dict, args) -> tuple[float, float]:
             else:
                 mdp_events._set_robot_to_fingertip_config(env, env_ids, start_fps)
 
-            solve_mean_err = None
+            # Refine hand first (object stays at canonical position so IK targets
+            # are meaningful), then snap the object once the hand has converged.
             for _ in range(3):
-                mdp_events._place_object_in_hand(env, env_ids, start_fps)
                 mdp_events._refine_hand_to_start_grasp(env, env_ids, start_fps)
-                solve_mean_err, solve_max_err = mdp_events._measure_grasp_contact_error(env, env_ids, start_fps)
+                _, solve_max_err = mdp_events._measure_grasp_contact_error(env, env_ids, start_fps)
                 if float(solve_max_err[0].item()) <= float(args.refine_pos_threshold):
                     break
 
-            # Final exact snap with the refined hand state before storing the tuple.
+            # Final snap: place object to match the refined hand, then measure.
             mdp_events._place_object_in_hand(env, env_ids, start_fps)
             solve_mean_err, solve_max_err = mdp_events._measure_grasp_contact_error(env, env_ids, start_fps)
 
@@ -517,6 +517,11 @@ def main():
             _refine_object_graph_joints(graph, isaac_spec, args)
             multi_graph.add(graph, isaac_spec)
             success_count += 1
+
+            # Checkpoint after each object so partial results survive interruption.
+            graph_path = output_dir / "grasp_graph.pkl"
+            multi_graph.save(graph_path)
+            print(f"  [checkpoint] {success_count} object(s) saved → {graph_path}")
 
         if success_count == 0:
             print("\nERROR: No objects produced valid grasps. "
