@@ -215,7 +215,7 @@ if _ISAACLAB_AVAILABLE:
         )
 
         num_envs:    int   = MISSING
-        env_spacing: float = 0.6
+        env_spacing: float = 1.5
 
 
 # ---------------------------------------------------------------------------
@@ -378,7 +378,7 @@ if _ISAACLAB_AVAILABLE:
 if _ISAACLAB_AVAILABLE:
     @configclass
     class AnyGraspEnvCfg(ManagerBasedRLEnvCfg):
-        scene:        AnyGraspSceneCfg        = AnyGraspSceneCfg(num_envs=MISSING, env_spacing=0.6)
+        scene:        AnyGraspSceneCfg        = AnyGraspSceneCfg(num_envs=MISSING, env_spacing=1.5)
         observations: AnyGraspObservationsCfg = AnyGraspObservationsCfg()
         actions:      AnyGraspActionsCfg      = AnyGraspActionsCfg()
         rewards:      AnyGraspRewardsCfg      = AnyGraspRewardsCfg()
