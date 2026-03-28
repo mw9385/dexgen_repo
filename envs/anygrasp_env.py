@@ -300,46 +300,80 @@ if _ISAACLAB_AVAILABLE:
 # ---------------------------------------------------------------------------
 
 if _ISAACLAB_AVAILABLE:
-    @configclass
-    class AnyGraspRewardsCfg:
-        fingertip_tracking = RewTerm(
-            func=mdp_rewards.fingertip_tracking_reward,
-            weight=10.0,
-            params={"alpha": 20.0},
-        )
-        grasp_success = RewTerm(
-            func=mdp_rewards.grasp_success_reward,
-            weight=50.0,
-            params={"threshold": 0.01},
-        )
-        fingertip_contact = RewTerm(
-            func=mdp_rewards.fingertip_contact_reward,
-            weight=2.0,
-        )
-        action_rate = RewTerm(
-            func=mdp_rewards.action_rate_penalty,
-            weight=-0.01,
-        )
-        object_velocity = RewTerm(
-            func=mdp_rewards.object_velocity_penalty,
-            weight=-0.5,
-            params={"lin_thresh": 0.1, "ang_thresh": 1.0},
-        )
-        object_drop = RewTerm(
-            func=mdp_rewards.object_drop_penalty,
-            weight=-200.0,
-            params={"min_height": 0.2},
-        )
-        joint_limit = RewTerm(
-            func=mdp_rewards.joint_limit_penalty,
-            weight=-0.1,
-        )
-        wrist_height = RewTerm(
-            func=mdp_rewards.wrist_height_penalty,
-            weight=-1.0,
-            params={"min_height": 0.1},
-        )
+@configclass
+class AnyGraspRewardsCfg:
+    object_pose_goal = RewTerm(
+        func=mdp_rewards.object_pose_goal_reward,
+        weight=15.0,
+        params={"pos_scale": 10.0, "rot_scale": 5.0},
+    )
+    finger_joint_goal = RewTerm(
+        func=mdp_rewards.finger_joint_goal_reward,
+        weight=5.0,
+        params={"scale": 5.0},
+    )
+    fingertip_tracking = RewTerm(
+        func=mdp_rewards.fingertip_tracking_reward,
+        weight=10.0,
+        params={"alpha": 20.0},
+    )
+    grasp_success = RewTerm(
+        func=mdp_rewards.grasp_success_reward,
+        weight=50.0,
+        params={"threshold": 0.01},
+    )
 
+    # ─── 2. Style (논문) ───
+
+    fingertip_velocity = RewTerm(
+        func=mdp_rewards.fingertip_velocity_penalty,
+        weight=-0.5,
+    )
+
+    # ─── 3. Regularization (논문) ───
+
+    action_scale = RewTerm(
+        func=mdp_rewards.action_scale_penalty,
+        weight=-0.005,
+    )
+    applied_torque = RewTerm(
+        func=mdp_rewards.applied_torque_penalty,
+        weight=-0.001,
+    )
+    mechanical_work = RewTerm(
+        func=mdp_rewards.mechanical_work_penalty,
+        weight=-0.002,
+    )
+    action_rate = RewTerm(
+        func=mdp_rewards.action_rate_penalty,
+        weight=-0.01,
+    )
+
+    # ─── 4. Safety (논문 외 공학적 안정화) ───
+
+    fingertip_contact = RewTerm(
+        func=mdp_rewards.fingertip_contact_reward,
+        weight=2.0,
+    )
+    object_velocity = RewTerm(
+        func=mdp_rewards.object_velocity_penalty,
+        weight=-0.5,
+        params={"lin_thresh": 0.1, "ang_thresh": 1.0},
+    )
+    object_drop = RewTerm(
+        func=mdp_rewards.object_drop_penalty,
+        weight=-200.0,
+        params={"min_height": 0.2},
+    )
+    joint_limit = RewTerm(
+        func=mdp_rewards.joint_limit_penalty,
+        weight=-0.1,
+    )
+    wrist_height = RewTerm(
+        func=mdp_rewards.wrist_height_penalty,
+        weight=-1.0,
+        params={"min_height": 0.1},
+    )
 
 # ---------------------------------------------------------------------------
 # Terminations & Events
