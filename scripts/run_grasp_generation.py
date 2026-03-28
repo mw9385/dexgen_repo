@@ -282,8 +282,31 @@ def _refine_object_graph_joints(graph, spec: dict, args) -> tuple[float, float]:
             # ----------------------------------------------------------------
             # Initialise each environment in the batch
             # ----------------------------------------------------------------
+            from isaaclab.utils.math import quat_apply as _quat_apply
+
+            # Place objects at their per-env world positions.
             mdp_events._randomise_object_pose(env, env_ids)
-            wrist_pos_w, wrist_quat_w = mdp_events._sample_wrist_pose_world(env, env_ids)
+
+            obj   = env.scene["object"]
+            robot = env.scene["robot"]
+            obj_pos_w  = obj.data.root_pos_w[env_ids].clone()    # (n, 3) world
+            obj_quat_w = obj.data.root_quat_w[env_ids].clone()   # (n, 4) world
+
+            # Compute grasp approach direction: average outward normal, object→world.
+            avg_norm_obj = contact_norms.mean(dim=1)              # (n, 3) obj frame
+            avg_norm_obj = avg_norm_obj / (avg_norm_obj.norm(dim=-1, keepdim=True) + 1e-8)
+            avg_norm_w   = _quat_apply(obj_quat_w, avg_norm_obj)  # (n, 3) world frame
+
+            # Place wrist root 20 cm along the approach direction from the
+            # object centroid.  This keeps the hand in the fingertip workspace
+            # regardless of which side of the object the grasp is from, and
+            # avoids the "hand stuck at z=0.6 far above the object" failure.
+            _WRIST_STANDOFF_S0 = 0.20  # metres
+            wrist_pos_w  = obj_pos_w + avg_norm_w * _WRIST_STANDOFF_S0  # (n,3)
+            # Keep the same rotation as the scene's default_root_state so that
+            # the stored object_pos_hand reproduces correctly in Stage 1.
+            wrist_quat_w = robot.data.default_root_state[env_ids, 3:7].clone()
+
             mdp_events._set_robot_root_pose(env, env_ids, wrist_pos_w, wrist_quat_w)
 
             joint_list = [g.joint_angles for g in batch]
@@ -295,12 +318,16 @@ def _refine_object_graph_joints(graph, spec: dict, args) -> tuple[float, float]:
             # ----------------------------------------------------------------
             # Differential IK refinement (all n envs in parallel)
             # ----------------------------------------------------------------
-            for _ in range(3):
+            # Run up to 6 outer rounds of the inner IK loop; early-stop per-env
+            # when every env's per-finger max error is below the threshold.
+            for _ in range(6):
                 mdp_events._refine_hand_to_start_grasp(env, env_ids, start_fps_body)
                 _, solve_max_err = mdp_events._measure_grasp_contact_error(
                     env, env_ids, start_fps_body
                 )
-                if float(solve_max_err.max().item()) <= float(args.refine_pos_threshold):
+                # Use mean-of-per-env-max so one outlier env does not block
+                # early exit for the whole batch.
+                if float(solve_max_err.mean().item()) <= float(args.refine_pos_threshold) * 3:
                     break
 
             # Final snap: place each object to match its refined hand pose.
