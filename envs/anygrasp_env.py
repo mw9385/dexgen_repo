@@ -304,14 +304,14 @@ if _ISAACLAB_AVAILABLE:
     class AnyGraspRewardsCfg:
         # --- Goal-related (DexGen paper §3.2 goal reward) ---
         object_pose = RewTerm(
-            func=mdp_rewards.object_pose_reward,
+            func=mdp_rewards.object_pose_goal_reward,   # pos+rot to goal
             weight=15.0,
-            params={"alpha": 20.0},
+            params={"pos_scale": 10.0, "rot_scale": 5.0},
         )
         finger_joint_goal = RewTerm(
             func=mdp_rewards.finger_joint_goal_reward,
             weight=8.0,
-            params={"alpha": 5.0},
+            params={"scale": 5.0},
         )
         fingertip_tracking = RewTerm(
             func=mdp_rewards.fingertip_tracking_reward,
@@ -327,7 +327,6 @@ if _ISAACLAB_AVAILABLE:
         fingertip_velocity = RewTerm(
             func=mdp_rewards.fingertip_velocity_penalty,
             weight=-0.5,
-            params={"vel_thresh": 0.1},
         )
         # --- Contact reward ---
         fingertip_contact = RewTerm(
@@ -335,8 +334,12 @@ if _ISAACLAB_AVAILABLE:
             weight=2.0,
         )
         # --- Regularization (DexGen paper: torque, work, action scale) ---
+        action_scale = RewTerm(
+            func=mdp_rewards.action_scale_penalty,
+            weight=-0.001,
+        )
         torque = RewTerm(
-            func=mdp_rewards.torque_penalty,
+            func=mdp_rewards.applied_torque_penalty,
             weight=-0.002,
         )
         mechanical_work = RewTerm(

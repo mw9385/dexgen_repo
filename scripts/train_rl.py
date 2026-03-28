@@ -127,6 +127,7 @@ def apply_env_config(env_cfg, env_cfg_dict: dict):
             "grasp_success": "grasp_success",
             "fingertip_velocity": "fingertip_velocity",
             "fingertip_contact": "fingertip_contact",
+            "action_scale": "action_scale",
             "torque": "torque",
             "mechanical_work": "mechanical_work",
             "action_rate": "action_rate",
