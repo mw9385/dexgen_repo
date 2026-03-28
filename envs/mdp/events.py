@@ -88,11 +88,20 @@ def reset_to_random_grasp(
 
     sampled_obj_names = []
     forced_object_name = _resolve_scene_graph_object_name(env, graph, env_num_fingers)
+    # Per-env object name: detected from the actual spawned USD prim so that
+    # envs with sphere objects use sphere grasps, cube envs use cube grasps, etc.
+    env_graph_names = _detect_env_graph_names(env, graph, env_num_fingers)
 
     goal_joints_list = []
     goal_object_pos_hand_list, goal_object_quat_hand_list = [], []
 
-    for _ in range(n):
+    for i in range(n):
+        env_id = int(env_ids[i].item())
+        # Use per-env object name from USD detection, fall back to scene-cfg match
+        if env_graph_names is not None:
+            per_env_name = env_graph_names[env_id] or forced_object_name
+        else:
+            per_env_name = forced_object_name
         (
             obj_name, start_fp, goal_fp,
             start_joints, start_object_pos_hand, start_object_quat_hand,
@@ -100,7 +109,7 @@ def reset_to_random_grasp(
             start_idx, goal_idx
         ) = _sample_start_and_nn_goal(
             graph, rng,
-            object_name=forced_object_name,
+            object_name=per_env_name,
             env_num_fingers=env_num_fingers,
         )
         sampled_obj_names.append(obj_name)
@@ -512,6 +521,96 @@ def _resolve_scene_graph_object_name(
     return best_name
 
 
+def _detect_shape_type_from_prim(prim, depth: int = 0) -> Optional[str]:
+    """
+    Recursively inspect a USD prim (up to 4 levels) to detect cube/sphere/cylinder.
+
+    Isaac Lab primitive spawners set the prim type directly on the object prim
+    (e.g. typeName "Cube", "Sphere", "Cylinder") or on a direct child when the
+    root prim is an Xform.
+    """
+    if prim is None or not prim.IsValid():
+        return None
+    type_lower = prim.GetTypeName().lower()
+    if "cube" in type_lower:
+        return "cube"
+    if "sphere" in type_lower:
+        return "sphere"
+    if "cylinder" in type_lower:
+        return "cylinder"
+    if depth < 4:
+        for child in prim.GetChildren():
+            result = _detect_shape_type_from_prim(child, depth + 1)
+            if result:
+                return result
+    return None
+
+
+def _detect_env_graph_names(
+    env, graph, env_num_fingers: int = 4
+) -> Optional[list]:
+    """
+    Return a per-env list of MultiObjectGraspGraph object names by inspecting
+    the USD stage to determine which shape was actually spawned in each env.
+
+    Result is cached in ``env.extras["_env_graph_names"]`` after the first call
+    so USD inspection only happens once per training run.
+
+    Returns None if ``graph`` is not a MultiObjectGraspGraph.
+    """
+    from grasp_generation.rrt_expansion import MultiObjectGraspGraph
+
+    if not isinstance(graph, MultiObjectGraspGraph):
+        return None
+
+    # Return cached result if already detected
+    if "_env_graph_names" in env.extras:
+        return env.extras["_env_graph_names"]
+
+    # Build shape_type → list-of-graph-names for the correct finger count
+    names_by_shape: dict = {}
+    for name, spec in graph.object_specs.items():
+        g = graph.graphs.get(name)
+        if g is None:
+            continue
+        if g.num_fingers != env_num_fingers:
+            continue
+        shape = spec.get("shape_type", "cube")
+        names_by_shape.setdefault(shape, []).append(name)
+
+    # Default fallback: first graph entry matching env_num_fingers
+    default_name: Optional[str] = None
+    for name, g in graph.graphs.items():
+        if g.num_fingers == env_num_fingers:
+            default_name = name
+            break
+
+    env_names: list = [default_name] * env.num_envs
+
+    try:
+        import omni.usd  # only available inside Isaac Sim
+        stage = omni.usd.get_context().get_stage()
+
+        for env_i in range(env.num_envs):
+            obj_path = f"/World/envs/env_{env_i}/Object"
+            prim = stage.GetPrimAtPath(obj_path)
+            shape = _detect_shape_type_from_prim(prim)
+            if shape and shape in names_by_shape:
+                env_names[env_i] = names_by_shape[shape][0]
+            # else: keep default_name
+
+        print(
+            f"[reset] Per-env object types detected via USD stage "
+            f"({len(set(env_names))} distinct objects across {env.num_envs} envs)"
+        )
+    except Exception as e:
+        print(f"[WARNING] _detect_env_graph_names: USD inspection failed ({e}); "
+              f"all envs will use '{default_name}'")
+
+    env.extras["_env_graph_names"] = env_names
+    return env_names
+
+
 # ---------------------------------------------------------------------------
 # Robot joint setting — direct (when joint angles are stored in grasp)
 # ---------------------------------------------------------------------------
@@ -909,10 +1008,21 @@ def _look_at_quat(direction: torch.Tensor) -> torch.Tensor:
 
 
 def _add_rotation_noise(quat, std_rad, device, n):
-    axis  = torch.randn(n, 3, device=device)
-    axis  = axis / (torch.norm(axis, dim=-1, keepdim=True) + 1e-8)
-    angle = torch.randn(n, device=device) * std_rad
-    noise_quat = _axis_angle_to_quat(axis, angle)
+    """
+    Apply yaw-only (Z-axis) Gaussian rotation noise.
+
+    Stage 0 (grasp generation) jitters the wrist with Gaussian yaw around Z so
+    grasps only cover that distribution.  Stage 1 must use the SAME distribution
+    (yaw-only, Gaussian std = wrist_rot_std_deg) to avoid out-of-distribution
+    resets that Stage 0 data never covered.
+    """
+    angle = torch.randn(n, device=device) * std_rad   # Gaussian yaw angle
+    half  = angle * 0.5
+    zero  = torch.zeros(n, device=device)
+    # Pure yaw quaternion (w, x, y, z) = (cos(θ/2), 0, 0, sin(θ/2))
+    noise_quat = torch.stack(
+        [torch.cos(half), zero, zero, torch.sin(half)], dim=-1
+    )
     return _quat_multiply(quat, noise_quat)
 
 
