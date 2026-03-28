@@ -2,8 +2,8 @@
 DexGraspNet Adapter
 ===================
 Wraps the DexGraspNet differentiable grasp optimization pipeline
-(PKU-EPIC/DexGraspNet) and converts its output to the :class:`Grasp` /
-:class:`GraspGraph` format used by our RL training pipeline.
+(PKU-EPIC/DexGraspNet, main branch — Shadow Hand) and converts its output
+to the :class:`Grasp` / :class:`GraspGraph` format used by our RL pipeline.
 
 DexGraspNet's algorithm:
   1. Initialise hand poses on an inflated convex hull of the object
@@ -12,12 +12,16 @@ DexGraspNet's algorithm:
   3. Filter results by energy thresholds
   4. Output: (wrist_translation, wrist_rotation_6d, joint_angles) per grasp
 
+Shadow Hand (main branch) specifics:
+  - MJCF format (shadow_hand_wrist_free.xml), NOT URDF
+  - 22 actuated DOF: FF×4, MF×4, RF×4, LF×5, TH×5
+  - Joint names prefixed with "robot0:" (e.g. robot0:FFJ3)
+  - Fingertip bodies: robot0:ffdistal_child, robot0:mfdistal_child, ...
+  - Isaac Lab fingertip links: rh_fftip, rh_mftip, rh_rftip, rh_lftip, rh_thtip
+
 Design for extensibility:
-  - :class:`HandConfig` encapsulates all hand-specific paths and naming
-    so that switching from Allegro to Shadow or a custom hand only
-    requires a new HandConfig instance.
-  - DexGraspNet code is called as-is from the submodule; we only
-    consume its outputs.
+  - :class:`HandConfig` encapsulates all hand-specific paths and naming.
+  - DexGraspNet code is called as-is; we only consume its outputs.
 """
 
 from __future__ import annotations
@@ -38,21 +42,43 @@ _DEXGRASPNET_ROOT = Path(__file__).resolve().parent.parent / "third_party" / "De
 _DEXGRASPNET_GEN = _DEXGRASPNET_ROOT / "grasp_generation"
 
 _TRANSLATION_NAMES = ["WRJTx", "WRJTy", "WRJTz"]
-_ROTATION_NAMES = ["WRJRx", "WRJRy", "WRJRz"]
+_ROTATION_NAMES    = ["WRJRx", "WRJRy", "WRJRz"]
+
+# Shadow Hand joint names in DexGraspNet MJCF order (22 DOF total):
+#   FF×4: FFJ3(abduction), FFJ2(MCP), FFJ1(PIP), FFJ0(DIP)
+#   MF×4, RF×4 — same pattern
+#   LF×5: LFJ4(spread), LFJ3, LFJ2, LFJ1, LFJ0
+#   TH×5: THJ4(rotation), THJ3, THJ2, THJ1, THJ0
+_SHADOW_JOINT_NAMES: List[str] = [
+    "robot0:FFJ3", "robot0:FFJ2", "robot0:FFJ1", "robot0:FFJ0",
+    "robot0:MFJ3", "robot0:MFJ2", "robot0:MFJ1", "robot0:MFJ0",
+    "robot0:RFJ3", "robot0:RFJ2", "robot0:RFJ1", "robot0:RFJ0",
+    "robot0:LFJ4", "robot0:LFJ3", "robot0:LFJ2", "robot0:LFJ1", "robot0:LFJ0",
+    "robot0:THJ4", "robot0:THJ3", "robot0:THJ2", "robot0:THJ1", "robot0:THJ0",
+]
+
+# Fingertip body names in DexGraspNet MJCF kinematic chain.
+# These are the virtual child bodies at the tip of each distal link.
+_SHADOW_FINGERTIP_LINKS: List[str] = [
+    "robot0:ffdistal_child",   # index (first finger)
+    "robot0:mfdistal_child",   # middle finger
+    "robot0:rfdistal_child",   # ring finger
+    "robot0:lfdistal_child",   # little finger
+    "robot0:thdistal_child",   # thumb
+]
 
 
 def _ensure_dexgraspnet_on_path():
-    """Add DexGraspNet to sys.path and ensure __init__.py files exist.
+    """Add DexGraspNet grasp_generation dir to sys.path and create __init__.py files.
 
-    DexGraspNet's source tree ships without __init__.py in its utils/
-    directory.  We create them at runtime so that ``from utils.hand_model
-    import HandModel`` works when the grasp_generation dir is on sys.path.
+    DexGraspNet ships without __init__.py in its utils/ directory.  We create
+    them at runtime so that ``from utils.hand_model import HandModel`` works
+    when the grasp_generation dir is on sys.path.
     """
     gen_str = str(_DEXGRASPNET_GEN)
     if gen_str not in sys.path:
         sys.path.insert(0, gen_str)
 
-    # Create missing __init__.py files so Python treats dirs as packages
     for subdir in [_DEXGRASPNET_GEN, _DEXGRASPNET_GEN / "utils"]:
         init_file = subdir / "__init__.py"
         if not init_file.exists() and subdir.is_dir():
@@ -68,55 +94,76 @@ class HandConfig:
     """
     Hand-specific configuration for DexGraspNet.
 
+    DexGraspNet main branch uses MJCF format (Shadow Hand).
+
     To add a new hand:
-      1. Create a URDF file in DexGraspNet format
-      2. Create a contact_points.json with per-link contact candidates
-      3. Instantiate HandConfig with the correct paths and link names
+      1. Create a MJCF file (or URDF for allegro branch)
+      2. Create contact_points.json and penetration_points.json
+      3. Instantiate HandConfig.from_custom() with the correct paths
 
     Attributes
     ----------
-    urdf_path : Path
-        Path to the hand URDF (DexGraspNet format).
+    mjcf_path : Path
+        Path to the hand MJCF file (DexGraspNet main branch format).
+    mesh_path : Path
+        Path to the meshes directory referenced in the MJCF.
     contact_points_path : Path
-        Path to the contact_points.json for this hand.
+        Path to contact_points.json for this hand.
+    penetration_points_path : Path
+        Path to penetration_points.json for this hand.
     fingertip_links : list[str]
-        Ordered list of fingertip link names in the URDF.
-        Order must match our convention: [index, middle, ring, thumb, ...]
+        Ordered fingertip body names in the MJCF kinematic chain.
+        Order: [index, middle, ring, little, thumb]
     joint_names : list[str]
-        Ordered list of joint names as used in DexGraspNet's qpos dict.
+        Ordered joint names as they appear in the MJCF (DexGraspNet qpos).
     n_dof : int
         Number of actuated DOF.
     isaac_lab_joint_mapping : list[int] | None
-        If DexGraspNet joint ordering differs from Isaac Lab, provide
-        a mapping: ``isaac_joint[i] = dgn_joint[mapping[i]]``.
+        Reordering from DexGraspNet joint order to Isaac Lab joint order.
+        isaac_lab_joints[i] = dgn_joints[mapping[i]].
         None means same ordering.
+        NOTE: Shadow Hand uses rh_XXJ naming in Isaac Lab vs robot0:XXJ in
+        DexGraspNet. Verify with your USD model before setting this.
     """
-    urdf_path: Path = field(default_factory=lambda: (
-        _DEXGRASPNET_GEN / "allegro_hand_description"
-        / "allegro_hand_description_right.urdf"
+    mjcf_path: Path = field(default_factory=lambda: (
+        _DEXGRASPNET_GEN / "mjcf" / "shadow_hand_wrist_free.xml"
+    ))
+    mesh_path: Path = field(default_factory=lambda: (
+        _DEXGRASPNET_GEN / "mjcf" / "meshes"
     ))
     contact_points_path: Path = field(default_factory=lambda: (
-        _DEXGRASPNET_GEN / "allegro_hand_description" / "contact_points.json"
+        _DEXGRASPNET_GEN / "mjcf" / "contact_points.json"
     ))
-    fingertip_links: List[str] = field(default_factory=lambda: [
-        "link_3.0_tip", "link_7.0_tip", "link_11.0_tip", "link_15.0_tip",
-    ])
-    joint_names: List[str] = field(default_factory=lambda: [
-        f"joint_{i}.0" for i in range(16)
-    ])
-    n_dof: int = 16
+    penetration_points_path: Path = field(default_factory=lambda: (
+        _DEXGRASPNET_GEN / "mjcf" / "penetration_points.json"
+    ))
+    fingertip_links: List[str] = field(
+        default_factory=lambda: list(_SHADOW_FINGERTIP_LINKS)
+    )
+    joint_names: List[str] = field(
+        default_factory=lambda: list(_SHADOW_JOINT_NAMES)
+    )
+    n_dof: int = 22
     isaac_lab_joint_mapping: Optional[List[int]] = None
 
     @classmethod
-    def allegro(cls) -> "HandConfig":
-        """Pre-configured for Wonik Allegro Hand (right, 4 fingers, 16 DOF)."""
+    def shadow(cls) -> "HandConfig":
+        """Pre-configured for Shadow Hand E-Series (right, 5 fingers, 22 DOF).
+
+        Uses DexGraspNet main branch MJCF files.
+        Isaac Lab joint names: rh_FFJ1..4, rh_MFJ1..4, rh_RFJ1..4,
+                               rh_LFJ1..5, rh_THJ1..5  (total 22)
+        Fingertip links: rh_fftip, rh_mftip, rh_rftip, rh_lftip, rh_thtip
+        """
         return cls()
 
     @classmethod
     def from_custom(
         cls,
-        urdf_path: str | Path,
+        mjcf_path: str | Path,
+        mesh_path: str | Path,
         contact_points_path: str | Path,
+        penetration_points_path: str | Path,
         fingertip_links: List[str],
         joint_names: List[str],
         n_dof: int,
@@ -124,10 +171,12 @@ class HandConfig:
     ) -> "HandConfig":
         """Create a HandConfig for a custom dexterous hand."""
         return cls(
-            urdf_path=Path(urdf_path),
+            mjcf_path=Path(mjcf_path),
+            mesh_path=Path(mesh_path),
             contact_points_path=Path(contact_points_path),
-            fingertip_links=fingertip_links,
-            joint_names=joint_names,
+            penetration_points_path=Path(penetration_points_path),
+            fingertip_links=list(fingertip_links),
+            joint_names=list(joint_names),
             n_dof=n_dof,
             isaac_lab_joint_mapping=isaac_lab_joint_mapping,
         )
@@ -143,7 +192,7 @@ class DexGraspNetConfig:
     # Batch & iteration
     batch_size: int = 128
     n_iter: int = 6000
-    n_contact: int = 4
+    n_contact: int = 5           # Shadow Hand: 5 fingers
 
     # Annealing
     switch_possibility: float = 0.5
@@ -157,7 +206,7 @@ class DexGraspNetConfig:
     # Energy weights
     w_dis: float = 100.0
     w_pen: float = 100.0
-    w_spen: float = 30.0
+    w_spen: float = 10.0         # main branch default (was 30 in allegro branch)
     w_joints: float = 1.0
 
     # Initialisation
@@ -179,7 +228,7 @@ class DexGraspNetConfig:
     seed: int = 42
 
     # Hand configuration
-    hand: HandConfig = field(default_factory=HandConfig.allegro)
+    hand: HandConfig = field(default_factory=HandConfig.shadow)
 
 
 # ---------------------------------------------------------------------------
@@ -196,9 +245,8 @@ def run_dexgraspnet_optimization(
     """
     Run DexGraspNet's differentiable grasp optimisation on a single object.
 
-    Uses DexGraspNet's own HandModel, ObjectModel, energy functions, and
-    Annealing optimizer as-is from the submodule.  We only set up the
-    inputs and collect the outputs.
+    Uses DexGraspNet main branch HandModel (MJCF / Shadow Hand) as-is.
+    We only set up inputs and collect outputs.
 
     Parameters
     ----------
@@ -223,6 +271,7 @@ def run_dexgraspnet_optimization(
 
     _ensure_dexgraspnet_on_path()
 
+    # Main branch HandModel uses MJCF (different API from allegro branch)
     from utils.hand_model import HandModel
     from utils.object_model import ObjectModel
     from utils.initializations import initialize_convex_hull
@@ -242,10 +291,12 @@ def run_dexgraspnet_optimization(
     os.environ["CUDA_VISIBLE_DEVICES"] = cfg.gpu
     torch_device = torch.device(device)
 
-    # ---- Hand model (uses HandConfig for extensibility) ----
+    # ---- Hand model (main branch MJCF API) ----
     hand_model = HandModel(
-        urdf_path=str(hand_cfg.urdf_path),
+        mjcf_path=str(hand_cfg.mjcf_path),
+        mesh_path=str(hand_cfg.mesh_path),
         contact_points_path=str(hand_cfg.contact_points_path),
+        penetration_points_path=str(hand_cfg.penetration_points_path),
         n_surface_points=1000,
         device=torch_device,
     )
@@ -312,11 +363,11 @@ def run_dexgraspnet_optimization(
 
         with torch.no_grad():
             accept, t = optimizer.accept_step(energy, new_energy)
-            energy[accept] = new_energy[accept]
-            E_fc[accept] = new_E_fc[accept]
-            E_dis[accept] = new_E_dis[accept]
-            E_pen[accept] = new_E_pen[accept]
-            E_spen[accept] = new_E_spen[accept]
+            energy[accept]   = new_energy[accept]
+            E_fc[accept]     = new_E_fc[accept]
+            E_dis[accept]    = new_E_dis[accept]
+            E_pen[accept]    = new_E_pen[accept]
+            E_spen[accept]   = new_E_spen[accept]
             E_joints[accept] = new_E_joints[accept]
 
     # ---- Collect results ----
@@ -360,7 +411,7 @@ def filter_by_energy(
     """Filter by per-component energy thresholds."""
     filtered = [
         r for r in results
-        if r["E_fc"] <= thres_fc
+        if r["E_fc"]  <= thres_fc
         and r["E_dis"] <= thres_dis
         and r["E_pen"] <= thres_pen
     ]
@@ -380,7 +431,8 @@ def _extract_fingertip_positions(
     device,
 ) -> np.ndarray:
     """
-    Run FK on a single hand_pose and extract fingertip positions in world frame.
+    Run FK on a single hand_pose and extract mean fingertip contact candidate
+    positions in world frame.
 
     Returns (num_fingers, 3) array.
     """
@@ -389,23 +441,30 @@ def _extract_fingertip_positions(
     from utils.rot6d import robust_compute_rotation_matrix_from_ortho6d
 
     hp = hand_pose_tensor.to(device).unsqueeze(0)
-    translation = hp[:, :3]
-    rotation = robust_compute_rotation_matrix_from_ortho6d(hp[:, 3:9])
-    fk_status = hand_model.chain.forward_kinematics(hp[:, 9:])
+    translation = hp[:, :3]                                           # (1, 3)
+    rotation    = robust_compute_rotation_matrix_from_ortho6d(hp[:, 3:9])  # (1, 3, 3)
+    fk_status   = hand_model.chain.forward_kinematics(hp[:, 9:])
 
     tips = []
     for link_name in fingertip_links:
-        tip_local = hand_model.mesh[link_name]["contact_candidates"]
-        tip_homo = torch.cat([
-            tip_local,
-            torch.ones(tip_local.shape[0], 1, dtype=torch.float, device=device),
-        ], dim=1)
-        T = fk_status[link_name].get_matrix()
-        tip_wrist = (T @ tip_homo.unsqueeze(-1))[:, :3, 0]
-        tip_world = tip_wrist @ rotation.transpose(1, 2) + translation
-        tips.append(tip_world[0].detach().cpu().numpy())
+        # contact_candidates: (K, 3) points in link frame
+        cands = hand_model.mesh[link_name]["contact_candidates"]    # (K, 3)
+        if cands is None or cands.shape[0] == 0:
+            # Fall back to link origin
+            T = fk_status[link_name].get_matrix()                   # (1, 4, 4)
+            tip_world = T[:, :3, 3]                                 # (1, 3)
+        else:
+            T = fk_status[link_name].get_matrix()                   # (1, 4, 4)
+            ones = torch.ones(cands.shape[0], 1, dtype=torch.float, device=device)
+            cands_h = torch.cat([cands, ones], dim=1)               # (K, 4)
+            # T: (1, 4, 4), cands_h: (K, 4) → (1, K, 4) bmm (1, 4, 4)^T
+            tip_wrist = (T @ cands_h.unsqueeze(-1)).squeeze(-1)[:, :, :3]  # (1, K, 3)
+            tip_world = tip_wrist.mean(dim=1)                       # (1, 3)
+        # Apply global rotation + translation
+        tip_world_tf = tip_world @ rotation[:, :, :].squeeze(0) + translation
+        tips.append(tip_world_tf[0].detach().cpu().numpy())
 
-    return np.stack(tips, axis=0)
+    return np.stack(tips, axis=0)   # (num_fingers, 3)
 
 
 def _compute_contact_normals(
@@ -436,10 +495,10 @@ def convert_results_to_grasps(
         From :func:`run_dexgraspnet_optimization`.
     object_code : str
     mesh : trimesh.Trimesh
-        Unit-normalised mesh.
+        Unit-normalised mesh for contact normal computation.
     hand_cfg : HandConfig, optional
     hand_model : HandModel, optional
-        Reuse an existing model to avoid re-loading URDF.
+        Reuse an existing model to avoid re-loading MJCF.
     device : optional
     """
     import torch
@@ -449,7 +508,7 @@ def convert_results_to_grasps(
     from grasp_generation.grasp_sampler import Grasp
 
     if hand_cfg is None:
-        hand_cfg = HandConfig.allegro()
+        hand_cfg = HandConfig.shadow()
 
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -457,26 +516,28 @@ def convert_results_to_grasps(
     if hand_model is None:
         from utils.hand_model import HandModel
         hand_model = HandModel(
-            urdf_path=str(hand_cfg.urdf_path),
+            mjcf_path=str(hand_cfg.mjcf_path),
+            mesh_path=str(hand_cfg.mesh_path),
             contact_points_path=str(hand_cfg.contact_points_path),
+            penetration_points_path=str(hand_cfg.penetration_points_path),
             n_surface_points=0,
             device=device,
         )
 
-    joint_names = hand_cfg.joint_names
+    joint_names    = hand_cfg.joint_names
     fingertip_links = hand_cfg.fingertip_links
-    mapping = hand_cfg.isaac_lab_joint_mapping
+    mapping        = hand_cfg.isaac_lab_joint_mapping
 
     grasps = []
     for r in results:
-        qpos = r["qpos"]
+        qpos  = r["qpos"]
         scale = r["scale"]
 
-        # Extract joint angles
+        # Extract joint angles in DexGraspNet order
         dgn_joints = np.array(
             [qpos[name] for name in joint_names], dtype=np.float32,
         )
-        # Apply mapping if DexGraspNet ordering differs from Isaac Lab
+        # Re-order to Isaac Lab joint order if needed
         joint_angles = dgn_joints[mapping] if mapping is not None else dgn_joints
 
         # Wrist transform
@@ -488,30 +549,25 @@ def convert_results_to_grasps(
             transforms3d.euler.euler2mat(*euler, axes="sxyz"), dtype=np.float32,
         )
 
-        # FK → fingertip positions in world frame (= object frame)
+        # FK → fingertip positions in world frame (= object frame at origin)
         hand_pose = r.get("_hand_pose")
-        if hand_pose is not None:
-            tips_world = _extract_fingertip_positions(
-                hand_model, hand_pose, fingertip_links, device,
-            )
-        else:
+        if hand_pose is None:
             rot6d = rot_matrix[:, :2].T.flatten()
             hand_pose = torch.tensor(
-                np.concatenate([translation, rot6d, dgn_joints]),
-                dtype=torch.float,
+                np.concatenate([translation, rot6d, dgn_joints]), dtype=torch.float,
             )
-            tips_world = _extract_fingertip_positions(
-                hand_model, hand_pose, fingertip_links, device,
-            )
+        tips_world = _extract_fingertip_positions(
+            hand_model, hand_pose, fingertip_links, device,
+        )
 
         fingertip_positions = tips_world.astype(np.float32)
-        contact_normals = _compute_contact_normals(fingertip_positions, mesh, scale)
+        contact_normals     = _compute_contact_normals(fingertip_positions, mesh, scale)
 
-        energy = r.get("energy", 0.0)
+        energy  = r.get("energy", 0.0)
         quality = 1.0 / (1.0 + max(0.0, energy))
 
-        # Object pose in wrist frame (object at origin)
-        object_pos_hand = (-rot_matrix.T @ translation).astype(np.float32)
+        # Object pose in wrist frame (object sits at origin of world)
+        object_pos_hand  = (-rot_matrix.T @ translation).astype(np.float32)
         object_quat_hand = np.array(
             transforms3d.quaternions.mat2quat(rot_matrix.T), dtype=np.float32,
         )
@@ -527,12 +583,11 @@ def convert_results_to_grasps(
             object_quat_hand=object_quat_hand,
         ))
 
-    print(f"[DexGraspNet adapter] Converted {len(grasps)} grasps for {object_code}")
     return grasps
 
 
 # ---------------------------------------------------------------------------
-# High-level API: generate + filter + convert
+# End-to-end pipeline
 # ---------------------------------------------------------------------------
 
 def generate_grasps_dexgraspnet(
@@ -551,17 +606,17 @@ def generate_grasps_dexgraspnet(
       2. Filter by energy thresholds
       3. Convert to our Grasp format
 
-    If fewer than ``target_num_grasps`` pass the filter, thresholds
-    are progressively relaxed.
+    If fewer than ``target_num_grasps`` pass the filter, thresholds are
+    progressively relaxed (×2, ×5, ×10).
     """
     if cfg is None:
         cfg = DexGraspNetConfig()
 
-    # Overshoot ~3x to account for filtering
+    # Overshoot ~3× to account for filtering
     batches_needed = max(1, (target_num_grasps * 3) // cfg.batch_size + 1)
 
     all_results: List[dict] = []
-    filtered: List[dict] = []
+    filtered:    List[dict] = []
 
     for batch_idx in range(batches_needed):
         batch_cfg = DexGraspNetConfig(**{
@@ -586,14 +641,14 @@ def generate_grasps_dexgraspnet(
         if len(filtered) >= target_num_grasps:
             break
 
-    # Progressive threshold relaxation
+    # Progressive threshold relaxation if still too few
     if len(filtered) < target_num_grasps:
-        for relax_factor in [2.0, 5.0, 10.0]:
+        for relax in [2.0, 5.0, 10.0]:
             filtered = filter_by_energy(
                 all_results,
-                thres_fc=cfg.thres_fc * relax_factor,
-                thres_dis=cfg.thres_dis * relax_factor,
-                thres_pen=cfg.thres_pen * relax_factor,
+                thres_fc=cfg.thres_fc * relax,
+                thres_dis=cfg.thres_dis * relax,
+                thres_pen=cfg.thres_pen * relax,
             )
             if len(filtered) >= target_num_grasps:
                 break
@@ -602,10 +657,10 @@ def generate_grasps_dexgraspnet(
     filtered.sort(key=lambda r: r["energy"])
     filtered = filtered[:target_num_grasps]
 
-    # Convert to our format
-    meshdata_root = Path(meshdata_root)
-    unit_mesh_path = meshdata_root / object_code / "coacd" / "decomposed.obj"
-    unit_mesh = trimesh.load(str(unit_mesh_path), force="mesh", process=False)
+    # Load unit mesh for contact normal computation
+    meshdata_root   = Path(meshdata_root)
+    unit_mesh_path  = meshdata_root / object_code / "coacd" / "decomposed.obj"
+    unit_mesh       = trimesh.load(str(unit_mesh_path), force="mesh", process=False)
 
     grasps = convert_results_to_grasps(
         filtered, object_code, unit_mesh,

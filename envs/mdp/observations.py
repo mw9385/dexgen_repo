@@ -123,10 +123,11 @@ def fingertip_contact_binary(env) -> torch.Tensor:
 
 
 def last_action(env) -> torch.Tensor:
-    """Previous joint position targets. Returns: (N, 16)"""
+    """Previous joint position targets. Returns: (N, num_dof)"""
     action = env.extras.get("last_action")
     if action is None:
-        return torch.zeros(env.num_envs, 16, device=env.device)
+        num_dof = env.scene["robot"].data.joint_pos.shape[-1]
+        return torch.zeros(env.num_envs, num_dof, device=env.device)
     return action
 
 

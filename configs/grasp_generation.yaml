@@ -7,26 +7,26 @@
 # ==============================================================================
 # num_fingers    : how many fingertip contact points to use (2 / 3 / 4 / 5)
 # num_dof        : total controllable DOF (used by DR and obs dimension)
-# dof_per_finger : joints per finger (num_dof = num_fingers × dof_per_finger)
-# fingertip_links: URDF link names in the same order as finger indices
-#                  (used by Isaac Lab ContactSensor & FK lookup)
+# dof_per_finger : joints per finger (average; LF=5, TH=5, others=4)
+# fingertip_links: Isaac Lab link names used by ContactSensor & FK lookup
 #
 # Pre-configured hands:
+#   shadow   : num_fingers=5, num_dof=22, fingertips=rh_fftip/mftip/rftip/lftip/thtip
 #   allegro  : num_fingers=4, num_dof=16, dof_per_finger=4
-#   shadow   : num_fingers=5, num_dof=20, dof_per_finger=4
 #   leap     : num_fingers=4, num_dof=16, dof_per_finger=4
 # ==============================================================================
 
 hand:
-  name: allegro
-  num_fingers: 4
-  num_dof: 16
-  dof_per_finger: 4
+  name: shadow
+  num_fingers: 5
+  num_dof: 22
+  dof_per_finger: 4              # average (LF=5, TH=5, FF/MF/RF=4)
   fingertip_links:
-    - index_link_3    # index
-    - middle_link_3   # middle
-    - ring_link_3     # ring
-    - thumb_link_3    # thumb
+    - rh_fftip    # index (first finger)
+    - rh_mftip    # middle finger
+    - rh_rftip    # ring finger
+    - rh_lftip    # little finger
+    - rh_thtip    # thumb
 
 # Object pool — generates grasps for all combinations of shape × size
 object_pool:
@@ -38,22 +38,20 @@ object_pool:
   # Override with a directory of mesh files instead of primitives:
   # mesh_dir: assets/objects/
 
-# Grasp sampler (per object)
+# Grasp sampler (per object) — used only for legacy pipeline
 sampler:
   num_seed_grasps: 300     # seed grasps per object before NFO filtering
-  # num_candidates is auto-set to num_seed_grasps × 20
 
-# Net Force Optimization (NFO)
+# Net Force Optimization (NFO) — used only for legacy pipeline
 nfo:
   mu: 0.5                  # friction coefficient
   num_friction_edges: 8    # friction cone linearisation edges
   min_quality: 0.005       # minimum NFO ε-metric score
   fast_mode: false         # true = SVD approximation (faster, less accurate)
 
-# RRT expansion (per object)
+# RRT expansion (per object) — used only for legacy pipeline
 rrt:
   target_size: 300         # target grasps per object after expansion
-  # delta_pos and delta_max are auto-scaled to object size
 
 # Output
 output_dir: data

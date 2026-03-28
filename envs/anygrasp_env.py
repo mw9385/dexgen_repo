@@ -3,37 +3,42 @@ Stage 1 – AnyGrasp-to-AnyGrasp Isaac Lab Environment
 ======================================================
 Implements the core RL environment from DexterityGen §3.2 with:
   - Asymmetric Actor-Critic (separate policy / critic observation groups)
-  - Tactile sensing via ContactSensorCfg on 4 fingertip links
+  - Tactile sensing via ContactSensorCfg on 5 fingertip links (Shadow Hand)
   - Domain Randomization (object physics, joint dynamics, action delay)
   - Random object pool (cube / sphere / cylinder, multiple sizes)
-  - Random Allegro Hand wrist position per episode
+  - Random Shadow Hand wrist position per episode
+
+Shadow Hand E-Series: 5 fingers, 22 DOF
+  FF×4 + MF×4 + RF×4 + LF×5 + TH×5 = 22 actuated DOF
+  Isaac Lab joints:  rh_FFJ1-4, rh_MFJ1-4, rh_RFJ1-4, rh_LFJ1-5, rh_THJ1-5
+  Fingertip links:   rh_fftip, rh_mftip, rh_rftip, rh_lftip, rh_thtip
 
 =======================================================================
   OBSERVATION SPLIT  (see mdp/observations.py for full details)
 =======================================================================
 
-  ACTOR (policy) — 76 dims
+  ACTOR (policy) — 101 dims
   ─────────────────────────────────────────────────────────────────
-  joint_pos_normalized       16   (encoder, normalised)
-  joint_vel_normalized       16   (encoder derivative)
-  fingertip_pos_obj_frame    12   (FK in object-centric frame)
-  target_fingertip_pos       12   (goal from GraspGraph)
-  fingertip_contact_binary    4   (tactile: binary contact per tip)
-  last_action                16   (previous joint targets)
+  joint_pos_normalized       22   (encoder, normalised)
+  joint_vel_normalized       22   (encoder derivative)
+  fingertip_pos_obj_frame    15   (FK in object-centric frame, 5×3)
+  target_fingertip_pos       15   (goal from GraspGraph)
+  fingertip_contact_binary    5   (tactile: binary contact per tip)
+  last_action                22   (previous joint targets)
   ─────────────────────────────────────────────────────────────────
-  Total: 76
+  Total: 101
 
-  CRITIC (privileged) — 104 dims
+  CRITIC (privileged) — 132 dims
   ─────────────────────────────────────────────────────────────────
-  [actor obs]                76
+  [actor obs]               101
   object_pos_world            3   (true 3-D position)
   object_quat_world           4   (true orientation)
   object_lin_vel              3   (true linear velocity)
   object_ang_vel              3   (true angular velocity)
-  fingertip_contact_forces   12   (full 3-D forces per tip)
+  fingertip_contact_forces   15   (full 3-D forces per tip, 5×3)
   dr_params                   3   (mass / friction / damping)
   ─────────────────────────────────────────────────────────────────
-  Total: 104
+  Total: 132
 
 =======================================================================
   DOMAIN RANDOMIZATION  (see mdp/domain_rand.py for ranges)
@@ -84,25 +89,23 @@ try:
         from isaaclab.envs.mdp.actions import JointPositionToLimitsActionCfg
 
     try:
-        from isaaclab_assets.robots.allegro_hand import ALLEGRO_HAND_CFG
+        from isaaclab_assets.robots.shadow_hand import SHADOW_HAND_CFG
     except ImportError:
-        from isaaclab_assets import ALLEGRO_HAND_CFG
+        from isaaclab_assets import SHADOW_HAND_CFG
 
     # Patch USD path if the nucleus asset root resolved to None.
-    # This happens in headless containers without a running Nucleus server;
-    # NUCLEUS_ASSET_ROOT_DIR in isaaclab/utils/assets.py is read from a carb
-    # setting that defaults to None in that environment.
-    _allegro_usd = ALLEGRO_HAND_CFG.spawn.usd_path
-    if str(_allegro_usd).startswith("None"):
+    # This happens in headless containers without a running Nucleus server.
+    _shadow_usd = SHADOW_HAND_CFG.spawn.usd_path
+    if str(_shadow_usd).startswith("None"):
         _S3_ROOT = (
             "https://omniverse-content-production.s3-us-west-2.amazonaws.com"
             "/Assets/Isaac/5.0"
         )
-        ALLEGRO_HAND_CFG = ALLEGRO_HAND_CFG.replace(
-            spawn=ALLEGRO_HAND_CFG.spawn.replace(
+        SHADOW_HAND_CFG = SHADOW_HAND_CFG.replace(
+            spawn=SHADOW_HAND_CFG.spawn.replace(
                 usd_path=(
-                    f"{_S3_ROOT}/Isaac/Robots/WonikRobotics/AllegroHand/"
-                    "allegro_hand_instanceable.usd"
+                    f"{_S3_ROOT}/Isaac/Robots/ShadowRobot/ShadowHand/"
+                    "shadow_hand_instanceable.usd"
                 )
             )
         )
@@ -173,19 +176,20 @@ if _ISAACLAB_AVAILABLE:
                     prim_path="/World/ground",
                     spawn=sim_utils.GroundPlaneCfg()
                 )
-        robot: ArticulationCfg = ALLEGRO_HAND_CFG.replace(
-            prim_path="{ENV_REGEX_NS}/AllegroHand",
+        robot: ArticulationCfg = SHADOW_HAND_CFG.replace(
+            prim_path="{ENV_REGEX_NS}/ShadowHand",
             init_state=ArticulationCfg.InitialStateCfg(
                 pos=(0.0, 0.0, 0.6),
                 rot=(1.0, 0.0, 0.0, 0.0),
                 joint_pos={
-                    "thumb_joint_0": 0.28,  # within [0.279, 1.571]
+                    "rh_THJ4": 0.5,   # thumb rotation: natural resting pose
+                    "rh_THJ3": 0.3,
                 },
             ),
             actuators={
-                **ALLEGRO_HAND_CFG.actuators,
+                **SHADOW_HAND_CFG.actuators,
             },
-            spawn=ALLEGRO_HAND_CFG.spawn.replace(
+            spawn=SHADOW_HAND_CFG.spawn.replace(
                 activate_contact_sensors=True,
             ),
         )
@@ -206,29 +210,37 @@ if _ISAACLAB_AVAILABLE:
             ),
         )
 
-        fingertip_contact_sensor_index: ContactSensorCfg = ContactSensorCfg(
-            prim_path="{ENV_REGEX_NS}/AllegroHand/index_link_3",
+        # Shadow Hand 5-finger contact sensors (rh_fftip .. rh_thtip)
+        fingertip_contact_sensor_ff: ContactSensorCfg = ContactSensorCfg(
+            prim_path="{ENV_REGEX_NS}/ShadowHand/rh_fftip",
             update_period=0.0,
             history_length=1,
             debug_vis=False,
             filter_prim_paths_expr=["{ENV_REGEX_NS}/Object"],
         )
-        fingertip_contact_sensor_middle: ContactSensorCfg = ContactSensorCfg(
-            prim_path="{ENV_REGEX_NS}/AllegroHand/middle_link_3",
+        fingertip_contact_sensor_mf: ContactSensorCfg = ContactSensorCfg(
+            prim_path="{ENV_REGEX_NS}/ShadowHand/rh_mftip",
             update_period=0.0,
             history_length=1,
             debug_vis=False,
             filter_prim_paths_expr=["{ENV_REGEX_NS}/Object"],
         )
-        fingertip_contact_sensor_ring: ContactSensorCfg = ContactSensorCfg(
-            prim_path="{ENV_REGEX_NS}/AllegroHand/ring_link_3",
+        fingertip_contact_sensor_rf: ContactSensorCfg = ContactSensorCfg(
+            prim_path="{ENV_REGEX_NS}/ShadowHand/rh_rftip",
             update_period=0.0,
             history_length=1,
             debug_vis=False,
             filter_prim_paths_expr=["{ENV_REGEX_NS}/Object"],
         )
-        fingertip_contact_sensor_thumb: ContactSensorCfg = ContactSensorCfg(
-            prim_path="{ENV_REGEX_NS}/AllegroHand/thumb_link_3",
+        fingertip_contact_sensor_lf: ContactSensorCfg = ContactSensorCfg(
+            prim_path="{ENV_REGEX_NS}/ShadowHand/rh_lftip",
+            update_period=0.0,
+            history_length=1,
+            debug_vis=False,
+            filter_prim_paths_expr=["{ENV_REGEX_NS}/Object"],
+        )
+        fingertip_contact_sensor_th: ContactSensorCfg = ContactSensorCfg(
+            prim_path="{ENV_REGEX_NS}/ShadowHand/rh_thtip",
             update_period=0.0,
             history_length=1,
             debug_vis=False,
@@ -509,22 +521,24 @@ if _ISAACLAB_AVAILABLE:
                     "pos_threshold": 0.005,
                 }
 
-            # Finger link subsets must MATCH GraspSampler._FINGER_SUBSETS so
-            # fingertip_positions order in grasps aligns with sensor/obs order.
-            #   2-finger: index + thumb   (pinch — thumb always required)
-            #   3-finger: index + middle + thumb
-            #   4-finger: index + middle + ring + thumb   (Allegro default)
+            # Finger link subsets — Shadow Hand Isaac Lab link names.
+            # Order must MATCH GraspSampler._FINGER_SUBSETS so that fingertip
+            # positions in grasps align with sensor/obs order.
+            #   2-finger: FF + TH  (pinch — thumb always required)
+            #   3-finger: FF + MF + TH
+            #   4-finger: FF + MF + RF + TH
+            #   5-finger: FF + MF + RF + LF + TH  (Shadow Hand default)
             _TIP_LINK_SUBSETS = {
-                2: ["index_link_3", "thumb_link_3"],
-                3: ["index_link_3", "middle_link_3", "thumb_link_3"],
-                4: ["index_link_3", "middle_link_3", "ring_link_3", "thumb_link_3"],
-                5: ["index_link_3", "middle_link_3", "ring_link_3", "thumb_link_3", "pinky_link_3"],
+                2: ["rh_fftip", "rh_thtip"],
+                3: ["rh_fftip", "rh_mftip", "rh_thtip"],
+                4: ["rh_fftip", "rh_mftip", "rh_rftip", "rh_thtip"],
+                5: ["rh_fftip", "rh_mftip", "rh_rftip", "rh_lftip", "rh_thtip"],
             }
 
             if self.hand is None:
                 self.hand = {
-                    "name": "allegro", "num_fingers": 4, "num_dof": 16, "dof_per_finger": 4,
-                    "fingertip_links": _TIP_LINK_SUBSETS[4],
+                    "name": "shadow", "num_fingers": 5, "num_dof": 22, "dof_per_finger": 4,
+                    "fingertip_links": _TIP_LINK_SUBSETS[5],
                 }
             else:
                 self.hand = dict(self.hand)
@@ -542,10 +556,11 @@ if _ISAACLAB_AVAILABLE:
             self.hand["fingertip_links"] = tip_links
 
             sensor_attr_by_link = {
-                "index_link_3": "fingertip_contact_sensor_index",
-                "middle_link_3": "fingertip_contact_sensor_middle",
-                "ring_link_3": "fingertip_contact_sensor_ring",
-                "thumb_link_3": "fingertip_contact_sensor_thumb",
+                "rh_fftip": "fingertip_contact_sensor_ff",
+                "rh_mftip": "fingertip_contact_sensor_mf",
+                "rh_rftip": "fingertip_contact_sensor_rf",
+                "rh_lftip": "fingertip_contact_sensor_lf",
+                "rh_thtip": "fingertip_contact_sensor_th",
             }
             for link_name, sensor_attr in sensor_attr_by_link.items():
                 sensor_cfg = getattr(self.scene, sensor_attr)
@@ -553,7 +568,7 @@ if _ISAACLAB_AVAILABLE:
                     self.scene,
                     sensor_attr,
                     sensor_cfg.replace(
-                        prim_path=f"{{ENV_REGEX_NS}}/AllegroHand/{link_name}",
+                        prim_path=f"{{ENV_REGEX_NS}}/ShadowHand/{link_name}",
                         filter_prim_paths_expr=["{ENV_REGEX_NS}/Object"],
                     ),
                 )
@@ -568,9 +583,9 @@ def register_anygrasp_env():
 
     import gymnasium as gym
     gym.register(
-        id="DexGen-AnyGrasp-Allegro-v0",
+        id="DexGen-AnyGrasp-Shadow-v0",
         entry_point="isaaclab.envs:ManagerBasedRLEnv",
         kwargs={"cfg": AnyGraspEnvCfg()},
         disable_env_checker=True,
     )
-    print("[AnyGraspEnv] Registered 'DexGen-AnyGrasp-Allegro-v0'")
+    print("[AnyGraspEnv] Registered 'DexGen-AnyGrasp-Shadow-v0'")

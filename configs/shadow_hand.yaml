@@ -1,0 +1,64 @@
+# ==============================================================================
+# Shadow Hand Isaac Lab Configuration
+# ==============================================================================
+# Isaac Lab task: DexGen-AnyGrasp-Shadow-v0
+# RL algorithm: rl_games (PPO)
+#
+# Shadow Hand E-Series (right hand):
+#   Fingers: FF, MF, RF, LF, TH  (5 fingers)
+#   DOF:     FF×4 + MF×4 + RF×4 + LF×5 + TH×5 = 22 actuated DOF
+#   Isaac Lab joint names: rh_FFJ1..4, rh_MFJ1..4, rh_RFJ1..4,
+#                          rh_LFJ1..5, rh_THJ1..5
+#   Fingertip links: rh_fftip, rh_mftip, rh_rftip, rh_lftip, rh_thtip
+# ==============================================================================
+
+task:
+  name: DexGen-AnyGrasp-Shadow-v0
+
+  env:
+    num_envs: 512
+    episode_length: 400
+
+  # Observation space (Shadow Hand 5-finger, 22 DOF):
+  #   joint positions   (22 DoF)
+  #   joint velocities  (22 DoF)
+  #   fingertip pos     (5 × 3 = 15)
+  #   object pose       (7: pos + quat)
+  #   object velocity   (6)
+  #   goal orientation  (4: quat)
+  #   actions           (22)
+  # Total: ~98 dims
+
+  action_scale: 1.0
+
+training:
+  algorithm: rl_games_ppo
+
+  ppo:
+    learning_rate: 5.0e-4
+    gamma: 0.99
+    lambda: 0.95
+    mini_epochs: 5
+    minibatch_size: 16384
+    horizon_length: 16
+    max_agent_steps: 300000000
+
+  network:
+    units: [512, 512, 512]
+    activation: elu
+    fixed_sigma: True
+    sigma_init: 0.0
+
+  normalize_input: True
+  normalize_value: True
+
+logging:
+  log_dir: logs/rl_games/shadow_hand
+  save_frequency: 1000
+  video_interval: 0
+
+rewards:
+  orientation_scale: 10.0
+  reaching_scale: 0.5
+  joint_vel_penalty: -0.001
+  action_penalty: -0.0001

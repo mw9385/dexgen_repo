@@ -10,17 +10,17 @@ Paper reference (DexterityGen §3.3):
       a_t = f_inv(k_t, k_{t+1}, x_t)
 
   where:
-    k_t       = current fingertip positions (12-dim, object frame)
-    k_{t+1}   = next fingertip positions    (12-dim, object frame)
-    x_t       = current robot state: joint pos + vel (32-dim)
+    k_t       = current fingertip positions (15-dim, 5 fingers × 3, object frame)
+    k_{t+1}   = next fingertip positions    (15-dim, object frame)
+    x_t       = current robot state: joint pos + vel (44-dim, Shadow Hand 22 DOF)
 
   Output:
-    a_t       = joint position targets (16-dim, Allegro Hand)
+    a_t       = joint position targets (22-dim, Shadow Hand)
 
   Architecture (per paper Appendix B):
     - MLP: 3 hidden layers of 256 units, ELU activations
-    - Input dim:  12 + 12 + 32 = 56
-    - Output dim: 16
+    - Input dim:  15 + 15 + 44 = 74
+    - Output dim: 22
     - Trained with supervised learning on Stage 2 dataset
 
   Training objective:
@@ -48,9 +48,9 @@ class InverseDynamicsConfig:
     """Hyperparameters for the inverse dynamics model."""
 
     # I/O dimensions
-    keypoint_dim: int = 12       # 4 fingertips × 3
-    robot_state_dim: int = 32    # joint pos (16) + joint vel (16)
-    action_dim: int = 16         # Allegro joint targets
+    keypoint_dim: int = 15       # 5 fingertips × 3  (Shadow Hand)
+    robot_state_dim: int = 44    # joint pos (22) + joint vel (22)
+    action_dim: int = 22         # Shadow Hand joint targets
 
     # Network
     hidden_dim: int = 256
@@ -105,13 +105,13 @@ class InverseDynamicsModel(nn.Module):
 
     def forward(
         self,
-        k_current: torch.Tensor,     # (B, 12)  current fingertip pos
-        k_next: torch.Tensor,        # (B, 12)  next fingertip pos
-        robot_state: torch.Tensor,   # (B, 32)  joint pos + vel
+        k_current: torch.Tensor,     # (B, 15)  current fingertip pos  (5×3)
+        k_next: torch.Tensor,        # (B, 15)  next fingertip pos
+        robot_state: torch.Tensor,   # (B, 44)  joint pos + vel  (Shadow Hand)
     ) -> torch.Tensor:
         """
-        Returns predicted joint position targets (B, 16).
-        Output is clipped to [-π, π] (full joint range of Allegro).
+        Returns predicted joint position targets (B, 22).
+        Output is bounded via tanh + learned scale.
         """
         x = torch.cat([k_current, k_next, robot_state], dim=-1)
         raw = self.net(x)                                        # (B, 16)

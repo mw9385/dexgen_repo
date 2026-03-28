@@ -6,7 +6,7 @@
 # ==============================================================================
 
 env:
-  task: DexGen-AnyGrasp-Allegro-v0
+  task: DexGen-AnyGrasp-Shadow-v0
   num_envs: 512
   episode_length_s: 10.0
   action_scale: 1.0              # normalized [-1, 1] action mapped to full soft joint range
@@ -94,7 +94,7 @@ central_value:
   minibatch_size: 16384
 
 logging:
-  log_dir: logs/rl/allegro_anygrasp_v2
+  log_dir: logs/rl/shadow_anygrasp_v1
   save_frequency: 1000
   print_stats: true
 
