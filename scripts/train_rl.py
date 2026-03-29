@@ -185,7 +185,7 @@ def _resolve_ppo_sizes(args, cfg_file: dict) -> tuple[int, int, int]:
 
     horizon_length = int(ppo_cfg.get("horizon_length", 16))
     seq_length = int(ppo_cfg.get("seq_length", 4))
-    requested_minibatch = int(ppo_cfg.get("minibatch_size", 16384))
+    requested_minibatch = int(ppo_cfg.get("minibatch_size", 4096))
 
     batch_size = args.num_envs * horizon_length
     minibatch_size = _resolve_valid_minibatch_size(batch_size, requested_minibatch, seq_length)
@@ -201,7 +201,7 @@ def build_rl_games_config(args, cfg_file: dict) -> dict:
       - normalize_input: True   (was False → reward signal was weak)
       - normalize_value: True   (was False → value function unstable)
       - reward_shaper scale_value: 0.1  (was 0.01 → reward too small)
-      - minibatch_size: 16384   (was 4096 → matches yaml)
+      - minibatch_size: 4096    (rollout=8192 → 2 minibatches/epoch)
       - horizon_length: 16      (was 8 → more stable gradient estimates)
     """
     ppo_cfg = cfg_file.get("ppo", {})
@@ -236,9 +236,12 @@ def build_rl_games_config(args, cfg_file: dict) -> dict:
                         "fixed_sigma": True,
                     }
                 },
+                # Paper (arXiv:2502.04307): [1024, 512, 512, 256, 256] for both
+                # actor and critic.  Shadow Hand has more DOF than the original
+                # LEAP Hand so matching the paper size is important.
                 "mlp": {
-                    "units": [512, 512, 256, 128],
-                    "activation": "elu",
+                    "units": ppo_cfg.get("units", [1024, 512, 512, 256, 256]),
+                    "activation": ppo_cfg.get("activation", "elu"),
                     "d2rl": False,
                     "initializer": {"name": "default"},
                     "regularizer": {"name": "None"},
@@ -524,15 +527,29 @@ class _IsaacLabVecEnv:
             extras["last_action"] = actions.clone()
         extras["current_action"] = actions.clone()
 
-        obs, rew, terminated, truncated, info = self.env.step(actions)
+        # Apply action delay DR (0-2 step lag set by randomize_action_delay).
+        # Must be called here — the randomize event only sets the delay length;
+        # the actual buffering and delayed output happens at every step.
+        from envs.mdp.domain_rand import apply_action_delay
+        delayed_actions = apply_action_delay(self.env, actions)
+
+        obs, rew, terminated, truncated, info = self.env.step(delayed_actions)
         done = terminated | truncated
         from envs.mdp import events as mdp_events
         from envs.mdp import rewards as mdp_rewards
+
+        # Rolling goal: when a grasp is achieved mid-episode, immediately
+        # select a new nearby goal (kNN) so the policy keeps transitioning
+        # rather than idling until reset.  Uses threshold=2 cm (looser than
+        # the 1 cm sparse-reward threshold) so the new goal is set just
+        # before the sparse bonus fires.
+        n_updated = mdp_events.update_rolling_goal(self.env, success_threshold=0.02)
 
         info = dict(info) if isinstance(info, dict) else {}
         info["success_ratio"] = float(mdp_rewards.grasp_success_reward(self.env).mean().item())
         info["drop_ratio"] = float(mdp_events.object_dropped(self.env).float().mean().item())
         info["left_hand_ratio"] = float(mdp_events.object_left_hand(self.env).float().mean().item())
+        info["rolling_goal_updates"] = n_updated
         return _to_rl_obs(obs), rew, done, info
 
     def reset(self):
