@@ -52,7 +52,7 @@ from isaaclab.app import AppLauncher
 
 from grasp_generation import (
     GraspSampler, NetForceOptimizer, RRTGraspExpander,
-    ObjectPool, MultiObjectGraspGraph,
+    ObjectPool, MultiObjectGraspGraph, refine_multi_object_graph_with_isaac,
 )
 from grasp_generation.rrt_expansion import build_graph_from_grasps
 
@@ -74,6 +74,13 @@ def parse_args():
                    help="Single custom mesh file instead of pool (.obj/.stl/.ply)")
     p.add_argument("--mesh_dir", type=str, default=None,
                    help="Directory of mesh files — all loaded as pool objects")
+    p.add_argument(
+        "--generation_preset",
+        type=str,
+        default="default",
+        choices=["default", "high_precision"],
+        help="Generation preset. 'high_precision' increases candidate counts and enables Isaac refinement by default.",
+    )
 
     # Grasp generation quality
     p.add_argument("--num_seed_grasps", type=int, default=None,
@@ -113,8 +120,86 @@ def parse_args():
         "--num_fingers", type=int, default=None,
         help="Number of contact points per grasp (overrides config file hand.num_fingers)",
     )
+    p.add_argument(
+        "--max_num_fingers", type=int, default=None,
+        help="Generate all finger counts from 2..N (inclusive), capped at 5",
+    )
+    p.add_argument(
+        "--finger_counts", type=str, default=None,
+        help="Comma-separated finger counts to generate, e.g. '2,3,5'",
+    )
+    p.add_argument(
+        "--isaac_refine",
+        action="store_true",
+        default=False,
+        help="After Stage 0 generation, validate grasps in Isaac Sim and overwrite each grasp with the true simulated tuple.",
+    )
+    p.add_argument(
+        "--isaac_refine_batch_envs",
+        type=int,
+        default=16,
+        help="Batch size for Isaac-based grasp refinement/validation",
+    )
+    p.add_argument(
+        "--keep_top_k",
+        type=int,
+        default=None,
+        help="After Isaac validation, keep only the top-K lowest-error grasps per object/finger graph",
+    )
     AppLauncher.add_app_launcher_args(p)
     return p.parse_args()
+
+
+def _apply_generation_preset(args):
+    if args.generation_preset != "high_precision":
+        return
+
+    preset_values = {
+        "num_seed_grasps": 2000,
+        "num_grasps": 1000,
+        "min_quality": 0.01,
+        "mu": 0.5,
+        "fast_nfo": False,
+        "isaac_refine_batch_envs": 32,
+        "keep_top_k": None,
+    }
+
+    for field_name, preset_value in preset_values.items():
+        if getattr(args, field_name) is None:
+            setattr(args, field_name, preset_value)
+    args.isaac_refine = True
+
+
+def _resolve_finger_counts(args, hand_cfg: dict) -> list[int]:
+    """
+    Resolve which finger-count variants to generate.
+
+    Priority:
+      1. --finger_counts        explicit list
+      2. --max_num_fingers      generate 2..N
+      3. --num_fingers          single value
+      4. config hand.num_fingers
+    """
+    if args.finger_counts:
+        raw_counts = [part.strip() for part in args.finger_counts.split(",")]
+        finger_counts = [int(part) for part in raw_counts if part]
+    elif args.max_num_fingers is not None:
+        finger_counts = list(range(2, int(args.max_num_fingers) + 1))
+    else:
+        resolved_num_fingers = (
+            int(args.num_fingers)
+            if args.num_fingers is not None
+            else int(hand_cfg.get("num_fingers", 4))
+        )
+        finger_counts = [resolved_num_fingers]
+
+    deduped = sorted(set(int(nf) for nf in finger_counts))
+    invalid = [nf for nf in deduped if nf < 2 or nf > 5]
+    if invalid:
+        raise ValueError(
+            f"Finger counts must be in [2, 5] for Shadow Hand, got: {invalid}"
+        )
+    return deduped
 
 
 # ---------------------------------------------------------------------------
@@ -393,6 +478,11 @@ def validate_graph(graph_path: Path):
         N = len(g)
         E = g.num_edges
         n_with_joints = sum(1 for gr in g.grasp_set.grasps if gr.joint_angles is not None)
+        reset_errs = [
+            float(gr.reset_contact_error)
+            for gr in g.grasp_set.grasps
+            if getattr(gr, "reset_contact_error", None) is not None
+        ]
 
         # Nearest neighbor distance check
         all_fps = g.grasp_set.as_array()  # (N, F*3)
@@ -405,9 +495,15 @@ def validate_graph(graph_path: Path):
 
         ok = N >= 2 and E >= 1 and n_with_joints == N
         status = "✓" if ok else "✗"
+        reset_err_text = ""
+        if reset_errs:
+            reset_err_text = (
+                f", reset_err_mean={np.mean(reset_errs):.4f}m"
+                f", reset_err_best={np.min(reset_errs):.4f}m"
+            )
         print(f"  [{status}] {obj_name}: {N} nodes, {E} edges, "
               f"{n_with_joints}/{N} with joints, "
-              f"mean NN dist={nn_mean:.4f}m")
+              f"mean NN dist={nn_mean:.4f}m{reset_err_text}")
 
         if not ok:
             all_ok = False
@@ -453,6 +549,7 @@ def main():
         sampler_cfg = cfg_file.get("sampler", {})
         nfo_cfg = cfg_file.get("nfo", {})
         rrt_cfg = cfg_file.get("rrt", {})
+        _apply_generation_preset(args)
 
         # ------------------------------------------------------------------
         # Resolve config-overridable CLI values.
@@ -483,16 +580,16 @@ def main():
         output_dir = Path(args.output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        if args.num_fingers is not None:
-            num_fingers = args.num_fingers
-        else:
-            num_fingers = hand_cfg.get("num_fingers", 4)
+        finger_counts = _resolve_finger_counts(args, hand_cfg)
+        num_fingers = max(finger_counts)
 
         num_dof        = hand_cfg.get("num_dof", 16)
         dof_per_finger = hand_cfg.get("dof_per_finger", 4)
 
         print(f"[Stage 0] Hand:       {hand_cfg.get('name', 'allegro')}  "
-              f"(num_fingers={num_fingers}, num_dof={num_dof})")
+              f"(finger_counts={finger_counts}, num_dof={num_dof})")
+        if args.generation_preset != "default":
+            print(f"[Stage 0] Preset:     {args.generation_preset}")
         print(f"[Stage 0] Object pool: shapes={args.shapes}, "
               f"size_range=({args.size_min:.3f}, {args.size_max:.3f}), "
               f"num_sizes={args.num_sizes}")
@@ -523,10 +620,6 @@ def main():
                 num_sizes=args.num_sizes,
                 seed=args.seed,
             )
-
-        # Respect the configured/default finger count unless the caller
-        # explicitly overrides it via CLI.
-        finger_counts = [int(num_fingers)]
 
         print(f"\n[Stage 0] Processing {len(pool)} objects × {finger_counts} finger configs")
         print(f"[Stage 0] Method: {args.grasp_method}")
@@ -592,6 +685,17 @@ def main():
         # ------------------------------------------------------------------
         graph_path = output_dir / "grasp_graph.pkl"
         multi_graph.save(graph_path)
+
+        if args.isaac_refine:
+            print(f"\n{'='*55}")
+            print(" Isaac Validation / Refinement")
+            print(f"{'='*55}")
+            multi_graph = refine_multi_object_graph_with_isaac(
+                multi_graph,
+                batch_envs=args.isaac_refine_batch_envs,
+                keep_top_k=args.keep_top_k,
+            )
+            multi_graph.save(graph_path)
 
         # ------------------------------------------------------------------
         # Validate the saved graph

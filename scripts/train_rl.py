@@ -29,12 +29,17 @@ import torch
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from isaaclab.app import AppLauncher
+from grasp_generation.graph_io import load_merged_graph, parse_graph_paths
 
 
 def parse_args():
     p = argparse.ArgumentParser(description="DexGen Stage 1: RL Training")
-    p.add_argument("--grasp_graph", type=str, default="data/grasp_graph.pkl",
-                   help="Path to GraspGraph from Stage 0")
+    p.add_argument(
+        "--grasp_graph",
+        action="append",
+        default=None,
+        help="Path to GraspGraph from Stage 0. Repeat the flag or use comma-separated values to load multiple PKL files.",
+    )
     p.add_argument("--num_envs", type=int, default=512,
                    help="Number of parallel environments")
     p.add_argument("--max_iterations", type=int, default=30000,
@@ -49,7 +54,10 @@ def parse_args():
                    help="Path to YAML config (ppo / domain_randomization settings)")
 
     AppLauncher.add_app_launcher_args(p)
-    return p.parse_args()
+    args = p.parse_args()
+    if args.grasp_graph is None:
+        args.grasp_graph = ["data/grasp_graph.pkl"]
+    return args
 
 
 def load_config(path: str) -> dict:
@@ -59,6 +67,13 @@ def load_config(path: str) -> dict:
         return {}
     with open(p) as f:
         return yaml.safe_load(f) or {}
+
+
+def _resolve_grasp_graph_arg(args) -> list[str]:
+    graph_paths = parse_graph_paths(args.grasp_graph)
+    if not graph_paths:
+        raise ValueError("At least one --grasp_graph path is required.")
+    return graph_paths
 
 
 def apply_dr_config(env_cfg, dr_cfg: dict):
@@ -322,13 +337,6 @@ def main():
     except Exception as _e:
         print(f"[train_rl] WARNING: could not set carb asset root: {_e}")
 
-    if not Path(args.grasp_graph).exists():
-        print(f"ERROR: GraspGraph not found at {args.grasp_graph}")
-        print("Run Stage 0 first:")
-        print("  python scripts/run_grasp_generation.py")
-        sim_app.close()
-        sys.exit(1)
-
     try:
         import isaaclab  # noqa: F401
     except ImportError:
@@ -352,20 +360,28 @@ def main():
 
     register_anygrasp_env()
 
+    grasp_graph_paths = _resolve_grasp_graph_arg(args)
+    missing_graph_paths = [path for path in grasp_graph_paths if not Path(path).exists()]
+    if missing_graph_paths:
+        print(f"ERROR: GraspGraph not found at {missing_graph_paths}")
+        print("Run Stage 0 first:")
+        print("  python scripts/run_grasp_generation.py")
+        sim_app.close()
+        sys.exit(1)
+
     cfg_file = load_config(args.config)
+    merged_graph = load_merged_graph(grasp_graph_paths)
 
     env_cfg = AnyGraspEnvCfg()
     env_cfg.scene.num_envs = args.num_envs
-    env_cfg.grasp_graph_path = args.grasp_graph
+    env_cfg.grasp_graph_path = grasp_graph_paths
     if getattr(args, "headless", False):
         env_cfg.viewer = None
 
     # Load object specs from the grasp graph so the environment spawns the
     # same object pool that was used during Stage 0 grasp generation.
     try:
-        import pickle
-        with open(args.grasp_graph, "rb") as _f:
-            _graph = pickle.load(_f)
+        _graph = merged_graph
         from grasp_generation.rrt_expansion import MultiObjectGraspGraph
         if isinstance(_graph, MultiObjectGraspGraph) and _graph.object_specs:
             _specs = list(_graph.object_specs.values())
@@ -378,6 +394,26 @@ def main():
                 print(f"          - {_s.get('name','?')}  shape={_s.get('shape_type','?')}  size={_s.get('size',0):.3f}m")
         else:
             print("[Stage 1] Grasp graph has no MultiObjectGraspGraph specs; using default cube.")
+
+        graph_num_fingers = getattr(_graph, "num_fingers", None)
+        if graph_num_fingers is None and isinstance(_graph, MultiObjectGraspGraph) and _graph.graphs:
+            first_graph = next(iter(_graph.graphs.values()))
+            graph_num_fingers = getattr(first_graph, "num_fingers", None)
+        if graph_num_fingers is not None:
+            graph_num_fingers = int(graph_num_fingers)
+            tip_subsets = {
+                2: ["robot0_ffdistal", "robot0_thdistal"],
+                3: ["robot0_ffdistal", "robot0_mfdistal", "robot0_thdistal"],
+                4: ["robot0_ffdistal", "robot0_mfdistal", "robot0_rfdistal", "robot0_thdistal"],
+                5: ["robot0_ffdistal", "robot0_mfdistal", "robot0_rfdistal", "robot0_lfdistal", "robot0_thdistal"],
+            }
+            env_cfg.hand = dict(getattr(env_cfg, "hand", {}) or {})
+            env_cfg.hand["num_fingers"] = graph_num_fingers
+            env_cfg.hand["fingertip_links"] = tip_subsets.get(
+                graph_num_fingers,
+                tip_subsets[5][:graph_num_fingers],
+            )
+            print(f"[Stage 1] Hand config overridden from grasp graph: num_fingers={graph_num_fingers}")
     except Exception as _e:
         print(f"[Stage 1] WARNING: Could not load object specs from graph: {_e}")
 
@@ -388,7 +424,7 @@ def main():
     print(f"[Stage 1] Task: DexGen-AnyGrasp-Allegro-v0")
     print(f"[Stage 1] Num envs: {args.num_envs}")
     print(f"[Stage 1] Max iterations: {args.max_iterations}")
-    print(f"[Stage 1] Grasp graph: {args.grasp_graph}")
+    print(f"[Stage 1] Grasp graph(s): {', '.join(grasp_graph_paths)}")
     print(f"[Stage 1] Log dir: {args.log_dir}")
     print(f"[Stage 1] Action scale: {env_cfg.action_scale}")
     print("-" * 60)

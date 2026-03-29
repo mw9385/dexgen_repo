@@ -47,6 +47,10 @@ class Grasp:
     # Object pose in the hand-root frame for exact reset reproduction.
     object_pos_hand: Optional[np.ndarray] = None
     object_quat_hand: Optional[np.ndarray] = None
+    object_pose_frame: Optional[str] = None
+    # Measured reset error after Isaac-based validation/refinement.
+    reset_contact_error: Optional[float] = None
+    reset_contact_error_max: Optional[float] = None
 
     @property
     def as_vector(self) -> np.ndarray:
@@ -63,6 +67,9 @@ class Grasp:
             "joint_angles": self.joint_angles,
             "object_pos_hand": self.object_pos_hand,
             "object_quat_hand": self.object_quat_hand,
+            "object_pose_frame": self.object_pose_frame,
+            "reset_contact_error": self.reset_contact_error,
+            "reset_contact_error_max": self.reset_contact_error_max,
         }
 
     @classmethod
@@ -441,6 +448,7 @@ class GraspSampler:
             object_scale=self.object_scale,
             object_pos_hand=self._sample_object_pose_in_hand(pts).astype(np.float32),
             object_quat_hand=self._sample_random_quaternion().astype(np.float32),
+            object_pose_frame=None,
         )
 
     def _sample_object_pose_in_hand(self, points_obj: np.ndarray) -> np.ndarray:

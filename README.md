@@ -76,7 +76,10 @@ Generates a grasp graph by sampling force-closure grasps on primitive objects, t
 | `--num_sizes` | 3 | Sizes per shape |
 | `--num_seed_grasps` | 300 | Initial candidates |
 | `--num_grasps` | 300 | Target after RRT |
-| `--num_fingers` | from config | 2, 3, or 4 contacts |
+| `--num_fingers` | from config | Generate one finger count (2 to 5) |
+| `--max_num_fingers` | unset | Generate all finger counts from 2..N |
+| `--finger_counts` | unset | Explicit list, e.g. `2,3,5` |
+| `--generation_preset` | default | `high_precision` enables larger candidate sets and Isaac refinement defaults |
 | `--fast_nfo` | off | Fast SVD approximation |
 | `--refine_iterations` | 8 | Sim refinement steps |
 
@@ -88,6 +91,17 @@ Generates a grasp graph by sampling force-closure grasps on primitive objects, t
 /workspace/IsaacLab/isaaclab.sh -p scripts/run_grasp_generation.py \
     --headless --shapes cube --num_sizes 1 --num_seed_grasps 24 --num_grasps 12 --fast_nfo
 ```
+
+**High-precision generation:**
+
+```bash
+/workspace/IsaacLab/isaaclab.sh -p scripts/run_grasp_generation.py \
+    --headless --generation_preset high_precision
+```
+
+This preset currently defaults to `num_seed_grasps=2000`, `num_grasps=1000`,
+`min_quality=0.01`, `fast_nfo=False`, `isaac_refine=True`,
+and `isaac_refine_batch_envs=32`.
 
 ## Stage 1: RL Training
 

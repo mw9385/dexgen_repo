@@ -18,6 +18,8 @@ env/
 data/*.pkl
 data/*.hdf5
 logs/
+runs/
+data/
 
 # Editor
 .vscode/

@@ -638,6 +638,7 @@ def convert_results_to_grasps(
             joint_angles=joint_angles,
             object_pos_hand=object_pos_hand,
             object_quat_hand=object_quat_hand,
+            object_pose_frame="palm",
         ))
 
     return grasps
