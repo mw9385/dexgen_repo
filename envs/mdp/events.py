@@ -296,17 +296,20 @@ def reset_to_random_grasp(
         solve_mean_err, solve_max_err = _measure_grasp_contact_error(env, env_ids, start_fps)
 
     # ------------------------------------------------------------------
-    # 7. Compute target_object_pos/quat_hand from the ACTUAL sim state.
-    #    Some stored object poses are defined in a palm/body-local frame,
-    #    while the reward uses the articulation root frame. To avoid that
-    #    mismatch, ALWAYS compute from the current sim state. Since the
-    #    object was just placed via _place_object_in_hand, the current sim
-    #    pose is consistent with the articulation root frame.
+    # 7. Fill in target_object_pos/quat_hand for envs that had no stored
+    #    goal object pose in the grasp graph (goal_object_pos_hand is None).
+    #    For envs WITH a stored goal pose it was already written above at
+    #    lines ~200-208 and must NOT be overwritten with the start sim state.
+    #    Overwriting the goal with the start pose would make the reward always
+    #    fire at maximum from step 0, providing no learning signal.
     # ------------------------------------------------------------------
     robot_for_goal = env.scene["robot"]
     obj_for_goal   = env.scene["object"]
     obj_for_goal.update(0.0)
     for i in range(n):
+        # Only fall back to start sim state when the grasp graph had no goal pose
+        if goal_object_pos_hand_list[i] is not None:
+            continue
         rp_w = robot_for_goal.data.root_pos_w[env_ids[i]]   # (3,)
         rq_w = robot_for_goal.data.root_quat_w[env_ids[i]]  # (4,)
         op_w = obj_for_goal.data.root_pos_w[env_ids[i]]     # (3,)
@@ -314,10 +317,11 @@ def reset_to_random_grasp(
         rel  = op_w - rp_w
         cur_obj_pos_hand = quat_apply_inverse(rq_w.unsqueeze(0), rel.unsqueeze(0))[0]
         env.extras["target_object_pos_hand"][env_ids[i]] = cur_obj_pos_hand.clone()
-        cur_obj_quat_hand = _quat_multiply(
-            _quat_conjugate(rq_w.unsqueeze(0)), oq_w.unsqueeze(0)
-        )[0]
-        env.extras["target_object_quat_hand"][env_ids[i]] = cur_obj_quat_hand.clone()
+        if goal_object_quat_hand_list[i] is None:
+            cur_obj_quat_hand = _quat_multiply(
+                _quat_conjugate(rq_w.unsqueeze(0)), oq_w.unsqueeze(0)
+            )[0]
+            env.extras["target_object_quat_hand"][env_ids[i]] = cur_obj_quat_hand.clone()
 
     # ------------------------------------------------------------------
     # 8. Initialise action buffers (fixes last_action always being 0)

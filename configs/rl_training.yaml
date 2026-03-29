@@ -13,13 +13,13 @@ env:
   decimation: 4                  # control at 30 Hz (120 Hz sim / 4)
 
   rewards:
-    # Goal rewards — inverse-distance form: 1/(dist+eps)
-    # Replaces exp(-alpha*dist): inverse gives strong gradient throughout range,
-    # not just far from goal. See rewards.py for range analysis.
-    object_pose:        1.0     # stability only (target=START pose, so near-constant)
-    finger_joint_goal:  1.5     # 1/(||Δq_norm||+0.1): range [~1, 15] per step
-    fingertip_tracking: 1.0     # 1/(dist+0.05m):       range [5, 20] per step
-    grasp_success:      250.0   # Isaac Lab uses 250 — strong sparse "aha" signal
+    # DexterityGen paper §3.2 eq.(5) goal reward:
+    #   r_goal = exp(-alpha_pos*||p-p*|| - alpha_orn*d(R,R*))
+    #          - alpha_hand * ||q - q*||
+    #          + alpha_bonus * 1(goal achieved)
+    object_pose:        5.0     # exp(-10*d_pos - 5*d_rot) ∈ (0,1]; max +5.0/step
+    finger_joint_goal:  1.0     # -alpha_hand(0.1)*||q-q*||; negative penalty term
+    grasp_success:      250.0   # alpha_bonus: sparse "aha" signal
     # Contact / style
     fingertip_contact:   2.0    # fraction of tips in contact [0,1]
     fingertip_velocity: -0.1    # mean(||v_tip||^2) over fingers (style penalty)
@@ -33,8 +33,6 @@ env:
     object_drop:       -100.0   # drop penalty (also terminates episode)
     object_left_hand:   -50.0   # escape penalty
     joint_limit:        -0.1    # soft limit penalty
-    # wrist_height removed: nearly never fires (hand at z=0.6, threshold 0.1);
-    # wrist escape handled by early-termination added in events.py
 
 # ==============================================================================
 # Asymmetric Actor-Critic PPO (rl_games)
