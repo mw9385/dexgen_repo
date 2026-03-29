@@ -42,20 +42,15 @@ def object_dropped(env, min_height: float = 0.2) -> torch.Tensor:
 
 def object_left_hand(env, max_dist: float = 0.18) -> torch.Tensor:
     """
-    True when the object has moved more than *max_dist* from the robot palm.
+    True when the object has escaped the palm support region.
 
-    Catches all escape directions (upward, sideways, downward) unlike the
-    height-only `object_dropped` predicate.  Use together with object_dropped
-    so the termination fires as soon as contact is lost.
+    We treat three cases as failure:
+      1. the object is too far from the palm and fingertips no longer touch it,
+      2. the object moved behind the palm plane (wrist-side cheat),
+      3. the object drifted too far laterally away from the palm center.
     """
-    robot = env.scene["robot"]
-    obj   = env.scene["object"]
-    palm_body_id = _get_palm_body_id_from_env(robot, env)
-    palm_pos_w = robot.data.body_pos_w[:, palm_body_id, :]
-    dist  = torch.norm(obj.data.root_pos_w - palm_pos_w, dim=-1)
-    contact_forces = _get_fingertip_contact_forces_world(env)
-    has_contact = (torch.norm(contact_forces, dim=-1) > 0.5).any(dim=-1)
-    return (dist > max_dist) & (~has_contact)
+    escaped, _ = _object_escape_mask(env, max_dist=max_dist)
+    return escaped
 
 
 def _log_reset_reasons(env, env_ids: torch.Tensor, max_dist: float = 0.18) -> None:
@@ -63,11 +58,13 @@ def _log_reset_reasons(env, env_ids: torch.Tensor, max_dist: float = 0.18) -> No
         return
     if not torch.any(env.episode_length_buf[env_ids] > 0):
         return
+    counter = int(env.extras.get("_reset_reason_counter", 0)) + 1
+    env.extras["_reset_reason_counter"] = counter
+    if counter % 25 != 0:
+        return
 
-    robot = env.scene["robot"]
-    obj = env.scene["object"]
-    contact_forces = _get_fingertip_contact_forces_world(env)[env_ids]
-    has_contact = (torch.norm(contact_forces, dim=-1) > 0.5).any(dim=-1)
+    _, escape_stats = _object_escape_mask(env, max_dist=max_dist)
+    has_contact = escape_stats["has_contact"][env_ids]
 
     time_out_mask = time_out(env)[env_ids]
     drop_mask = object_dropped(env)[env_ids]
@@ -76,31 +73,20 @@ def _log_reset_reasons(env, env_ids: torch.Tensor, max_dist: float = 0.18) -> No
     active = time_out_mask | drop_mask | left_hand_mask
     if not torch.any(active):
         return
-
-    root_dist = torch.norm(
-        obj.data.root_pos_w[env_ids] - robot.data.root_pos_w[env_ids], dim=-1
-    )
-
-    palm_body_id = _get_palm_body_id_from_env(robot, env)
-    palm_pos_w = robot.data.body_pos_w[env_ids][:, palm_body_id, :]
-    palm_dist = torch.norm(obj.data.root_pos_w[env_ids] - palm_pos_w, dim=-1)
-
-    env_id_list = env_ids.detach().cpu().tolist()
-    active_ids = [env_id_list[i] for i, flag in enumerate(active.detach().cpu().tolist()) if flag]
+    behind_mask = escape_stats["behind_palm"][env_ids]
+    lateral_mask = escape_stats["too_lateral"][env_ids]
+    far_mask = escape_stats["too_far"][env_ids]
 
     print(
         "[reset-reason] "
-        f"envs={active_ids[:8]}"
-        f"{'...' if len(active_ids) > 8 else ''} "
+        f"sample={counter} "
         f"time_out={int(time_out_mask.sum().item())} "
         f"drop={int(drop_mask.sum().item())} "
         f"left_hand={int(left_hand_mask.sum().item())} "
-        f"contact_any={int(has_contact.sum().item())} "
-        f"root_dist_mean={float(root_dist.mean().item()):.3f} "
-        f"root_dist_max={float(root_dist.max().item()):.3f} "
-        f"palm_dist_mean={float(palm_dist.mean().item()):.3f} "
-        f"palm_dist_max={float(palm_dist.max().item()):.3f} "
-        f"left_hand_thresh={max_dist:.3f}"
+        f"left_far={int(far_mask.sum().item())} "
+        f"left_behind={int(behind_mask.sum().item())} "
+        f"left_lateral={int(lateral_mask.sum().item())} "
+        f"contact_any={int(has_contact.sum().item())}"
     )
 
 
@@ -1039,6 +1025,51 @@ def _get_palm_body_id_from_env(robot, env) -> int:
         f"Could not resolve palm body for hand={hand_cfg.get('name', 'unknown')}; "
         f"tried {candidate_names}"
     )
+
+
+def _object_escape_mask(
+    env,
+    max_dist: float = 0.18,
+    max_lateral: float = 0.10,
+    max_front_offset: float = 0.12,
+    max_behind_offset: float = 0.015,
+    contact_force_thresh: float = 0.5,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    robot = env.scene["robot"]
+    obj = env.scene["object"]
+
+    palm_body_id = _get_palm_body_id_from_env(robot, env)
+    palm_pos_w = robot.data.body_pos_w[:, palm_body_id, :]
+    rel_obj_w = obj.data.root_pos_w - palm_pos_w
+    dist = torch.norm(rel_obj_w, dim=-1)
+
+    palm_normal_root = _get_local_palm_normal(robot, env).unsqueeze(0).expand(env.num_envs, 3)
+    palm_normal_world = quat_apply(robot.data.root_quat_w, palm_normal_root)
+    palm_normal_world = palm_normal_world / (torch.norm(palm_normal_world, dim=-1, keepdim=True) + 1e-8)
+
+    normal_offset = (rel_obj_w * palm_normal_world).sum(dim=-1)
+    lateral_vec = rel_obj_w - normal_offset.unsqueeze(-1) * palm_normal_world
+    lateral_offset = torch.norm(lateral_vec, dim=-1)
+
+    contact_forces = _get_fingertip_contact_forces_world(env)
+    has_contact = (torch.norm(contact_forces, dim=-1) > contact_force_thresh).any(dim=-1)
+
+    too_far = dist > max_dist
+    behind_palm = normal_offset < -max_behind_offset
+    too_front = normal_offset > max_front_offset
+    too_lateral = lateral_offset > max_lateral
+
+    escaped = behind_palm | too_front | too_lateral | (too_far & (~has_contact))
+    return escaped, {
+        "dist": dist,
+        "normal_offset": normal_offset,
+        "lateral_offset": lateral_offset,
+        "has_contact": has_contact,
+        "too_far": too_far,
+        "behind_palm": behind_palm,
+        "too_front": too_front,
+        "too_lateral": too_lateral,
+    }
 
 
 def _quat_from_two_vectors(v_from: torch.Tensor, v_to: torch.Tensor) -> torch.Tensor:

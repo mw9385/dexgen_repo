@@ -301,13 +301,7 @@ def object_left_hand_penalty(env, max_dist: float = 0.18) -> torch.Tensor:
 
     Returns: (N,)  0.0 or 1.0
     """
-    from .events import _get_palm_body_id_from_env
+    from .events import _object_escape_mask
 
-    robot = env.scene["robot"]
-    obj   = env.scene["object"]
-    palm_body_id = _get_palm_body_id_from_env(robot, env)
-    palm_pos_w = robot.data.body_pos_w[:, palm_body_id, :]
-    dist  = torch.norm(obj.data.root_pos_w - palm_pos_w, dim=-1)
-    contact_forces = _get_fingertip_contact_forces_world(env)
-    has_contact = (torch.norm(contact_forces, dim=-1) > 0.5).any(dim=-1)
-    return ((dist > max_dist) & (~has_contact)).float()
+    escaped, _ = _object_escape_mask(env, max_dist=max_dist)
+    return escaped.float()

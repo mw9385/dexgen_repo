@@ -250,6 +250,27 @@ See `configs/rl_training.yaml` for the full config.
     --num_envs 512 --headless
 ```
 
+### View A Saved Checkpoint
+
+First confirm that a checkpoint exists:
+
+```bash
+find logs/rl/allegro_anygrasp_v2 -type f | grep model_
+```
+
+Then load the saved policy in non-headless inference mode:
+
+```bash
+DISPLAY=:1 /workspace/IsaacLab/isaaclab.sh -p scripts/view_rl_checkpoint.py \
+    --checkpoint logs/rl/allegro_anygrasp_v2/checkpoints/model_1000.pt \
+    --grasp_graph data/cube_graph/grasp_graph.pkl \
+    --grasp_graph data/sphere_graph/grasp_graph.pkl \
+    --grasp_graph data/cylinder_graph/grasp_graph.pkl \
+    --num_envs 16
+```
+
+This viewer runs policy inference only. It does not resume training.
+
 ## Stage 2: Dataset Collection
 
 ```bash
@@ -298,6 +319,7 @@ dexgen_repo/
 ├── scripts/
 │   ├── run_grasp_generation.py    # Stage 0 entry point
 │   ├── train_rl.py                # Stage 1 entry point
+│   ├── view_rl_checkpoint.py      # Stage 1 checkpoint viewer
 │   ├── collect_data.py            # Stage 2 entry point
 │   └── train_dexgen.py            # Stage 3 entry point
 ├── data/                          # Generated grasp graphs and datasets
