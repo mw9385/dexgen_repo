@@ -434,7 +434,17 @@ def _sample_start_and_nn_goal(
     )
 
 
-def _sample_nearby_goal_index(graph, start_idx: int, rng: np.random.Generator) -> int:
+def _sample_nearby_goal_index(
+    graph, start_idx: int, rng: np.random.Generator, top_k: int = 5
+) -> int:
+    """
+    Sample a goal grasp index from the top-k nearest neighbours of start_idx.
+
+    Previously this always returned argmin (k=1), which caused the policy to
+    see the same start→goal pair every episode and memorise a fixed trajectory
+    instead of learning general manipulation.  Sampling uniformly from the k
+    closest grasps adds diversity while keeping goals reachable.
+    """
     grasps = graph.grasp_set.grasps
     N = len(grasps)
     if N <= 1:
@@ -453,14 +463,22 @@ def _sample_nearby_goal_index(graph, start_idx: int, rng: np.random.Generator) -
             continue
         dists[idx] = _grasp_state_distance(start_grasp, grasps[int(idx)])
 
-    goal_idx = int(np.argmin(dists))
-    if not np.isfinite(dists[goal_idx]):
+    # Find top-k nearest with finite distance
+    finite_indices = np.where(np.isfinite(dists))[0]
+    if len(finite_indices) == 0:
+        # Fallback: raw fingertip-position distance
         all_fps = graph.grasp_set.as_array()
         start_flat = all_fps[start_idx]
         fallback = np.linalg.norm(all_fps - start_flat, axis=-1)
         fallback[start_idx] = np.inf
-        goal_idx = int(np.argmin(fallback))
-    return goal_idx
+        finite_indices = np.where(np.isfinite(fallback))[0]
+        dists = fallback
+
+    k = min(top_k, len(finite_indices))
+    # argpartition is O(N) — pick k smallest without full sort
+    top_k_local = np.argpartition(dists[finite_indices], k - 1)[:k]
+    top_k_indices = finite_indices[top_k_local]
+    return int(rng.choice(top_k_indices))
 
 
 # ---------------------------------------------------------------------------

@@ -66,7 +66,10 @@ ppo:
   gamma: 0.99
   tau: 0.95                      # GAE lambda
   e_clip: 0.2
-  entropy_coef: 0.0
+  # entropy_coef=0.0 causes policy to collapse to near-deterministic after a
+  # few updates — especially problematic in 24-DOF continuous action space.
+  # 0.005 provides enough exploration pressure without destabilising training.
+  entropy_coef: 0.005
   critic_coef: 4.0
   grad_norm: 1.0
   # [FIX] normalize_input/value: true — critical for stable learning
@@ -82,9 +85,8 @@ ppo:
   horizon_length: 32
   num_steps_per_env: 32
   mini_epochs: 5
-  # Total rollout = num_envs(512) × horizon(16) = 8192 samples.
-  # minibatch_size MUST be ≤ rollout total.  4096 → 2 minibatches/epoch.
-  # Paper batch_size=8192 matches our rollout; minibatch is a subdivision.
+  # Total rollout = num_envs(512) × horizon(32) = 16384 samples.
+  # minibatch_size=4096 → 4 minibatches/epoch.
   minibatch_size: 4096
 
   # Training length
