@@ -345,21 +345,28 @@ if _ISAACLAB_AVAILABLE:
             weight=1.0,
             params={"pos_scale": 10.0, "rot_scale": 5.0},
         )
+        # Inverse-distance joint reward: 1/(||Δq_norm||+eps)
+        # Unlike exp(-scale*d) which saturates near goal, inverse form gives
+        # strong gradient throughout training.
+        # eps=0.1 → range [10 at goal, 0.9 far away]  × weight=1.5
         finger_joint_goal = RewTerm(
             func=mdp_rewards.finger_joint_goal_reward,
-            weight=15.0,
-            params={"scale": 1.0},
+            weight=1.5,
+            params={"eps": 0.1},
         )
-        # alpha 20→10: exp(-20*0.1m)=0.14 vs exp(-10*0.1m)=0.37 —
-        # larger gradient at 5-10 cm helps the policy close the gap early.
+        # Inverse-distance fingertip tracking: 1/(dist+eps) per tip, averaged.
+        # eps=0.05m → range [20 at 0cm, 10 at 5cm, 5 at 15cm]  × weight=1.0
+        # Much stronger dense signal than exp(-10*dist) near goal.
         fingertip_tracking = RewTerm(
             func=mdp_rewards.fingertip_tracking_reward,
-            weight=10.0,
-            params={"alpha": 10.0},
+            weight=1.0,
+            params={"eps": 0.05},
         )
+        # Isaac Lab uses 250 for success_bonus; we match that scale.
+        # This creates a clear "aha moment" once the policy gets close enough.
         grasp_success = RewTerm(
             func=mdp_rewards.grasp_success_reward,
-            weight=50.0,
+            weight=250.0,
             params={"threshold": 0.02},
         )
         # --- Style reward (DexGen paper: fingertip velocity) ---

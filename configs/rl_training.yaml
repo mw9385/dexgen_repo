@@ -13,11 +13,13 @@ env:
   decimation: 4                  # control at 30 Hz (120 Hz sim / 4)
 
   rewards:
-    # Goal rewards
-    object_pose:        1.0     # downweighted: was dominating as near-constant reset reward
-    finger_joint_goal:  15.0    # stronger joint-space goal signal
-    fingertip_tracking: 10.0    # exp(-10*dist) per fingertip, mean [0,1]  (alpha 20→10 wider gradient)
-    grasp_success:      50.0    # sparse bonus: all tips within 2 cm
+    # Goal rewards — inverse-distance form: 1/(dist+eps)
+    # Replaces exp(-alpha*dist): inverse gives strong gradient throughout range,
+    # not just far from goal. See rewards.py for range analysis.
+    object_pose:        1.0     # stability only (target=START pose, so near-constant)
+    finger_joint_goal:  1.5     # 1/(||Δq_norm||+0.1): range [~1, 15] per step
+    fingertip_tracking: 1.0     # 1/(dist+0.05m):       range [5, 20] per step
+    grasp_success:      250.0   # Isaac Lab uses 250 — strong sparse "aha" signal
     # Contact / style
     fingertip_contact:   2.0    # fraction of tips in contact [0,1]
     fingertip_velocity: -0.1    # mean(||v_tip||^2) over fingers (style penalty)
