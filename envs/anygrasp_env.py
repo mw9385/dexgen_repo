@@ -337,8 +337,9 @@ if _ISAACLAB_AVAILABLE:
     @configclass
     class AnyGraspRewardsCfg:
         # --- Goal-related (DexGen paper §3.2 goal reward) ---
-        # object_pose weight reduced (15→8): was dominating the gradient;
-        # fingertip_tracking already encodes the hand-object relationship.
+        # object_pose downweighted (8→1): target is set to START pose at reset,
+        # so reward was near-maximum the whole episode — essentially a free bonus,
+        # not a meaningful learning signal.  1.0 keeps minimal stability feedback.
         object_pose = RewTerm(
             func=mdp_rewards.object_pose_goal_reward,
             weight=1.0,
