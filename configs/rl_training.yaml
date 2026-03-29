@@ -38,8 +38,12 @@ env:
 # Asymmetric Actor-Critic PPO (rl_games)
 # ==============================================================================
 #
-#   Actor  network: MLP [512, 512, 256, 128]  input: 76-dim policy obs
-#   Critic network: MLP [512, 512, 256]       input: 104-dim privileged obs
+#   Shadow Hand (24 DOF, 5 fingers):
+#   Actor  network: MLP [512, 512, 256, 128]  input: 107-dim policy obs
+#     joint_pos(24) + joint_vel(24) + fingertip_pos(15) + target_fps(15)
+#     + contact_binary(5) + last_action(24)
+#   Critic network: MLP [512, 512, 256]       input: 138-dim privileged obs
+#     [actor 107] + obj_pose(7) + obj_vel(6) + contact_forces(15) + dr_params(3)
 #
 #   The central_value_config block enables the separate critic network.
 #   rl_games reads env observations["policy"] for actor and

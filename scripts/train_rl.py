@@ -502,7 +502,13 @@ class _IsaacLabVecEnv:
             extras["last_action"] = actions.clone()
         extras["current_action"] = actions.clone()
 
-        obs, rew, terminated, truncated, info = self.env.step(actions)
+        # Apply action delay DR (0-2 step lag set by randomize_action_delay).
+        # Must be called here — the randomize event only sets the delay length;
+        # the actual buffering and delayed output happens at every step.
+        from envs.mdp.domain_rand import apply_action_delay
+        delayed_actions = apply_action_delay(self.env, actions)
+
+        obs, rew, terminated, truncated, info = self.env.step(delayed_actions)
         done = terminated | truncated
         from envs.mdp import events as mdp_events
         from envs.mdp import rewards as mdp_rewards
