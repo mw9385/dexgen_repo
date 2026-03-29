@@ -38,8 +38,12 @@ env:
 # Asymmetric Actor-Critic PPO (rl_games)
 # ==============================================================================
 #
-#   Actor  network: MLP [512, 512, 256, 128]  input: 76-dim policy obs
-#   Critic network: MLP [512, 512, 256]       input: 104-dim privileged obs
+#   Shadow Hand (24 DOF, 5 fingers):
+#   Actor  network: MLP [1024, 512, 512, 256, 256]  input: 107-dim policy obs
+#     joint_pos(24) + joint_vel(24) + fingertip_pos(15) + target_fps(15)
+#     + contact_binary(5) + last_action(24)
+#   Critic network: MLP [1024, 512, 512, 256, 256]  input: 138-dim privileged obs
+#     [actor 107] + obj_pose(7) + obj_vel(6) + contact_forces(15) + dr_params(3)
 #
 #   The central_value_config block enables the separate critic network.
 #   rl_games reads env observations["policy"] for actor and
@@ -47,8 +51,10 @@ env:
 # ==============================================================================
 
 ppo:
-  # Actor network
-  units: [512, 512, 256, 128]
+  # Actor network — matches paper (arXiv:2502.04307) architecture.
+  # Paper uses [1024, 512, 512, 256, 256] for both actor and critic.
+  # Shadow Hand (24 DOF, 5 fingers) benefits from the larger capacity.
+  units: [1024, 512, 512, 256, 256]
   activation: elu
   fixed_sigma: true
   sigma_init: -1.0
@@ -76,8 +82,10 @@ ppo:
   horizon_length: 32
   num_steps_per_env: 32
   mini_epochs: 5
-  # [FIX] minibatch_size: 16384 (was 4096 in code, mismatched with yaml)
-  minibatch_size: 16384
+  # Total rollout = num_envs(512) × horizon(16) = 8192 samples.
+  # minibatch_size MUST be ≤ rollout total.  4096 → 2 minibatches/epoch.
+  # Paper batch_size=8192 matches our rollout; minibatch is a subdivision.
+  minibatch_size: 4096
 
   # Training length
   max_iterations: 30000
@@ -90,8 +98,8 @@ ppo:
 # ==============================================================================
 
 central_value:
-  # Critic network
-  units: [512, 512, 256]
+  # Critic network — same size as actor per paper.
+  units: [1024, 512, 512, 256, 256]
   activation: elu
 
   # Critic-specific PPO params
@@ -103,7 +111,7 @@ central_value:
   normalize_input: true
   grad_norm: 1.0
   mini_epochs: 4
-  minibatch_size: 16384
+  minibatch_size: 4096
 
 logging:
   log_dir: logs/rl/shadow_anygrasp_v1

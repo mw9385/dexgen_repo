@@ -159,6 +159,12 @@ def reset_to_random_grasp(
         env.extras["goal_grasp_idx"] = torch.full(
             (env.num_envs,), -1, device=env.device, dtype=torch.long
         )
+
+    # Store per-env object name for rolling goal re-selection
+    if "env_obj_names" not in env.extras:
+        env.extras["env_obj_names"] = [None] * env.num_envs
+    for i, env_id in enumerate(env_ids.tolist()):
+        env.extras["env_obj_names"][env_id] = sampled_obj_names[i]
     env.extras["start_grasp_idx"][env_ids] = torch.tensor(
         start_idx_list, device=env.device, dtype=torch.long
     )
@@ -455,6 +461,105 @@ def _sample_nearby_goal_index(graph, start_idx: int, rng: np.random.Generator) -
         fallback[start_idx] = np.inf
         goal_idx = int(np.argmin(fallback))
     return goal_idx
+
+
+# ---------------------------------------------------------------------------
+# Rolling goal: update goal when current goal is achieved mid-episode
+# ---------------------------------------------------------------------------
+
+def update_rolling_goal(env, success_threshold: float = 0.02) -> int:
+    """
+    Called every step. For each env where ALL fingertips are within
+    *success_threshold* of the current goal, select a new nearby goal
+    via kNN (same procedure as reset) and update env.extras in-place.
+
+    This implements the "rolling goal" design from the DexterityGen paper:
+    the policy keeps transitioning through consecutive nearby grasps within
+    a single episode rather than waiting for episode reset.
+
+    Args:
+        success_threshold: distance (m) at which goal is considered reached.
+            Slightly looser than grasp_success_reward (1 cm) so the rolling
+            goal triggers before the sparse bonus fires.
+
+    Returns:
+        Number of envs whose goal was updated this step.
+    """
+    from .observations import fingertip_positions_in_object_frame, _get_num_fingers
+
+    graph = _load_grasp_graph(env)
+    if graph is None:
+        return 0
+
+    goal_fps_flat = env.extras.get("target_fingertip_pos")   # (N, F*3)
+    goal_idx_buf  = env.extras.get("goal_grasp_idx")         # (N,) long
+    obj_names     = env.extras.get("env_obj_names")          # list[str|None]
+    if goal_fps_flat is None or goal_idx_buf is None:
+        return 0
+
+    nf = _get_num_fingers(env)
+    cur_fps = fingertip_positions_in_object_frame(env)        # (N, F*3)
+    dist = (cur_fps - goal_fps_flat).reshape(env.num_envs, nf, 3)
+    per_tip_dist = torch.norm(dist, dim=-1)                   # (N, F)
+    success_mask = (per_tip_dist < success_threshold).all(dim=-1)  # (N,)
+
+    success_ids = success_mask.nonzero(as_tuple=False).squeeze(-1)
+    if success_ids.numel() == 0:
+        return 0
+
+    rng = _get_reset_rng(env)
+    env_num_fingers = int(
+        (getattr(env.cfg, "hand", None) or {}).get("num_fingers", 4)
+    )
+    fp_dim = env_num_fingers * 3
+
+    from grasp_generation.rrt_expansion import MultiObjectGraspGraph
+
+    updated = 0
+    for env_id in success_ids.tolist():
+        cur_goal_idx = int(goal_idx_buf[env_id].item())
+
+        # Pick the sub-graph for this env
+        obj_name = (obj_names[env_id] if obj_names else None)
+        if isinstance(graph, MultiObjectGraspGraph):
+            g = graph.graphs.get(obj_name) if obj_name else None
+            if g is None:
+                # fallback: pick any graph
+                g = next(iter(graph.graphs.values()))
+        else:
+            g = graph
+
+        # kNN from current goal → new goal
+        new_goal_idx = _sample_nearby_goal_index(g, cur_goal_idx, rng)
+        new_goal_grasp = g.grasp_set[new_goal_idx]
+
+        # Update goal fingertip positions
+        new_fps = _pad_fingertip_positions(
+            new_goal_grasp.fingertip_positions.copy(), env_num_fingers
+        )
+        env.extras["target_fingertip_pos"][env_id] = torch.tensor(
+            new_fps.reshape(fp_dim), device=env.device, dtype=torch.float32
+        )
+
+        # Update goal joint angles
+        new_joints = getattr(new_goal_grasp, "joint_angles", None)
+        if new_joints is not None and "target_joint_angles" in env.extras:
+            robot = env.scene["robot"]
+            num_dof = robot.data.default_joint_pos.shape[-1]
+            env.extras["target_joint_angles"][env_id] = _expand_grasp_joint_vector(
+                torch.tensor(new_joints, device=env.device, dtype=torch.float32),
+                num_dof,
+            )
+
+        # Update indices: old goal becomes new start
+        env.extras["goal_grasp_idx"][env_id]  = new_goal_idx
+        env.extras["start_grasp_idx"][env_id] = cur_goal_idx
+        if obj_names:
+            obj_names[env_id] = obj_name  # unchanged but keep in sync
+
+        updated += 1
+
+    return updated
 
 
 def _grasp_state_distance(grasp_a, grasp_b) -> float:
