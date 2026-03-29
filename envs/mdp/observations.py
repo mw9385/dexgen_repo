@@ -202,10 +202,17 @@ _ALLEGRO_TIP_NAMES = [
 ]
 
 _SENSOR_KEY_BY_LINK_NAME = {
-    "index_link_3": "fingertip_contact_sensor_index",
+    # Shadow Hand (Isaac Lab USD link names)
+    "robot0_ffdistal": "fingertip_contact_sensor_ff",
+    "robot0_mfdistal": "fingertip_contact_sensor_mf",
+    "robot0_rfdistal": "fingertip_contact_sensor_rf",
+    "robot0_lfdistal": "fingertip_contact_sensor_lf",
+    "robot0_thdistal": "fingertip_contact_sensor_th",
+    # Allegro Hand (legacy fallback)
+    "index_link_3":  "fingertip_contact_sensor_index",
     "middle_link_3": "fingertip_contact_sensor_middle",
-    "ring_link_3": "fingertip_contact_sensor_ring",
-    "thumb_link_3": "fingertip_contact_sensor_thumb",
+    "ring_link_3":   "fingertip_contact_sensor_ring",
+    "thumb_link_3":  "fingertip_contact_sensor_thumb",
 }
 
 # Cached fingertip body ID lookup  (keyed by robot object id)
