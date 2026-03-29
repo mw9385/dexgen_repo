@@ -39,10 +39,10 @@ env:
 # ==============================================================================
 #
 #   Shadow Hand (24 DOF, 5 fingers):
-#   Actor  network: MLP [512, 512, 256, 128]  input: 107-dim policy obs
+#   Actor  network: MLP [1024, 512, 512, 256, 256]  input: 107-dim policy obs
 #     joint_pos(24) + joint_vel(24) + fingertip_pos(15) + target_fps(15)
 #     + contact_binary(5) + last_action(24)
-#   Critic network: MLP [512, 512, 256]       input: 138-dim privileged obs
+#   Critic network: MLP [1024, 512, 512, 256, 256]  input: 138-dim privileged obs
 #     [actor 107] + obj_pose(7) + obj_vel(6) + contact_forces(15) + dr_params(3)
 #
 #   The central_value_config block enables the separate critic network.
@@ -51,8 +51,10 @@ env:
 # ==============================================================================
 
 ppo:
-  # Actor network
-  units: [512, 512, 256, 128]
+  # Actor network — matches paper (arXiv:2502.04307) architecture.
+  # Paper uses [1024, 512, 512, 256, 256] for both actor and critic.
+  # Shadow Hand (24 DOF, 5 fingers) benefits from the larger capacity.
+  units: [1024, 512, 512, 256, 256]
   activation: elu
   fixed_sigma: true
   sigma_init: -1.0
@@ -94,8 +96,8 @@ ppo:
 # ==============================================================================
 
 central_value:
-  # Critic network
-  units: [512, 512, 256]
+  # Critic network — same size as actor per paper.
+  units: [1024, 512, 512, 256, 256]
   activation: elu
 
   # Critic-specific PPO params

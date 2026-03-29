@@ -236,9 +236,12 @@ def build_rl_games_config(args, cfg_file: dict) -> dict:
                         "fixed_sigma": True,
                     }
                 },
+                # Paper (arXiv:2502.04307): [1024, 512, 512, 256, 256] for both
+                # actor and critic.  Shadow Hand has more DOF than the original
+                # LEAP Hand so matching the paper size is important.
                 "mlp": {
-                    "units": [512, 512, 256, 128],
-                    "activation": "elu",
+                    "units": ppo_cfg.get("units", [1024, 512, 512, 256, 256]),
+                    "activation": ppo_cfg.get("activation", "elu"),
                     "d2rl": False,
                     "initializer": {"name": "default"},
                     "regularizer": {"name": "None"},
@@ -513,10 +516,18 @@ class _IsaacLabVecEnv:
         from envs.mdp import events as mdp_events
         from envs.mdp import rewards as mdp_rewards
 
+        # Rolling goal: when a grasp is achieved mid-episode, immediately
+        # select a new nearby goal (kNN) so the policy keeps transitioning
+        # rather than idling until reset.  Uses threshold=2 cm (looser than
+        # the 1 cm sparse-reward threshold) so the new goal is set just
+        # before the sparse bonus fires.
+        n_updated = mdp_events.update_rolling_goal(self.env, success_threshold=0.02)
+
         info = dict(info) if isinstance(info, dict) else {}
         info["success_ratio"] = float(mdp_rewards.grasp_success_reward(self.env).mean().item())
         info["drop_ratio"] = float(mdp_events.object_dropped(self.env).float().mean().item())
         info["left_hand_ratio"] = float(mdp_events.object_left_hand(self.env).float().mean().item())
+        info["rolling_goal_updates"] = n_updated
         return _to_rl_obs(obs), rew, done, info
 
     def reset(self):
