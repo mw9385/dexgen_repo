@@ -186,7 +186,7 @@ def fingertip_velocity_penalty(env) -> torch.Tensor:
     [NEW] Fingertip velocity penalty (논문 style reward).
     기존 object_velocity_penalty(safety)와 별개.
 
-    penalty = sum_i ||v_tip_i||^2
+    penalty = mean_i ||v_tip_i||^2   (mean over fingers, not sum)
 
     Returns: (N,) >= 0
     """
@@ -194,7 +194,7 @@ def fingertip_velocity_penalty(env) -> torch.Tensor:
     nf      = _get_num_fingers(env)
     tip_ids = _get_fingertip_body_ids(robot, env)[:nf]
     tip_vels = robot.data.body_lin_vel_w[:, tip_ids, :]    # (N, F, 3)
-    return (tip_vels ** 2).sum(dim=-1).sum(dim=-1)          # (N,)
+    return (tip_vels ** 2).sum(dim=-1).mean(dim=-1)         # (N,)
 
 # ═══════════════════════════════════════════════════════════
 # 3. REGULARIZATION
@@ -219,27 +219,29 @@ def applied_torque_penalty(env) -> torch.Tensor:
     """
     [NEW] Applied torque penalty (논문 regularization).
 
-    penalty = ||tau||^2
+    penalty = mean(tau_i^2)  — mean over joints so the value is independent
+    of the number of DOF (Shadow Hand: 24 joints would otherwise inflate the
+    sum-version by 24x compared to a 4-finger hand).
 
     Returns: (N,) >= 0
     """
     robot = env.scene["robot"]
     torques = robot.data.applied_torque
-    return (torques ** 2).sum(dim=-1)
+    return (torques ** 2).mean(dim=-1)
 
 
 def mechanical_work_penalty(env) -> torch.Tensor:
     """
     [NEW] Mechanical work (power) penalty (논문 regularization).
 
-    penalty = sum_i |tau_i * qdot_i|
+    penalty = mean_i |tau_i * qdot_i|  — mean over joints for DOF-independence
 
     Returns: (N,) >= 0
     """
     robot = env.scene["robot"]
     torques = robot.data.applied_torque
     velocities = robot.data.joint_vel
-    return (torques * velocities).abs().sum(dim=-1)
+    return (torques * velocities).abs().mean(dim=-1)
 
 
 def action_rate_penalty(env) -> torch.Tensor:
