@@ -446,13 +446,35 @@ def main():
         ),
     )
 
+    class _CompactIsaacAlgoObserver(IsaacAlgoObserver):
+        def after_print_stats(self, frame, epoch_num, total_time):
+            if self.ep_infos:
+                for key in self.ep_infos[0]:
+                    info_tensor = torch.tensor([], device=self.algo.device)
+                    for ep_info in self.ep_infos:
+                        if not isinstance(ep_info[key], torch.Tensor):
+                            ep_info[key] = torch.Tensor([ep_info[key]])
+                        if len(ep_info[key].shape) == 0:
+                            ep_info[key] = ep_info[key].unsqueeze(0)
+                        info_tensor = torch.cat((info_tensor, ep_info[key].to(self.algo.device)))
+                    value = torch.mean(info_tensor)
+                    self.writer.add_scalar("Episode/" + key, value, epoch_num)
+                self.ep_infos.clear()
+
+            for k, v in self.direct_info.items():
+                self.writer.add_scalar(f"Performance/{k}", v, epoch_num)
+
+            if self.mean_scores.current_size > 0:
+                mean_scores = self.mean_scores.get_mean()
+                self.writer.add_scalar("Performance/score", mean_scores, epoch_num)
+
     cfg = build_rl_games_config(args, cfg_file)
     ppo_runtime_cfg = cfg["params"]["config"]
     print(f"[Stage 1] Horizon length: {ppo_runtime_cfg['horizon_length']}")
     print(f"[Stage 1] Seq length: {ppo_runtime_cfg['seq_length']}")
     print(f"[Stage 1] Batch size: {args.num_envs * ppo_runtime_cfg['horizon_length']}")
     print(f"[Stage 1] Minibatch size: {ppo_runtime_cfg['minibatch_size']}")
-    runner = Runner(IsaacAlgoObserver())
+    runner = Runner(_CompactIsaacAlgoObserver())
     runner.load(cfg)
     runner.reset()
     runner.run({"train": True})

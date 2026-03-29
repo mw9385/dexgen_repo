@@ -60,9 +60,9 @@ ppo:
   reward_shaper_scale: 0.1
 
   # Rollout
-  # [FIX] horizon_length: 16 (was 8) — more stable gradient estimates
-  horizon_length: 16
-  num_steps_per_env: 16
+  # [FIX] horizon_length: 32 — longer PPO rollout for reset-heavy envs
+  horizon_length: 32
+  num_steps_per_env: 32
   mini_epochs: 5
   # [FIX] minibatch_size: 16384 (was 4096 in code, mismatched with yaml)
   minibatch_size: 16384
