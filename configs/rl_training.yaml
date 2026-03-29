@@ -13,11 +13,13 @@ env:
   decimation: 4                  # control at 30 Hz (120 Hz sim / 4)
 
   rewards:
-    # Goal rewards
-    object_pose:        1.0     # downweighted: was dominating as near-constant reset reward
-    finger_joint_goal:  15.0    # stronger joint-space goal signal
-    fingertip_tracking: 10.0    # exp(-10*dist) per fingertip, mean [0,1]  (alpha 20→10 wider gradient)
-    grasp_success:      50.0    # sparse bonus: all tips within 2 cm
+    # DexterityGen paper §3.2 eq.(5) goal reward:
+    #   r_goal = exp(-alpha_pos*||p-p*|| - alpha_orn*d(R,R*))
+    #          - alpha_hand * ||q - q*||
+    #          + alpha_bonus * 1(goal achieved)
+    object_pose:        5.0     # exp(-10*d_pos - 5*d_rot) ∈ (0,1]; max +5.0/step
+    finger_joint_goal:  1.0     # -alpha_hand(0.1)*||q-q*||; negative penalty term
+    grasp_success:      250.0   # alpha_bonus: sparse "aha" signal
     # Contact / style
     fingertip_contact:   2.0    # fraction of tips in contact [0,1]
     fingertip_velocity: -0.1    # mean(||v_tip||^2) over fingers (style penalty)
@@ -31,8 +33,6 @@ env:
     object_drop:       -100.0   # drop penalty (also terminates episode)
     object_left_hand:   -50.0   # escape penalty
     joint_limit:        -0.1    # soft limit penalty
-    # wrist_height removed: nearly never fires (hand at z=0.6, threshold 0.1);
-    # wrist escape handled by early-termination added in events.py
 
 # ==============================================================================
 # Asymmetric Actor-Critic PPO (rl_games)
@@ -81,12 +81,11 @@ ppo:
   reward_shaper_scale: 0.2
 
   # Rollout
-  # [FIX] horizon_length: 32 — longer PPO rollout for reset-heavy envs
-  horizon_length: 32
-  num_steps_per_env: 32
+  # Paper (arXiv:2502.04307) batch_size=8192: num_envs(512) × horizon(16) = 8192.
+  horizon_length: 16
+  num_steps_per_env: 16
   mini_epochs: 5
-  # Total rollout = num_envs(512) × horizon(32) = 16384 samples.
-  # minibatch_size=4096 → 4 minibatches/epoch.
+  # minibatch_size=4096 → 2 minibatches/epoch.
   minibatch_size: 4096
 
   # Training length

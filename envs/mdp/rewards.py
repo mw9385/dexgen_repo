@@ -76,19 +76,23 @@ from .observations import (
 # 1. GOAL-RELATED REWARDS
 # ═══════════════════════════════════════════════════════════
 
-def object_pose_goal_reward(env, pos_scale: float = 10.0, rot_scale: float = 5.0) -> torch.Tensor:
+def object_pose_goal_reward(
+    env,
+    alpha_pos: float = 10.0,
+    alpha_orn: float = 5.0,
+) -> torch.Tensor:
     """
-    [NEW] Object pose가 목표 grasp의 object pose에 가까운지.
-    DexGen goal-related reward의 핵심.
+    DexterityGen paper eq.(5): single combined exponential goal reward.
 
-    Position: exp(-pos_scale * ||p_hand - p*_hand||)   ← hand frame에서 비교
-    Rotation: exp(-rot_scale * (1 - |<q_hand, q*_hand>|))
+        r_goal_pose = exp(-alpha_pos * ||p_obj - p*_obj|| - alpha_orn * d(R, R*))
 
-    Returns: (N,) in [0, 2]
+    where d(R, R*) = 1 - |q · q*| (geodesic distance proxy in [0, 1]).
+
+    Returns: (N,) in (0, 1]
 
     env.extras["target_object_pos_hand"]:  (N, 3) goal object pos in wrist frame
     env.extras["target_object_quat_hand"]: (N, 4) goal object quat in wrist frame
-    (set by reset_to_random_grasp; fallback = current sim state when not in graph)
+    (set by reset_to_random_grasp from the GOAL grasp node, not the start pose)
     """
     from isaaclab.utils.math import quat_apply_inverse
 
@@ -100,19 +104,16 @@ def object_pose_goal_reward(env, pos_scale: float = 10.0, rot_scale: float = 5.0
     robot = env.scene["robot"]
     obj   = env.scene["object"]
 
-    # Current object position / orientation expressed in wrist (hand root) frame
+    # Current object position expressed in wrist (hand root) frame
     rel_pos      = obj.data.root_pos_w - robot.data.root_pos_w          # (N, 3)
     cur_pos_hand = quat_apply_inverse(robot.data.root_quat_w, rel_pos)  # (N, 3)
-
     d_pos = torch.norm(cur_pos_hand - goal_pos, dim=-1)                 # (N,)
 
     if goal_quat is not None:
         # Current object quat in hand frame: q_hand = q_wrist_inv * q_obj
         qw = robot.data.root_quat_w    # (N, 4) w,x,y,z
         qo = obj.data.root_quat_w      # (N, 4)
-        # quat conjugate: negate xyz
         qw_inv = torch.cat([qw[:, :1], -qw[:, 1:]], dim=-1)
-        # simple quat mul (w,x,y,z convention)
         def _qmul(a, b):
             aw, ax, ay, az = a[:, 0], a[:, 1], a[:, 2], a[:, 3]
             bw, bx, by, bz = b[:, 0], b[:, 1], b[:, 2], b[:, 3]
@@ -124,49 +125,62 @@ def object_pose_goal_reward(env, pos_scale: float = 10.0, rot_scale: float = 5.0
             ], dim=-1)
         cur_quat_hand = _qmul(qw_inv, qo)                               # (N, 4)
         quat_dot = torch.sum(cur_quat_hand * goal_quat, dim=-1).abs().clamp(0.0, 1.0)
-        d_rot = 1.0 - quat_dot
-        return torch.exp(-pos_scale * d_pos) + torch.exp(-rot_scale * d_rot)
+        d_rot = 1.0 - quat_dot                                          # (N,) in [0,1]
+        # Paper eq.(5): single combined exponent
+        return torch.exp(-alpha_pos * d_pos - alpha_orn * d_rot)
 
-    return torch.exp(-pos_scale * d_pos)
+    return torch.exp(-alpha_pos * d_pos)
 
 
-def finger_joint_goal_reward(env, scale: float = 5.0) -> torch.Tensor:
+def finger_joint_goal_reward(env, alpha_hand: float = 0.1) -> torch.Tensor:
     """
-    [NEW] Joint positions가 목표 grasp의 joint config에 가까운지.
-    Fingertip position만으로는 joint ambiguity가 남음.
+    DexterityGen paper eq.(5): negative linear joint distance penalty.
 
-    reward = exp(-scale * ||q_norm - q*_norm||)   ← normalised joint space
+        -alpha_hand * ||q - q*||_2
 
-    Returns: (N,) in [0, 1]
+    Raw joint angles (rad) are used directly (not normalised), matching the
+    paper formulation. The weight in AnyGraspRewardsCfg is set to 1.0 and
+    alpha_hand tunes the per-step magnitude.
 
-    env.extras["target_joint_angles"]: (N, 16) goal joint angles in rad
-    (set by reset_to_random_grasp from goal grasp's stored joint_angles)
+    Typical ranges (Shadow Hand, 24 DOF, errors in rad):
+      ||q - q*|| ~ 0.0  (at goal)  → 0.0
+      ||q - q*|| ~ 0.5             → -0.05
+      ||q - q*|| ~ 2.0  (far)      → -0.20
+
+    Returns: (N,) <= 0
     """
     goal_joints = env.extras.get("target_joint_angles")
     if goal_joints is None:
         return torch.zeros(env.num_envs, device=env.device)
 
-    robot  = env.scene["robot"]
-    q      = robot.data.joint_pos                              # (N, D)
-    q_low  = robot.data.soft_joint_pos_limits[..., 0]         # (N, D)
-    q_high = robot.data.soft_joint_pos_limits[..., 1]         # (N, D)
-    q_range = (q_high - q_low).clamp(min=1e-6)
-
-    # Normalise both to [0,1] so joint range differences don't dominate
-    q_norm    = (q            - q_low) / q_range
-    q_goal_n  = (goal_joints  - q_low) / q_range
-
-    d_joint = torch.norm(q_norm - q_goal_n, dim=-1)           # (N,)
-    return torch.exp(-scale * d_joint)
+    robot = env.scene["robot"]
+    q     = robot.data.joint_pos     # (N, num_dof)
+    dq    = torch.norm(q - goal_joints, dim=-1)   # (N,)
+    return -alpha_hand * dq
 
 
-def fingertip_tracking_reward(env, alpha: float = 20.0) -> torch.Tensor:
-    """exp(-alpha * dist) per fingertip, averaged. Returns: (N,)"""
+def fingertip_tracking_reward(env, eps: float = 0.05) -> torch.Tensor:
+    """
+    Inverse-distance reward per fingertip, averaged over fingers.
+
+    reward = mean_i  1 / (||tip_i - goal_i|| + eps)
+
+    Replaces exp(-alpha*dist) which saturates near goal (reward→1, gradient→0).
+    The inverse form gives unbounded reward as each tip approaches its goal
+    and provides strong gradient throughout the entire range.
+
+    With eps=0.05m (5 cm):
+      dist=0.00m (goal)  → 1/0.05  = 20.0  per finger
+      dist=0.05m (5 cm)  → 1/0.10  = 10.0  per finger (half-max)
+      dist=0.15m (15 cm) → 1/0.20  =  5.0  per finger
+
+    Returns: (N,)
+    """
     nf = _get_num_fingers(env)
     current = fingertip_positions_in_object_frame(env).reshape(-1, nf, 3)
-    target = target_fingertip_positions(env).reshape(-1, nf, 3)
-    dist = torch.norm(current - target, dim=-1)
-    return torch.exp(-alpha * dist).mean(dim=-1)
+    target  = target_fingertip_positions(env).reshape(-1, nf, 3)
+    dist    = torch.norm(current - target, dim=-1)         # (N, F)
+    return (1.0 / (dist + eps)).mean(dim=-1)               # (N,)
 
 
 def grasp_success_reward(env, threshold: float = 0.01) -> torch.Tensor:

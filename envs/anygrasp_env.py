@@ -336,30 +336,32 @@ if _ISAACLAB_AVAILABLE:
 if _ISAACLAB_AVAILABLE:
     @configclass
     class AnyGraspRewardsCfg:
-        # --- Goal-related (DexGen paper §3.2 goal reward) ---
-        # object_pose downweighted (8→1): target is set to START pose at reset,
-        # so reward was near-maximum the whole episode — essentially a free bonus,
-        # not a meaningful learning signal.  1.0 keeps minimal stability feedback.
+        # --- Goal-related (DexterityGen paper §3.2 eq.5) ---
+        # r_goal = exp(-alpha_pos * ||p_obj - p*_obj|| - alpha_orn * d(R, R*))
+        #        - alpha_hand * ||q - q*||
+        #        + alpha_bonus * 1(goal achieved)
+        #
+        # object_pose: exp(-10*d_pos - 5*d_rot) ∈ (0,1].
+        #   weight=5.0 → per-step max +5.0 when perfectly at goal.
+        #   At start (different grasp) expect ~exp(-10*0.05-5*0.05)≈0.57 → +2.85/step.
         object_pose = RewTerm(
             func=mdp_rewards.object_pose_goal_reward,
-            weight=1.0,
-            params={"pos_scale": 10.0, "rot_scale": 5.0},
+            weight=5.0,
+            params={"alpha_pos": 10.0, "alpha_orn": 5.0},
         )
+        # finger_joint_goal: -alpha_hand * ||q - q*||  (paper eq.5, negative term)
+        # weight=1.0; alpha_hand=0.1 → -0.1 * ||dq|| per step.
+        # At ||dq||=1rad → -0.1/step; at goal → 0.0.
+        # Negative reward so this is a penalty on joint distance, per paper.
         finger_joint_goal = RewTerm(
             func=mdp_rewards.finger_joint_goal_reward,
-            weight=15.0,
-            params={"scale": 1.0},
+            weight=1.0,
+            params={"alpha_hand": 0.1},
         )
-        # alpha 20→10: exp(-20*0.1m)=0.14 vs exp(-10*0.1m)=0.37 —
-        # larger gradient at 5-10 cm helps the policy close the gap early.
-        fingertip_tracking = RewTerm(
-            func=mdp_rewards.fingertip_tracking_reward,
-            weight=10.0,
-            params={"alpha": 10.0},
-        )
+        # alpha_bonus (paper): large sparse bonus when goal is achieved.
         grasp_success = RewTerm(
             func=mdp_rewards.grasp_success_reward,
-            weight=50.0,
+            weight=250.0,
             params={"threshold": 0.02},
         )
         # --- Style reward (DexGen paper: fingertip velocity) ---
