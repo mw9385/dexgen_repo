@@ -359,7 +359,7 @@ if _ISAACLAB_AVAILABLE:
         grasp_success = RewTerm(
             func=mdp_rewards.grasp_success_reward,
             weight=50.0,
-            params={"threshold": 0.01},
+            params={"threshold": 0.02},
         )
         # --- Style reward (DexGen paper: fingertip velocity) ---
         # weight -0.5→-0.1: now uses mean-over-fingers (not sum), so
@@ -402,12 +402,12 @@ if _ISAACLAB_AVAILABLE:
         )
         object_drop = RewTerm(
             func=mdp_rewards.object_drop_penalty,
-            weight=-200.0,
+            weight=-100.0,
             params={"min_height": 0.2},
         )
         object_left_hand = RewTerm(
             func=mdp_rewards.object_left_hand_penalty,
-            weight=-100.0,
+            weight=-50.0,
             params={"max_dist": 0.20},
         )
         joint_limit = RewTerm(

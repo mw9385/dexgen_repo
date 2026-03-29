@@ -44,10 +44,9 @@ def object_left_hand(env, max_dist: float = 0.20) -> torch.Tensor:
     """
     True when the object has escaped the palm support region.
 
-    We treat three cases as failure:
+    We treat two cases as failure:
       1. the object is too far from the palm and fingertips no longer touch it,
-      2. the object moved behind the palm plane (wrist-side cheat),
-      3. the object drifted too far laterally away from the palm center.
+      2. the object moved behind the palm plane (wrist-side cheat).
     """
     escaped, _ = _object_escape_mask(env, max_dist=max_dist)
     return escaped
@@ -997,8 +996,6 @@ def _get_palm_body_id_from_env(robot, env) -> int:
 def _object_escape_mask(
     env,
     max_dist: float = 0.20,
-    max_lateral: float = 0.12,
-    max_front_offset: float = 0.16,
     max_behind_offset: float = 0.015,
     contact_force_thresh: float = 0.5,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
@@ -1023,10 +1020,8 @@ def _object_escape_mask(
 
     too_far = dist > max_dist
     behind_palm = normal_offset < -max_behind_offset
-    too_front = normal_offset > max_front_offset
-    too_lateral = lateral_offset > max_lateral
 
-    escaped = behind_palm | too_front | too_lateral | (too_far & (~has_contact))
+    escaped = behind_palm | (too_far & (~has_contact))
     return escaped, {
         "dist": dist,
         "normal_offset": normal_offset,
@@ -1034,8 +1029,6 @@ def _object_escape_mask(
         "has_contact": has_contact,
         "too_far": too_far,
         "behind_palm": behind_palm,
-        "too_front": too_front,
-        "too_lateral": too_lateral,
     }
 
 
@@ -1194,7 +1187,14 @@ def _refine_hand_to_start_grasp(
         jt = jacobian.transpose(1, 2)
         lhs = torch.bmm(jacobian, jt)
         eye = torch.eye(lhs.shape[-1], device=env.device, dtype=lhs.dtype).unsqueeze(0).expand_as(lhs)
-        delta = torch.bmm(jt, torch.linalg.solve(lhs + (damping**2) * eye, error_vec)).squeeze(-1)
+        system = lhs + (damping**2) * eye
+        try:
+            solved = torch.linalg.solve(system, error_vec)
+        except RuntimeError:
+            # cuSOLVER can fail intermittently on these small reset-time batched systems.
+            # Fall back to CPU solve so reset remains robust instead of aborting the episode.
+            solved = torch.linalg.solve(system.cpu(), error_vec.cpu()).to(env.device)
+        delta = torch.bmm(jt, solved).squeeze(-1)
         delta = (step_gain * delta).clamp(-max_delta, max_delta)
 
         joint_pos = robot.data.joint_pos[env_ids].clone()

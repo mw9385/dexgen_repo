@@ -259,8 +259,7 @@ def build_rl_games_config(args, cfg_file: dict) -> dict:
                 "normalize_value": True,
                 "num_actors": args.num_envs,
                 "reward_shaper": {
-                    # [FIX] 0.01 → 0.1: reward was being scaled down 100x
-                    "scale_value": 0.1,
+                    "scale_value": float(ppo_cfg.get("reward_shaper_scale", 0.1)),
                 },
                 "normalize_advantage": True,
                 "gamma": 0.99,

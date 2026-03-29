@@ -17,7 +17,7 @@ env:
     object_pose:        8.0     # exp(-10*d_pos) + exp(-5*d_rot) in wrist frame [0,2]
     finger_joint_goal:  8.0     # exp(-3*||Δq_norm||) joint-space goal [0,1]
     fingertip_tracking: 10.0    # exp(-10*dist) per fingertip, mean [0,1]  (alpha 20→10 wider gradient)
-    grasp_success:      50.0    # sparse bonus: all tips within 1 cm
+    grasp_success:      50.0    # sparse bonus: all tips within 2 cm
     # Contact / style
     fingertip_contact:   2.0    # fraction of tips in contact [0,1]
     fingertip_velocity: -0.1    # mean(||v_tip||^2) over fingers (style penalty)
@@ -28,8 +28,8 @@ env:
     action_rate:        -0.01   # jerk penalty ||a_t - a_{t-1}||
     # Safety
     object_velocity:    -0.5    # penalise spinning/flinging object
-    object_drop:       -200.0   # drop penalty (also terminates episode)
-    object_left_hand:  -100.0   # escape penalty (all directions)
+    object_drop:       -100.0   # drop penalty (also terminates episode)
+    object_left_hand:   -50.0   # escape penalty
     joint_limit:        -0.1    # soft limit penalty
     # wrist_height removed: nearly never fires (hand at z=0.6, threshold 0.1);
     # wrist escape handled by early-termination added in events.py
@@ -68,8 +68,8 @@ ppo:
   normalize_value: true
   normalize_advantage: true
 
-  # [FIX] reward_shaper: 0.1 (was 0.01 → reward was scaled down 100x)
-  reward_shaper_scale: 0.1
+  # Slightly stronger reward scale so dense goal rewards are not drowned out early.
+  reward_shaper_scale: 0.2
 
   # Rollout
   # [FIX] horizon_length: 32 — longer PPO rollout for reset-heavy envs
