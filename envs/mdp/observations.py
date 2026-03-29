@@ -5,36 +5,37 @@ Observation functions – Actor (policy) and Critic (privileged).
   ASYMMETRIC ACTOR-CRITIC OBSERVATION SPLIT
 =======================================================================
 
-  ACTOR (policy) — 76 dims — available on a real robot at deployment
+  ACTOR (policy) — 107 dims — available on a real robot at deployment
   ┌─────────────────────────────────────────────────────────────────┐
-  │ joint_pos_normalized       16   encoder, normalised to [-1, 1] │
-  │ joint_vel_normalized       16   encoder derivative             │
-  │ fingertip_pos_obj_frame    12   FK → object-centric frame      │
-  │ target_fingertip_pos       12   goal from GraspGraph           │
-  │ fingertip_contact_binary    4   tactile: 1 if tip in contact   │
-  │ last_action                16   previous joint targets         │
+  │ joint_pos_normalized       24   encoder, normalised to [-1, 1] │
+  │ joint_vel_normalized       24   encoder derivative             │
+  │ fingertip_pos_obj_frame    15   FK → object-centric frame, 5×3 │
+  │ target_fingertip_pos       15   goal from GraspGraph, 5×3      │
+  │ fingertip_contact_binary    5   tactile: 1 if tip in contact   │
+  │ last_action                24   previous joint targets         │
   └─────────────────────────────────────────────────────────────────┘
-  Total: 76
+  Total: 24+24+15+15+5+24 = 107
 
-  CRITIC (privileged) — 104 dims — simulation-only, training only
+  CRITIC (privileged) — 138 dims — simulation-only, training only
   ┌─────────────────────────────────────────────────────────────────┐
-  │ [All actor obs]            76                                   │
+  │ [All actor obs]           107                                   │
   │ object_pos_world            3   true 3-D position              │
   │ object_quat_world           4   true orientation               │
   │ object_lin_vel              3   true linear velocity           │
   │ object_ang_vel              3   true angular velocity          │
-  │ fingertip_contact_forces   12   full 3-D force per fingertip   │
+  │ fingertip_contact_forces   15   full 3-D force per tip, 5×3    │
   │ dr_params                   3   mass / obj_friction / damping  │
   └─────────────────────────────────────────────────────────────────┘
-  Total: 76 + 3 + 4 + 3 + 3 + 12 + 3 = 104
+  Total: 107 + 3 + 4 + 3 + 3 + 15 + 3 = 138
+
+  Hand: Shadow Hand E-Series — 5 fingers, 24 DOF in Isaac Lab
+        (2 wrist WRJ0/WRJ1 + 22 finger joints)
 
 =======================================================================
   Tactile note:
-    The standard Allegro Hand has no built-in tactile sensors.
-    We approximate tactile feedback using Isaac Lab ContactSensorCfg
-    attached to each of the 4 fingertip links.  This gives:
-      - Binary contact indicator  →  actor obs (4 dims)
-      - Full 3-D contact force    →  critic obs (12 dims)
+    Shadow Hand uses ContactSensorCfg on 5 fingertip links.  This gives:
+      - Binary contact indicator  →  actor obs (5 dims)
+      - Full 3-D contact force    →  critic obs (15 dims)
     At sim-to-real transfer, the binary contact can be replaced with
     a real BioTac / Hall-effect tactile signal.
 =======================================================================

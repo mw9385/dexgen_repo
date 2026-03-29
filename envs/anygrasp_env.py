@@ -17,20 +17,20 @@ Shadow Hand E-Series: 5 fingers, 22 actuated DOF + 2 wrist DOF in Isaac = 24 tot
   OBSERVATION SPLIT  (see mdp/observations.py for full details)
 =======================================================================
 
-  ACTOR (policy) — 101 dims
+  ACTOR (policy) — 107 dims
   ─────────────────────────────────────────────────────────────────
   joint_pos_normalized       24   (encoder, normalised)
   joint_vel_normalized       24   (encoder derivative)
   fingertip_pos_obj_frame    15   (FK in object-centric frame, 5×3)
-  target_fingertip_pos       15   (goal from GraspGraph)
+  target_fingertip_pos       15   (goal from GraspGraph, 5×3)
   fingertip_contact_binary    5   (tactile: binary contact per tip)
   last_action                24   (previous joint targets)
   ─────────────────────────────────────────────────────────────────
-  Total: 101
+  Total: 24+24+15+15+5+24 = 107
 
-  CRITIC (privileged) — 132 dims
+  CRITIC (privileged) — 138 dims
   ─────────────────────────────────────────────────────────────────
-  [actor obs]               101
+  [actor obs]               107
   object_pos_world            3   (true 3-D position)
   object_quat_world           4   (true orientation)
   object_lin_vel              3   (true linear velocity)
@@ -38,7 +38,7 @@ Shadow Hand E-Series: 5 fingers, 22 actuated DOF + 2 wrist DOF in Isaac = 24 tot
   fingertip_contact_forces   15   (full 3-D forces per tip, 5×3)
   dr_params                   3   (mass / friction / damping)
   ─────────────────────────────────────────────────────────────────
-  Total: 132
+  Total: 107+3+4+3+3+15+3 = 138
 
 =======================================================================
   DOMAIN RANDOMIZATION  (see mdp/domain_rand.py for ranges)
