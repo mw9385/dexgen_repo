@@ -337,20 +337,24 @@ if _ISAACLAB_AVAILABLE:
     @configclass
     class AnyGraspRewardsCfg:
         # --- Goal-related (DexGen paper §3.2 goal reward) ---
+        # object_pose weight reduced (15→8): was dominating the gradient;
+        # fingertip_tracking already encodes the hand-object relationship.
         object_pose = RewTerm(
-            func=mdp_rewards.object_pose_goal_reward,   # pos+rot to goal
-            weight=15.0,
+            func=mdp_rewards.object_pose_goal_reward,
+            weight=8.0,
             params={"pos_scale": 10.0, "rot_scale": 5.0},
         )
         finger_joint_goal = RewTerm(
             func=mdp_rewards.finger_joint_goal_reward,
             weight=8.0,
-            params={"scale": 5.0},
+            params={"scale": 3.0},  # scale 5→3: wider gradient for early training
         )
+        # alpha 20→10: exp(-20*0.1m)=0.14 vs exp(-10*0.1m)=0.37 —
+        # larger gradient at 5-10 cm helps the policy close the gap early.
         fingertip_tracking = RewTerm(
             func=mdp_rewards.fingertip_tracking_reward,
-            weight=5.0,
-            params={"alpha": 20.0},
+            weight=10.0,
+            params={"alpha": 10.0},
         )
         grasp_success = RewTerm(
             func=mdp_rewards.grasp_success_reward,
@@ -358,27 +362,33 @@ if _ISAACLAB_AVAILABLE:
             params={"threshold": 0.01},
         )
         # --- Style reward (DexGen paper: fingertip velocity) ---
+        # weight -0.5→-0.1: now uses mean-over-fingers (not sum), so
+        # lowering the weight prevents over-penalising necessary motion.
         fingertip_velocity = RewTerm(
             func=mdp_rewards.fingertip_velocity_penalty,
-            weight=-0.5,
+            weight=-0.1,
         )
         # --- Contact reward ---
         fingertip_contact = RewTerm(
             func=mdp_rewards.fingertip_contact_reward,
             weight=2.0,
         )
-        # --- Regularization (DexGen paper: torque, work, action scale) ---
+        # --- Regularization ---
         action_scale = RewTerm(
             func=mdp_rewards.action_scale_penalty,
             weight=-0.001,
         )
+        # torque/work now use mean-over-joints (not sum), so weights are
+        # re-calibrated to produce comparable per-step magnitudes:
+        #   old: -0.002 * sum(tau^2, 24dof) ~= -0.002 * 24 * mean(tau^2)
+        #   new: -0.05  * mean(tau^2)        (same effective scale)
         torque = RewTerm(
             func=mdp_rewards.applied_torque_penalty,
-            weight=-0.002,
+            weight=-0.05,
         )
         mechanical_work = RewTerm(
             func=mdp_rewards.mechanical_work_penalty,
-            weight=-0.001,
+            weight=-0.02,
         )
         action_rate = RewTerm(
             func=mdp_rewards.action_rate_penalty,
@@ -404,11 +414,9 @@ if _ISAACLAB_AVAILABLE:
             func=mdp_rewards.joint_limit_penalty,
             weight=-0.1,
         )
-        wrist_height = RewTerm(
-            func=mdp_rewards.wrist_height_penalty,
-            weight=-1.0,
-            params={"min_height": 0.1},
-        )
+        # wrist_height removed: min_height=0.1 is never triggered when the
+        # hand spawns at z=0.6; wrist escape is already handled by the
+        # termination the user added for wrist going too high.
 
 
 # ---------------------------------------------------------------------------

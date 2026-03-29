@@ -13,14 +13,26 @@ env:
   decimation: 4                  # control at 30 Hz (120 Hz sim / 4)
 
   rewards:
-    fingertip_tracking:  10.0    # dense exp(-20*dist) per fingertip
-    grasp_success:       50.0    # sparse bonus: all tips within 1 cm
-    fingertip_contact:    2.0    # maintain contact during transition
-    action_rate:         -0.01   # jerk penalty
-    object_velocity:     -0.5    # penalise spinning/flinging object
-    object_drop:       -200.0    # drop penalty (also terminates episode)
-    joint_limit:         -0.1    # soft limit penalty
-    wrist_height:        -1.0    # prevent wrist-table collision
+    # Goal rewards
+    object_pose:        8.0     # exp(-10*d_pos) + exp(-5*d_rot) in wrist frame [0,2]
+    finger_joint_goal:  8.0     # exp(-3*||Δq_norm||) joint-space goal [0,1]
+    fingertip_tracking: 10.0    # exp(-10*dist) per fingertip, mean [0,1]  (alpha 20→10 wider gradient)
+    grasp_success:      50.0    # sparse bonus: all tips within 1 cm
+    # Contact / style
+    fingertip_contact:   2.0    # fraction of tips in contact [0,1]
+    fingertip_velocity: -0.1    # mean(||v_tip||^2) over fingers (style penalty)
+    # Regularization
+    action_scale:       -0.001  # ||a||^2 action magnitude
+    torque:             -0.05   # mean(tau_i^2) — normalized by DOF count
+    mechanical_work:    -0.02   # mean(|tau_i * qdot_i|) — normalized by DOF count
+    action_rate:        -0.01   # jerk penalty ||a_t - a_{t-1}||
+    # Safety
+    object_velocity:    -0.5    # penalise spinning/flinging object
+    object_drop:       -200.0   # drop penalty (also terminates episode)
+    object_left_hand:  -100.0   # escape penalty (all directions)
+    joint_limit:        -0.1    # soft limit penalty
+    # wrist_height removed: nearly never fires (hand at z=0.6, threshold 0.1);
+    # wrist escape handled by early-termination added in events.py
 
 # ==============================================================================
 # Asymmetric Actor-Critic PPO (rl_games)
