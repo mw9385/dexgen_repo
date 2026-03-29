@@ -103,6 +103,61 @@ This preset currently defaults to `num_seed_grasps=2000`, `num_grasps=1000`,
 `min_quality=0.01`, `fast_nfo=False`, `isaac_refine=True`,
 and `isaac_refine_batch_envs=32`.
 
+**Recommended refinement workflow:**
+
+- For small graphs, `--isaac_refine` inside `run_grasp_generation.py` is fine.
+- For larger multi-object runs, Isaac refinement is more stable when done per object rather than in one long Stage-0 process.
+- In practice, generate the raw graph first, then refine `cube`, `sphere`, and `cylinder` separately, and train RL by passing multiple `--grasp_graph` files.
+
+Example end-to-end workflow:
+
+```bash
+cd /workspace/dexgen
+
+# 1. Generate a raw multi-object graph
+/workspace/IsaacLab/isaaclab.sh -p scripts/run_grasp_generation.py \
+    --headless \
+    --shapes cube sphere cylinder \
+    --size_min 0.06 --size_max 0.06 --num_sizes 1 \
+    --num_fingers 5 \
+    --num_seed_grasps 400 \
+    --num_grasps 80 \
+    --min_quality 0.005 \
+    --output_dir data/random_obj_f5_small_v1
+
+# 2. Refine each object graph separately
+/workspace/IsaacLab/isaaclab.sh -p scripts/refine_grasp_graph.py \
+    --headless \
+    --input data/random_obj_f5_small_v1/grasp_graph.pkl \
+    --output data/cube_small_refined_v1/grasp_graph.pkl \
+    --objects cube_060_f5 \
+    --batch_envs 8
+
+/workspace/IsaacLab/isaaclab.sh -p scripts/refine_grasp_graph.py \
+    --headless \
+    --input data/random_obj_f5_small_v1/grasp_graph.pkl \
+    --output data/sphere_small_refined_v1/grasp_graph.pkl \
+    --objects sphere_060_f5 \
+    --batch_envs 8
+
+/workspace/IsaacLab/isaaclab.sh -p scripts/refine_grasp_graph.py \
+    --headless \
+    --input data/random_obj_f5_small_v1/grasp_graph.pkl \
+    --output data/cylinder_small_refined_v1/grasp_graph.pkl \
+    --objects cylinder_060_f5 \
+    --batch_envs 8
+```
+
+Example training command with per-object refined graphs:
+
+```bash
+/workspace/IsaacLab/isaaclab.sh -p scripts/train_rl.py \
+    --grasp_graph data/cube_small_refined_v1/grasp_graph.pkl \
+    --grasp_graph data/sphere_small_refined_v1/grasp_graph.pkl \
+    --grasp_graph data/cylinder_small_refined_v1/grasp_graph.pkl \
+    --num_envs 16 --headless
+```
+
 ## Stage 1: RL Training
 
 Trains an AnyGrasp-to-AnyGrasp transition policy using asymmetric actor-critic PPO (rl_games).

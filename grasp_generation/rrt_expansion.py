@@ -190,7 +190,7 @@ class MultiObjectGraspGraph:
 
 
 # ---------------------------------------------------------------------------
-# Standalone graph builder (used by DexGraspNet adapter path)
+# Standalone graph builder for direct grasp lists.
 # ---------------------------------------------------------------------------
 
 def build_graph_from_grasps(
@@ -202,8 +202,8 @@ def build_graph_from_grasps(
     """
     Build a connectivity graph from a flat list of grasps.
 
-    This is used by the DexGraspNet adapter path which produces grasps
-    directly (without RRT expansion).  Edges connect grasp pairs whose
+    This is used when grasps are produced directly without RRT expansion.
+    Edges connect grasp pairs whose
     mean fingertip distance is below ``delta_max``.
 
     Parameters

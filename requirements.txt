@@ -32,13 +32,6 @@ matplotlib>=3.7.0
 # Formatting / CLI Output
 prettytable>=3.9.0
 
-# DexGraspNet dependencies (for --grasp_method dexgraspnet)
-transforms3d
-urdf-parser-py
-pytorch3d               # requires CUDA-matched build; see README
-# torchsdf             # install from: pip install torchsdf (or build from source)
-# pytorch_kinematics   # installed via: pip install -e third_party/DexGraspNet/thirdparty/pytorch_kinematics/
-
 # Isaac Lab Utilities
 flatdict==4.0.1
 einops

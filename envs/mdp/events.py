@@ -310,8 +310,8 @@ def reset_to_random_grasp(
     # ------------------------------------------------------------------
     # 3. Place object.
     #    ALWAYS use _place_object_in_hand (fingertip-matching) rather than
-    #    the stored object_pos_hand.  This avoids frame mismatches between
-    #    DexGraspNet (root = palm body) and Isaac Lab (root = forearm body).
+    #    the stored object_pos_hand. This avoids hand-root frame mismatches
+    #    between Stage-0 data and the Isaac Lab articulation root.
     #    After writing root + joints we must update body transforms first.
     # ------------------------------------------------------------------
     robot = env.scene["robot"]
@@ -339,13 +339,11 @@ def reset_to_random_grasp(
 
     # ------------------------------------------------------------------
     # 7. Compute target_object_pos/quat_hand from the ACTUAL sim state.
-    #    The stored goal_object_pos_hand from DexGraspNet is relative to
-    #    the PALM body (DexGraspNet root), but the reward function
-    #    (object_pose_tracking_reward) uses robot.data.root_pos_w which
-    #    is the FOREARM/articulation root in Isaac Lab.  To avoid this
-    #    frame mismatch, ALWAYS compute from the sim state.  Since the
-    #    object was just placed via _place_object_in_hand, the current
-    #    sim pose is consistent with the articulation root frame.
+    #    Some stored object poses are defined in a palm/body-local frame,
+    #    while the reward uses the articulation root frame. To avoid that
+    #    mismatch, ALWAYS compute from the current sim state. Since the
+    #    object was just placed via _place_object_in_hand, the current sim
+    #    pose is consistent with the articulation root frame.
     # ------------------------------------------------------------------
     robot_for_goal = env.scene["robot"]
     obj_for_goal   = env.scene["object"]
@@ -765,7 +763,7 @@ def _expand_grasp_joint_vector(
     """
     Expand/pad a stored grasp joint vector to the articulation DOF count.
 
-    Shadow grasps from DexGraspNet store 22 finger joints. Isaac Lab's Shadow
+    Some stored Shadow grasps use 22 finger joints, while Isaac Lab's Shadow
     USD articulation exposes 24 joints with 2 wrist DOFs leading the vector.
     """
     if joint_vec.shape[0] == target_num_dof:
