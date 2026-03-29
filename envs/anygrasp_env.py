@@ -338,27 +338,31 @@ if _ISAACLAB_AVAILABLE:
 if _ISAACLAB_AVAILABLE:
     @configclass
     class AnyGraspRewardsCfg:
-        # --- Goal-related (DexterityGen paper §3.2 eq.5) ---
-        # r_goal = exp(-alpha_pos * ||p_obj - p*_obj|| - alpha_orn * d(R, R*))
-        #        - alpha_hand * ||q - q*||
-        #        + alpha_bonus * 1(goal achieved)
-        #
-        # object_pose: exp(-10*d_pos - 5*d_rot) ∈ (0,1].
-        #   weight=5.0 → per-step max +5.0 when perfectly at goal.
-        #   At start (different grasp) expect ~exp(-10*0.05-5*0.05)≈0.57 → +2.85/step.
+        # ── Goal-related rewards ──────────────────────────────────────
+        # Object pose: exp(-5*d_pos - 2*d_rot) ∈ (0,1]
+        #   weight=5.0.  In AnyGrasp-to-AnyGrasp the object pose changes
+        #   somewhat but joint config changes more → keep weight moderate.
         object_pose = RewTerm(
             func=mdp_rewards.object_pose_goal_reward,
             weight=5.0,
-            params={"alpha_pos": 10.0, "alpha_orn": 5.0},
+            params={"alpha_pos": 5.0, "alpha_orn": 2.0},
         )
-        # finger_joint_goal: -alpha_hand * ||q - q*||  (paper eq.5, negative term)
-        # weight=1.0; alpha_hand=0.1 → -0.1 * ||dq|| per step.
-        # At ||dq||=1rad → -0.1/step; at goal → 0.0.
-        # Negative reward so this is a penalty on joint distance, per paper.
+        # Joint-space goal: exp(-2*||dq||/sqrt(24)) ∈ (0,1]
+        #   weight=8.0 — main dense signal for finger repositioning.
+        #   Positive exponential: moving toward goal is always profitable.
+        #   At start (||dq||~2rad): ~0.55 → at goal: 1.0 (Δ=+0.45 per step)
         finger_joint_goal = RewTerm(
             func=mdp_rewards.finger_joint_goal_reward,
-            weight=1.0,
-            params={"alpha_hand": 0.1},
+            weight=8.0,
+            params={"alpha_hand": 2.0},
+        )
+        # Fingertip tracking: exp(-20*dist) ∈ (0,1], averaged over fingertips.
+        #   Direct dense signal for fingertip → goal position.
+        #   weight=8.0 — same weight as joint goal, complementary signal.
+        fingertip_tracking = RewTerm(
+            func=mdp_rewards.fingertip_tracking_reward,
+            weight=8.0,
+            params={"alpha": 20.0},
         )
         # alpha_bonus (paper): large sparse bonus when goal is achieved.
         grasp_success = RewTerm(
@@ -400,6 +404,9 @@ if _ISAACLAB_AVAILABLE:
             weight=-0.01,
         )
         # --- Stability / safety ---
+        # Softened: object_velocity was -4.4/step after zero-action → swamped goal reward.
+        # -0.1 weight + wider thresholds (lin=0.2m/s, ang=2.0rad/s) keeps safety signal
+        # without dominating goal-related positives.
         object_velocity = RewTerm(
             func=mdp_rewards.object_velocity_penalty,
             weight=-0.1,
