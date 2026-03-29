@@ -290,7 +290,7 @@ def wrist_height_penalty(env, min_height: float = 0.1) -> torch.Tensor:
     return torch.relu(min_height - env.scene["robot"].data.root_pos_w[:, 2])
 
 
-def object_left_hand_penalty(env, max_dist: float = 0.18) -> torch.Tensor:
+def object_left_hand_penalty(env, max_dist: float = 0.20) -> torch.Tensor:
     """
     Binary penalty when object escapes from the hand (any direction).
 

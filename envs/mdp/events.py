@@ -40,7 +40,7 @@ def object_dropped(env, min_height: float = 0.2) -> torch.Tensor:
     return obj.data.root_pos_w[:, 2] < min_height
 
 
-def object_left_hand(env, max_dist: float = 0.18) -> torch.Tensor:
+def object_left_hand(env, max_dist: float = 0.20) -> torch.Tensor:
     """
     True when the object has escaped the palm support region.
 
@@ -53,7 +53,7 @@ def object_left_hand(env, max_dist: float = 0.18) -> torch.Tensor:
     return escaped
 
 
-def _log_reset_reasons(env, env_ids: torch.Tensor, max_dist: float = 0.18) -> None:
+def _log_reset_reasons(env, env_ids: torch.Tensor, max_dist: float = 0.20) -> None:
     if env_ids.numel() == 0:
         return
     if not torch.any(env.episode_length_buf[env_ids] > 0):
@@ -1029,9 +1029,9 @@ def _get_palm_body_id_from_env(robot, env) -> int:
 
 def _object_escape_mask(
     env,
-    max_dist: float = 0.18,
-    max_lateral: float = 0.10,
-    max_front_offset: float = 0.12,
+    max_dist: float = 0.20,
+    max_lateral: float = 0.12,
+    max_front_offset: float = 0.16,
     max_behind_offset: float = 0.015,
     contact_force_thresh: float = 0.5,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
