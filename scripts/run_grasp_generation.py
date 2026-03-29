@@ -10,19 +10,11 @@ object + grasp pair from this combined graph every episode.
 
 Pipeline (per object):
 
-  Legacy method (--grasp_method legacy):
-    1. Sample candidate grasps on the object surface (GraspSampler)
-    2. Score and filter by NFO quality (NetForceOptimizer)
-    3. Expand with RRT to reach target_size (RRTGraspExpander)
-    4. Seed joint angles for each grasp (heuristic initialization)
-    5. Save a Stage-1-ready MultiObjectGraspGraph
-
-  DexGraspNet method (--grasp_method dexgraspnet):
-    1. Export object mesh to DexGraspNet format
-    2. Run differentiable grasp optimisation (simulated annealing)
-    3. Filter by energy thresholds + convert to Grasp format
-    4. Build connectivity graph from flat grasp list
-    5. Save a Stage-1-ready MultiObjectGraspGraph
+  1. Sample candidate grasps on the object surface (GraspSampler)
+  2. Score and filter by NFO quality (NetForceOptimizer)
+  3. Expand with RRT to reach target_size (RRTGraspExpander)
+  4. Seed joint angles for each grasp (heuristic initialization)
+  5. Save a Stage-1-ready MultiObjectGraspGraph
 
 Usage:
     # Default: cube + sphere + cylinder, 3 sizes each
@@ -41,7 +33,6 @@ Usage:
 import argparse
 import sys
 from pathlib import Path
-import re
 
 import numpy as np
 import yaml
@@ -52,9 +43,8 @@ from isaaclab.app import AppLauncher
 
 from grasp_generation import (
     GraspSampler, NetForceOptimizer, RRTGraspExpander,
-    ObjectPool, MultiObjectGraspGraph,
+    ObjectPool, MultiObjectGraspGraph, refine_multi_object_graph_with_isaac,
 )
-from grasp_generation.rrt_expansion import build_graph_from_grasps
 
 
 def parse_args():
@@ -74,6 +64,13 @@ def parse_args():
                    help="Single custom mesh file instead of pool (.obj/.stl/.ply)")
     p.add_argument("--mesh_dir", type=str, default=None,
                    help="Directory of mesh files — all loaded as pool objects")
+    p.add_argument(
+        "--generation_preset",
+        type=str,
+        default="default",
+        choices=["default", "high_precision"],
+        help="Generation preset. 'high_precision' increases candidate counts and enables Isaac refinement by default.",
+    )
 
     # Grasp generation quality
     p.add_argument("--num_seed_grasps", type=int, default=None,
@@ -87,21 +84,6 @@ def parse_args():
     p.add_argument("--fast_nfo", action=argparse.BooleanOptionalAction, default=None,
                    help="Use fast SVD approximation for NFO")
 
-    # Grasp generation method
-    p.add_argument("--grasp_method", type=str, default="legacy",
-                   choices=["legacy", "dexgraspnet"],
-                   help="Grasp generation method: "
-                        "'legacy' = GraspSampler + NFO + RRT, "
-                        "'dexgraspnet' = DexGraspNet differentiable optimisation")
-
-    # DexGraspNet-specific options (only used when --grasp_method=dexgraspnet)
-    p.add_argument("--dgn_batch_size", type=int, default=128,
-                   help="DexGraspNet batch size per optimisation run (default: 128)")
-    p.add_argument("--dgn_n_iter", type=int, default=6000,
-                   help="DexGraspNet optimisation iterations (default: 6000)")
-    p.add_argument("--dgn_gpu", type=str, default="0",
-                   help="GPU id for DexGraspNet (default: '0')")
-
     p.add_argument("--output_dir", type=str, default=None)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument(
@@ -113,8 +95,86 @@ def parse_args():
         "--num_fingers", type=int, default=None,
         help="Number of contact points per grasp (overrides config file hand.num_fingers)",
     )
+    p.add_argument(
+        "--max_num_fingers", type=int, default=None,
+        help="Generate all finger counts from 2..N (inclusive), capped at 5",
+    )
+    p.add_argument(
+        "--finger_counts", type=str, default=None,
+        help="Comma-separated finger counts to generate, e.g. '2,3,5'",
+    )
+    p.add_argument(
+        "--isaac_refine",
+        action="store_true",
+        default=False,
+        help="After Stage 0 generation, validate grasps in Isaac Sim and overwrite each grasp with the true simulated tuple.",
+    )
+    p.add_argument(
+        "--isaac_refine_batch_envs",
+        type=int,
+        default=16,
+        help="Batch size for Isaac-based grasp refinement/validation",
+    )
+    p.add_argument(
+        "--keep_top_k",
+        type=int,
+        default=None,
+        help="After Isaac validation, keep only the top-K lowest-error grasps per object/finger graph",
+    )
     AppLauncher.add_app_launcher_args(p)
     return p.parse_args()
+
+
+def _apply_generation_preset(args):
+    if args.generation_preset != "high_precision":
+        return
+
+    preset_values = {
+        "num_seed_grasps": 2000,
+        "num_grasps": 1000,
+        "min_quality": 0.01,
+        "mu": 0.5,
+        "fast_nfo": False,
+        "isaac_refine_batch_envs": 32,
+        "keep_top_k": None,
+    }
+
+    for field_name, preset_value in preset_values.items():
+        if getattr(args, field_name) is None:
+            setattr(args, field_name, preset_value)
+    args.isaac_refine = True
+
+
+def _resolve_finger_counts(args, hand_cfg: dict) -> list[int]:
+    """
+    Resolve which finger-count variants to generate.
+
+    Priority:
+      1. --finger_counts        explicit list
+      2. --max_num_fingers      generate 2..N
+      3. --num_fingers          single value
+      4. config hand.num_fingers
+    """
+    if args.finger_counts:
+        raw_counts = [part.strip() for part in args.finger_counts.split(",")]
+        finger_counts = [int(part) for part in raw_counts if part]
+    elif args.max_num_fingers is not None:
+        finger_counts = list(range(2, int(args.max_num_fingers) + 1))
+    else:
+        resolved_num_fingers = (
+            int(args.num_fingers)
+            if args.num_fingers is not None
+            else int(hand_cfg.get("num_fingers", 4))
+        )
+        finger_counts = [resolved_num_fingers]
+
+    deduped = sorted(set(int(nf) for nf in finger_counts))
+    invalid = [nf for nf in deduped if nf < 2 or nf > 5]
+    if invalid:
+        raise ValueError(
+            f"Finger counts must be in [2, 5] for Shadow Hand, got: {invalid}"
+        )
+    return deduped
 
 
 # ---------------------------------------------------------------------------
@@ -271,97 +331,6 @@ def process_one_object(
 
 
 # ---------------------------------------------------------------------------
-# DexGraspNet pipeline (alternative to process_one_object)
-# ---------------------------------------------------------------------------
-
-def process_one_object_dexgraspnet(
-    spec,
-    args,
-    seed_offset: int,
-    num_fingers: int = 4,
-    num_dof: int = 16,
-    dof_per_finger: int = 4,
-) -> tuple:
-    """
-    Run DexGraspNet differentiable optimisation for one ObjectSpec.
-
-    Replaces the GraspSampler → NFO → RRT pipeline with:
-      1. Export mesh to DexGraspNet format
-      2. Run gradient-guided simulated annealing (DexGraspNet core)
-      3. Filter by energy thresholds
-      4. Convert to our Grasp format
-      5. Build connectivity graph
-
-    Returns (GraspGraph, isaac_lab_spec) or (None, None) on failure.
-    """
-    from grasp_generation.mesh_export import export_mesh_for_dexgraspnet
-    from grasp_generation.dexgraspnet_adapter import (
-        DexGraspNetConfig,
-        generate_grasps_dexgraspnet,
-    )
-
-    print(f"\n{'='*55}")
-    print(f"  Object:      {spec.name}  (shape={spec.shape_type}, size={spec.size:.3f}m)")
-    print(f"  Method:      DexGraspNet  |  num_fingers: {num_fingers}")
-    print(f"{'='*55}")
-
-    # Step 1: Export mesh for DexGraspNet
-    meshdata_root = Path(args.output_dir) / "meshdata"
-    obj_path, scale = export_mesh_for_dexgraspnet(
-        spec.mesh, spec.name, meshdata_root,
-    )
-    print(f"  [mesh] Exported to {obj_path} (scale={scale:.4f}m)")
-
-    # Step 2-4: DexGraspNet optimisation + filter + convert
-    cfg = DexGraspNetConfig(
-        batch_size=args.dgn_batch_size,
-        n_iter=args.dgn_n_iter,
-        n_contact=num_fingers,
-        gpu=args.dgn_gpu,
-        seed=args.seed + seed_offset,
-    )
-
-    grasps = generate_grasps_dexgraspnet(
-        object_code=spec.name,
-        meshdata_root=str(meshdata_root),
-        object_scale=scale,
-        cfg=cfg,
-        target_num_grasps=args.num_grasps,
-        device="cuda",
-    )
-
-    if len(grasps) < 2:
-        print(f"  [!] Only {len(grasps)} grasps for {spec.name}, skipping.")
-        return None, None
-
-    # Step 5: Build connectivity graph
-    graph = build_graph_from_grasps(
-        grasps,
-        object_name=spec.name,
-        delta_max=spec.size * 0.60,
-        num_fingers=num_fingers,
-    )
-
-    # DexGraspNet already provides joint_angles — fill any missing ones
-    n_with_joints = sum(1 for g in graph.grasp_set.grasps if g.joint_angles is not None)
-    n_missing = len(graph) - n_with_joints
-    if n_missing > 0:
-        _attach_joint_angles_to_graph(graph, num_dof=num_dof, dof_per_finger=dof_per_finger)
-
-    print(f"  [result] {len(graph)} grasps, {graph.num_edges} edges")
-
-    isaac_spec = {
-        "name": spec.name,
-        "shape_type": spec.shape_type,
-        "size": spec.size,
-        "mass": spec.mass,
-        "color": spec.color,
-    }
-
-    return graph, isaac_spec
-
-
-# ---------------------------------------------------------------------------
 # Validation: verify grasp_graph.pkl is usable by RL
 # ---------------------------------------------------------------------------
 
@@ -393,6 +362,11 @@ def validate_graph(graph_path: Path):
         N = len(g)
         E = g.num_edges
         n_with_joints = sum(1 for gr in g.grasp_set.grasps if gr.joint_angles is not None)
+        reset_errs = [
+            float(gr.reset_contact_error)
+            for gr in g.grasp_set.grasps
+            if getattr(gr, "reset_contact_error", None) is not None
+        ]
 
         # Nearest neighbor distance check
         all_fps = g.grasp_set.as_array()  # (N, F*3)
@@ -405,9 +379,15 @@ def validate_graph(graph_path: Path):
 
         ok = N >= 2 and E >= 1 and n_with_joints == N
         status = "✓" if ok else "✗"
+        reset_err_text = ""
+        if reset_errs:
+            reset_err_text = (
+                f", reset_err_mean={np.mean(reset_errs):.4f}m"
+                f", reset_err_best={np.min(reset_errs):.4f}m"
+            )
         print(f"  [{status}] {obj_name}: {N} nodes, {E} edges, "
               f"{n_with_joints}/{N} with joints, "
-              f"mean NN dist={nn_mean:.4f}m")
+              f"mean NN dist={nn_mean:.4f}m{reset_err_text}")
 
         if not ok:
             all_ok = False
@@ -453,6 +433,7 @@ def main():
         sampler_cfg = cfg_file.get("sampler", {})
         nfo_cfg = cfg_file.get("nfo", {})
         rrt_cfg = cfg_file.get("rrt", {})
+        _apply_generation_preset(args)
 
         # ------------------------------------------------------------------
         # Resolve config-overridable CLI values.
@@ -483,16 +464,16 @@ def main():
         output_dir = Path(args.output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        if args.num_fingers is not None:
-            num_fingers = args.num_fingers
-        else:
-            num_fingers = hand_cfg.get("num_fingers", 4)
+        finger_counts = _resolve_finger_counts(args, hand_cfg)
+        num_fingers = max(finger_counts)
 
         num_dof        = hand_cfg.get("num_dof", 16)
         dof_per_finger = hand_cfg.get("dof_per_finger", 4)
 
         print(f"[Stage 0] Hand:       {hand_cfg.get('name', 'allegro')}  "
-              f"(num_fingers={num_fingers}, num_dof={num_dof})")
+              f"(finger_counts={finger_counts}, num_dof={num_dof})")
+        if args.generation_preset != "default":
+            print(f"[Stage 0] Preset:     {args.generation_preset}")
         print(f"[Stage 0] Object pool: shapes={args.shapes}, "
               f"size_range=({args.size_min:.3f}, {args.size_max:.3f}), "
               f"num_sizes={args.num_sizes}")
@@ -524,12 +505,7 @@ def main():
                 seed=args.seed,
             )
 
-        # Respect the configured/default finger count unless the caller
-        # explicitly overrides it via CLI.
-        finger_counts = [int(num_fingers)]
-
         print(f"\n[Stage 0] Processing {len(pool)} objects × {finger_counts} finger configs")
-        print(f"[Stage 0] Method: {args.grasp_method}")
 
         # ------------------------------------------------------------------
         # Generate grasps for each object × each finger count
@@ -542,28 +518,13 @@ def main():
                 # Use a unique seed offset per (object, finger_count) pair
                 seed_offset = i * 100 + nf * 1000
 
-                if args.grasp_method == "dexgraspnet":
-                    try:
-                        graph, isaac_spec = process_one_object_dexgraspnet(
-                            spec, args,
-                            seed_offset=seed_offset,
-                            num_fingers=nf,
-                            num_dof=num_dof,
-                            dof_per_finger=dof_per_finger,
-                        )
-                    except Exception as e:
-                        import traceback
-                        print(f"\n  [ERROR] DexGraspNet failed for {spec.name}: {e}")
-                        traceback.print_exc()
-                        graph, isaac_spec = None, None
-                else:
-                    graph, isaac_spec = process_one_object(
-                        spec, args,
-                        seed_offset=seed_offset,
-                        num_fingers=nf,
-                        num_dof=num_dof,
-                        dof_per_finger=dof_per_finger,
-                    )
+                graph, isaac_spec = process_one_object(
+                    spec, args,
+                    seed_offset=seed_offset,
+                    num_fingers=nf,
+                    num_dof=num_dof,
+                    dof_per_finger=dof_per_finger,
+                )
                 if graph is None:
                     continue
 
@@ -592,6 +553,17 @@ def main():
         # ------------------------------------------------------------------
         graph_path = output_dir / "grasp_graph.pkl"
         multi_graph.save(graph_path)
+
+        if args.isaac_refine:
+            print(f"\n{'='*55}")
+            print(" Isaac Validation / Refinement")
+            print(f"{'='*55}")
+            multi_graph = refine_multi_object_graph_with_isaac(
+                multi_graph,
+                batch_envs=args.isaac_refine_batch_envs,
+                keep_top_k=args.keep_top_k,
+            )
+            multi_graph.save(graph_path)
 
         # ------------------------------------------------------------------
         # Validate the saved graph

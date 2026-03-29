@@ -190,7 +190,7 @@ class MultiObjectGraspGraph:
 
 
 # ---------------------------------------------------------------------------
-# Standalone graph builder (used by DexGraspNet adapter path)
+# Standalone graph builder for direct grasp lists.
 # ---------------------------------------------------------------------------
 
 def build_graph_from_grasps(
@@ -202,8 +202,8 @@ def build_graph_from_grasps(
     """
     Build a connectivity graph from a flat list of grasps.
 
-    This is used by the DexGraspNet adapter path which produces grasps
-    directly (without RRT expansion).  Edges connect grasp pairs whose
+    This is used when grasps are produced directly without RRT expansion.
+    Edges connect grasp pairs whose
     mean fingertip distance is below ``delta_max``.
 
     Parameters
@@ -352,6 +352,7 @@ class RRTGraspExpander:
             object_scale=src.object_scale,
             object_pos_hand=object_pos_hand,
             object_quat_hand=object_quat_hand,
+            object_pose_frame=getattr(src, "object_pose_frame", None),
         )
 
     def _nearest_neighbor(self, target: Grasp, grasps: List[Grasp]) -> Grasp:
@@ -387,6 +388,7 @@ class RRTGraspExpander:
             object_scale=src.object_scale,
             object_pos_hand=object_pos_hand,
             object_quat_hand=object_quat_hand,
+            object_pose_frame=getattr(src, "object_pose_frame", None),
         )
 
     def _projected_step(self, xnode: Grasp, xsample: Grasp) -> Optional[Grasp]:
@@ -452,6 +454,7 @@ class RRTGraspExpander:
             object_scale=xnode.object_scale,
             object_pos_hand=object_pos_hand,
             object_quat_hand=object_quat_hand,
+            object_pose_frame=getattr(xnode, "object_pose_frame", None),
         )
 
     def _grasp_distance(self, grasp_a: Grasp, grasp_b: Grasp) -> float:

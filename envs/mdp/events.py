@@ -13,6 +13,7 @@ Reset logic per episode:
 from __future__ import annotations
 
 import math
+import os
 import pickle
 from itertools import combinations
 from pathlib import Path
@@ -22,6 +23,8 @@ import torch
 import numpy as np
 
 from isaaclab.utils.math import quat_apply, quat_apply_inverse, quat_from_matrix
+from grasp_generation.graph_io import load_merged_graph, parse_graph_paths
+from .observations import _get_fingertip_contact_forces_world
 
 
 # ---------------------------------------------------------------------------
@@ -37,18 +40,21 @@ def object_dropped(env, min_height: float = 0.2) -> torch.Tensor:
     return obj.data.root_pos_w[:, 2] < min_height
 
 
-def object_left_hand(env, max_dist: float = 0.25) -> torch.Tensor:
+def object_left_hand(env, max_dist: float = 0.20) -> torch.Tensor:
     """
-    True when the object has moved more than *max_dist* from the robot wrist.
+    True when the object has escaped the palm support region.
 
-    Catches all escape directions (upward, sideways, downward) unlike the
-    height-only `object_dropped` predicate.  Use together with object_dropped
-    so the termination fires as soon as contact is lost.
+    We treat three cases as failure:
+      1. the object is too far from the palm and fingertips no longer touch it,
+      2. the object moved behind the palm plane (wrist-side cheat),
+      3. the object drifted too far laterally away from the palm center.
     """
-    robot = env.scene["robot"]
-    obj   = env.scene["object"]
-    dist  = torch.norm(obj.data.root_pos_w - robot.data.root_pos_w, dim=-1)
-    return dist > max_dist
+    escaped, _ = _object_escape_mask(env, max_dist=max_dist)
+    return escaped
+
+
+def _log_reset_reasons(env, env_ids: torch.Tensor, max_dist: float = 0.20) -> None:
+    return
 
 
 # ---------------------------------------------------------------------------
@@ -70,6 +76,8 @@ def reset_to_random_grasp(
         _reset_to_default_pose(env, env_ids)
         return
 
+    _log_reset_reasons(env, env_ids)
+
     n = len(env_ids)
     # env_num_fingers is the FIXED finger count the env was built with.
     # All grasp data is padded/truncated to this count so tensors are uniform.
@@ -84,6 +92,7 @@ def reset_to_random_grasp(
     start_fps_list, goal_fps_list = [], []
     start_joints_list = []
     start_object_pos_hand_list, start_object_quat_hand_list = [], []
+    start_object_pose_frame_list = []
     start_idx_list, goal_idx_list = [], []
 
     sampled_obj_names = []
@@ -94,6 +103,7 @@ def reset_to_random_grasp(
 
     goal_joints_list = []
     goal_object_pos_hand_list, goal_object_quat_hand_list = [], []
+    goal_object_pose_frame_list = []
 
     for i in range(n):
         env_id = int(env_ids[i].item())
@@ -104,8 +114,8 @@ def reset_to_random_grasp(
             per_env_name = forced_object_name
         (
             obj_name, start_fp, goal_fp,
-            start_joints, start_object_pos_hand, start_object_quat_hand,
-            goal_joints, goal_object_pos_hand, goal_object_quat_hand,
+            start_joints, start_object_pos_hand, start_object_quat_hand, start_object_pose_frame,
+            goal_joints, goal_object_pos_hand, goal_object_quat_hand, goal_object_pose_frame,
             start_idx, goal_idx
         ) = _sample_start_and_nn_goal(
             graph, rng,
@@ -118,9 +128,11 @@ def reset_to_random_grasp(
         start_joints_list.append(start_joints)
         start_object_pos_hand_list.append(start_object_pos_hand)
         start_object_quat_hand_list.append(start_object_quat_hand)
+        start_object_pose_frame_list.append(start_object_pose_frame)
         goal_joints_list.append(goal_joints)
         goal_object_pos_hand_list.append(goal_object_pos_hand)
         goal_object_quat_hand_list.append(goal_object_quat_hand)
+        goal_object_pose_frame_list.append(goal_object_pose_frame)
         start_idx_list.append(start_idx)
         goal_idx_list.append(goal_idx)
 
@@ -191,17 +203,27 @@ def reset_to_random_grasp(
             )
 
     # ------------------------------------------------------------------
-    # 2. Set robot root pose (wrist/forearm) and joint angles.
+    # 2. Set object / robot initial state.
+    #    For exact resets, keep the object at its canonical spawned pose and
+    #    move the hand around it using the stored object pose in the hand
+    #    frame.  This avoids the visual artifact where the object appears to
+    #    spawn far from the hand and then gets teleported into place.
     # ------------------------------------------------------------------
     has_exact_pose = any(
         pos is not None and quat is not None
         for pos, quat in zip(start_object_pos_hand_list, start_object_quat_hand_list)
     )
     has_joints = any(j is not None for j in start_joints_list)
+    exact_reset_mode = os.getenv("DEXGEN_EXACT_RESET_MODE", "object_fixed").strip().lower()
 
-    if has_exact_pose:
-        wrist_pos_w, wrist_quat_w = _sample_wrist_pose_world(env, env_ids)
+    if has_exact_pose and exact_reset_mode == "hand_fixed":
+        wrist_pos_w, wrist_quat_w = _sample_wrist_pose_world(
+            env, env_ids, apply_noise=False
+        )
         _set_robot_root_pose(env, env_ids, wrist_pos_w, wrist_quat_w)
+        _randomise_object_pose(env, env_ids)
+    elif has_exact_pose:
+        _randomise_object_pose(env, env_ids)
     else:
         _randomise_object_pose(env, env_ids)
         _randomise_wrist_pose(env, env_ids)
@@ -211,30 +233,70 @@ def reset_to_random_grasp(
     else:
         _set_robot_to_fingertip_config(env, env_ids, start_fps)
 
+    if has_exact_pose and exact_reset_mode == "hand_fixed":
+        robot = env.scene["robot"]
+        obj = env.scene["object"]
+        robot.update(0.0)
+        obj.update(0.0)
+        if all(frame == "root" for frame in start_object_pose_frame_list if frame is not None):
+            _set_object_pose_from_grasp(
+                env, env_ids, start_object_pos_hand_list, start_object_quat_hand_list
+            )
+        else:
+            _set_object_pose_from_hand_frame_grasp(
+                env, env_ids, start_object_pos_hand_list, start_object_quat_hand_list
+            )
+    elif has_exact_pose:
+        robot = env.scene["robot"]
+        obj = env.scene["object"]
+        robot.update(0.0)
+        obj.update(0.0)
+        if all(frame == "root" for frame in start_object_pose_frame_list if frame is not None):
+            _set_robot_root_pose_from_root_frame_grasp_pose(
+                env, env_ids, start_object_pos_hand_list, start_object_quat_hand_list
+            )
+        else:
+            _set_robot_root_pose_from_grasp_pose(
+                env, env_ids, start_object_pos_hand_list, start_object_quat_hand_list
+            )
+
     # ------------------------------------------------------------------
     # 3. Place object.
     #    ALWAYS use _place_object_in_hand (fingertip-matching) rather than
-    #    the stored object_pos_hand.  This avoids frame mismatches between
-    #    DexGraspNet (root = palm body) and Isaac Lab (root = forearm body).
+    #    the stored object_pos_hand. This avoids hand-root frame mismatches
+    #    between Stage-0 data and the Isaac Lab articulation root.
     #    After writing root + joints we must update body transforms first.
     # ------------------------------------------------------------------
     robot = env.scene["robot"]
     robot.update(0.0)
 
-    solve_mean_err, solve_max_err = _place_object_in_hand(env, env_ids, start_fps)
-    if not has_exact_pose:
+    placement_debug = None
+    if has_exact_pose:
+        # Keep the object fixed and refine the hand so the sampled Stage-0
+        # fingertip contacts are matched without teleporting the object.
         _refine_hand_to_start_grasp(env, env_ids, start_fps)
+        robot.update(0.0)
+        obj = env.scene["object"]
+        obj.update(0.0)
+        solve_mean_err, solve_max_err = _measure_grasp_contact_error(env, env_ids, start_fps)
+    else:
+        solve_mean_err, solve_max_err, placement_debug = _place_object_in_hand(env, env_ids, start_fps)
+        # Exact Stage-0 tuples still suffer from hand-model / joint-order /
+        # simulator discrepancies. Refine the hand against the sampled grasp
+        # and then place the object again using the refined fingertips.
+        _refine_hand_to_start_grasp(env, env_ids, start_fps)
+        robot.update(0.0)
+        solve_mean_err, solve_max_err, placement_debug = _place_object_in_hand(env, env_ids, start_fps)
+        # One final measurement from the actual sim state after re-placement.
         solve_mean_err, solve_max_err = _measure_grasp_contact_error(env, env_ids, start_fps)
 
     # ------------------------------------------------------------------
     # 7. Compute target_object_pos/quat_hand from the ACTUAL sim state.
-    #    The stored goal_object_pos_hand from DexGraspNet is relative to
-    #    the PALM body (DexGraspNet root), but the reward function
-    #    (object_pose_tracking_reward) uses robot.data.root_pos_w which
-    #    is the FOREARM/articulation root in Isaac Lab.  To avoid this
-    #    frame mismatch, ALWAYS compute from the sim state.  Since the
-    #    object was just placed via _place_object_in_hand, the current
-    #    sim pose is consistent with the articulation root frame.
+    #    Some stored object poses are defined in a palm/body-local frame,
+    #    while the reward uses the articulation root frame. To avoid that
+    #    mismatch, ALWAYS compute from the current sim state. Since the
+    #    object was just placed via _place_object_in_hand, the current sim
+    #    pose is consistent with the articulation root frame.
     # ------------------------------------------------------------------
     robot_for_goal = env.scene["robot"]
     obj_for_goal   = env.scene["object"]
@@ -269,16 +331,6 @@ def reset_to_random_grasp(
     # Reset action buffers to current joint positions for reset envs
     env.extras["last_action"][env_ids] = current_action
     env.extras["current_action"][env_ids] = current_action
-
-    _log_reset_debug(
-        env,
-        env_ids,
-        start_fps,
-        sampled_obj_names,
-        solve_mean_err=solve_mean_err,
-        solve_max_err=solve_max_err,
-    )
-
 
 # ---------------------------------------------------------------------------
 # Start grasp sampling + nearest-neighbor goal selection
@@ -335,9 +387,11 @@ def _sample_start_and_nn_goal(
             _ja,
             _pos.copy()  if _pos  is not None else None,
             _quat.copy() if _quat is not None else None,
+            getattr(grasp, "object_pose_frame", None),
             _ja,
             _pos.copy()  if _pos  is not None else None,
             _quat.copy() if _quat is not None else None,
+            getattr(grasp, "object_pose_frame", None),
             0, 0,
         )
 
@@ -352,9 +406,11 @@ def _sample_start_and_nn_goal(
     start_joints           = getattr(start_grasp, "joint_angles",     None)
     start_object_pos_hand  = getattr(start_grasp, "object_pos_hand",  None)
     start_object_quat_hand = getattr(start_grasp, "object_quat_hand", None)
+    start_object_pose_frame = getattr(start_grasp, "object_pose_frame", None)
     goal_joints            = getattr(goal_grasp,  "joint_angles",     None)
     goal_object_pos_hand   = getattr(goal_grasp,  "object_pos_hand",  None)
     goal_object_quat_hand  = getattr(goal_grasp,  "object_quat_hand", None)
+    goal_object_pose_frame = getattr(goal_grasp, "object_pose_frame", None)
 
     return (
         obj_name,
@@ -363,9 +419,11 @@ def _sample_start_and_nn_goal(
         start_joints,
         start_object_pos_hand.copy()  if start_object_pos_hand  is not None else None,
         start_object_quat_hand.copy() if start_object_quat_hand is not None else None,
+        start_object_pose_frame,
         goal_joints,
         goal_object_pos_hand.copy()   if goal_object_pos_hand   is not None else None,
         goal_object_quat_hand.copy()  if goal_object_quat_hand  is not None else None,
+        goal_object_pose_frame,
         int(start_idx),
         int(goal_idx),
     )
@@ -647,7 +705,7 @@ def _expand_grasp_joint_vector(
     """
     Expand/pad a stored grasp joint vector to the articulation DOF count.
 
-    Shadow grasps from DexGraspNet store 22 finger joints. Isaac Lab's Shadow
+    Some stored Shadow grasps use 22 finger joints, while Isaac Lab's Shadow
     USD articulation exposes 24 joints with 2 wrist DOFs leading the vector.
     """
     if joint_vec.shape[0] == target_num_dof:
@@ -705,6 +763,7 @@ def _randomise_wrist_pose(env, env_ids: torch.Tensor):
 def _sample_wrist_pose_world(
     env,
     env_ids: torch.Tensor,
+    apply_noise: bool = True,
 ):
     robot = env.scene["robot"]
     n = len(env_ids)
@@ -716,14 +775,14 @@ def _sample_wrist_pose_world(
     wrist_quat = root_local[:, 3:7]
 
     pos_jitter_std = float(cfg.get("wrist_pos_jitter_std", 0.005))
-    if pos_jitter_std > 0.0:
+    if apply_noise and pos_jitter_std > 0.0:
         wrist_pos = wrist_pos + torch.randn(n, 3, device=env.device) * pos_jitter_std
 
-    if bool(cfg.get("align_palm_up", False)):
+    if apply_noise and bool(cfg.get("align_palm_up", False)):
         wrist_quat = _align_wrist_palm_up(env, env_ids, wrist_quat)
 
     rot_std = math.radians(float(cfg.get("wrist_rot_std_deg", 5.0)))
-    if rot_std > 0.0:
+    if apply_noise and rot_std > 0.0:
         wrist_quat = _add_rotation_noise(wrist_quat, rot_std, env.device, n)
 
     return wrist_pos, wrist_quat
@@ -772,6 +831,112 @@ def _set_object_pose_from_grasp(
     obj.write_root_state_to_sim(root_state, env_ids=env_ids)
 
 
+def _set_object_pose_from_hand_frame_grasp(
+    env,
+    env_ids: torch.Tensor,
+    object_pos_hand_list: list,
+    object_quat_hand_list: list,
+):
+    robot = env.scene["robot"]
+    obj = env.scene["object"]
+    palm_body_id = _get_palm_body_id_from_env(robot, env)
+
+    palm_pos_w = robot.data.body_pos_w[env_ids][:, palm_body_id, :].clone()
+    palm_quat_w = robot.data.body_quat_w[env_ids][:, palm_body_id, :].clone()
+    root_state = obj.data.default_root_state[env_ids].clone()
+    root_state[:, :3] += env.scene.env_origins[env_ids]
+
+    for i, (pos_hand, quat_hand) in enumerate(zip(object_pos_hand_list, object_quat_hand_list)):
+        if pos_hand is None or quat_hand is None:
+            continue
+
+        pos_hand_t = torch.tensor(pos_hand, device=env.device, dtype=torch.float32).unsqueeze(0)
+        quat_hand_t = torch.tensor(quat_hand, device=env.device, dtype=torch.float32).unsqueeze(0)
+        world_pos = _local_to_world_points(
+            pos_hand_t.unsqueeze(1),
+            palm_pos_w[i : i + 1],
+            palm_quat_w[i : i + 1],
+        ).squeeze(1)[0]
+        world_quat = _quat_multiply(palm_quat_w[i : i + 1], quat_hand_t)[0]
+        root_state[i, :3] = world_pos
+        root_state[i, 3:7] = world_quat / (torch.norm(world_quat) + 1e-8)
+
+    root_state[:, 7:] = 0.0
+    obj.write_root_state_to_sim(root_state, env_ids=env_ids)
+
+
+def _set_robot_root_pose_from_grasp_pose(
+    env,
+    env_ids: torch.Tensor,
+    object_pos_hand_list: list,
+    object_quat_hand_list: list,
+):
+    robot = env.scene["robot"]
+    obj = env.scene["object"]
+    palm_body_id = _get_palm_body_id_from_env(robot, env)
+
+    root_pos_w = robot.data.root_pos_w[env_ids].clone()
+    root_quat_w = robot.data.root_quat_w[env_ids].clone()
+    palm_pos_w = robot.data.body_pos_w[env_ids][:, palm_body_id, :].clone()
+    palm_quat_w = robot.data.body_quat_w[env_ids][:, palm_body_id, :].clone()
+
+    palm_pos_root = quat_apply_inverse(root_quat_w, palm_pos_w - root_pos_w)
+    palm_quat_root = _quat_multiply(_quat_conjugate(root_quat_w), palm_quat_w)
+    palm_quat_root = palm_quat_root / (torch.norm(palm_quat_root, dim=-1, keepdim=True) + 1e-8)
+
+    obj_pos_w = obj.data.root_pos_w[env_ids].clone()
+    obj_quat_w = obj.data.root_quat_w[env_ids].clone()
+    target_root_pos_w = root_pos_w.clone()
+    target_root_quat_w = root_quat_w.clone()
+
+    for i, (obj_pos_hand, obj_quat_hand) in enumerate(zip(object_pos_hand_list, object_quat_hand_list)):
+        if obj_pos_hand is None or obj_quat_hand is None:
+            continue
+
+        obj_pos_hand_t = torch.tensor(obj_pos_hand, device=env.device, dtype=torch.float32).unsqueeze(0)
+        obj_quat_hand_t = torch.tensor(obj_quat_hand, device=env.device, dtype=torch.float32).unsqueeze(0)
+        palm_quat_target = _quat_multiply(obj_quat_w[i : i + 1], _quat_conjugate(obj_quat_hand_t))
+        palm_quat_target = palm_quat_target / (torch.norm(palm_quat_target, dim=-1, keepdim=True) + 1e-8)
+        root_quat_target = _quat_multiply(palm_quat_target, _quat_conjugate(palm_quat_root[i : i + 1]))
+        root_quat_target = root_quat_target / (torch.norm(root_quat_target, dim=-1, keepdim=True) + 1e-8)
+
+        palm_offset_world = quat_apply(root_quat_target, palm_pos_root[i : i + 1])[0]
+        obj_offset_world = quat_apply(palm_quat_target, obj_pos_hand_t)[0]
+        target_root_pos_w[i] = obj_pos_w[i] - obj_offset_world - palm_offset_world
+        target_root_quat_w[i] = root_quat_target[0]
+
+    _set_robot_root_pose(env, env_ids, target_root_pos_w, target_root_quat_w)
+
+
+def _set_robot_root_pose_from_root_frame_grasp_pose(
+    env,
+    env_ids: torch.Tensor,
+    object_pos_hand_list: list,
+    object_quat_hand_list: list,
+):
+    robot = env.scene["robot"]
+    obj = env.scene["object"]
+
+    obj_pos_w = obj.data.root_pos_w[env_ids].clone()
+    obj_quat_w = obj.data.root_quat_w[env_ids].clone()
+    target_root_pos_w = robot.data.root_pos_w[env_ids].clone()
+    target_root_quat_w = robot.data.root_quat_w[env_ids].clone()
+
+    for i, (obj_pos_hand, obj_quat_hand) in enumerate(zip(object_pos_hand_list, object_quat_hand_list)):
+        if obj_pos_hand is None or obj_quat_hand is None:
+            continue
+
+        obj_pos_hand_t = torch.tensor(obj_pos_hand, device=env.device, dtype=torch.float32).unsqueeze(0)
+        obj_quat_hand_t = torch.tensor(obj_quat_hand, device=env.device, dtype=torch.float32).unsqueeze(0)
+        root_quat_target = _quat_multiply(obj_quat_w[i : i + 1], _quat_conjugate(obj_quat_hand_t))
+        root_quat_target = root_quat_target / (torch.norm(root_quat_target, dim=-1, keepdim=True) + 1e-8)
+        root_offset_world = quat_apply(root_quat_target, obj_pos_hand_t)[0]
+        target_root_pos_w[i] = obj_pos_w[i] - root_offset_world
+        target_root_quat_w[i] = root_quat_target[0]
+
+    _set_robot_root_pose(env, env_ids, target_root_pos_w, target_root_quat_w)
+
+
 def _align_wrist_palm_up(env, env_ids: torch.Tensor, wrist_quat: torch.Tensor) -> torch.Tensor:
     robot = env.scene["robot"]
     palm_normal_local = _get_local_palm_normal(robot, env).unsqueeze(0).expand(len(env_ids), 3)
@@ -800,6 +965,78 @@ def _get_local_palm_normal(robot, env) -> torch.Tensor:
         normal = normal / (torch.norm(normal) + 1e-8)
         _PALM_NORMAL_CACHE[key] = normal
     return _PALM_NORMAL_CACHE[key]
+
+
+def _get_palm_body_id_from_env(robot, env) -> int:
+    key = ("palm_body", id(robot))
+    cached = _FT_IDS_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    hand_cfg = getattr(env.cfg, "hand", None) or {}
+    if hand_cfg.get("name") == "shadow":
+        candidate_names = ["robot0_palm", "robot0:palm", "palm"]
+    else:
+        candidate_names = ["palm_link", "base_link", "palm"]
+
+    for name in candidate_names:
+        try:
+            body_ids = robot.find_bodies(name)[0]
+        except Exception:
+            continue
+        if len(body_ids) > 0:
+            _FT_IDS_CACHE[key] = int(body_ids[0])
+            return _FT_IDS_CACHE[key]
+
+    raise RuntimeError(
+        f"Could not resolve palm body for hand={hand_cfg.get('name', 'unknown')}; "
+        f"tried {candidate_names}"
+    )
+
+
+def _object_escape_mask(
+    env,
+    max_dist: float = 0.20,
+    max_lateral: float = 0.12,
+    max_front_offset: float = 0.16,
+    max_behind_offset: float = 0.015,
+    contact_force_thresh: float = 0.5,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    robot = env.scene["robot"]
+    obj = env.scene["object"]
+
+    palm_body_id = _get_palm_body_id_from_env(robot, env)
+    palm_pos_w = robot.data.body_pos_w[:, palm_body_id, :]
+    rel_obj_w = obj.data.root_pos_w - palm_pos_w
+    dist = torch.norm(rel_obj_w, dim=-1)
+
+    palm_normal_root = _get_local_palm_normal(robot, env).unsqueeze(0).expand(env.num_envs, 3)
+    palm_normal_world = quat_apply(robot.data.root_quat_w, palm_normal_root)
+    palm_normal_world = palm_normal_world / (torch.norm(palm_normal_world, dim=-1, keepdim=True) + 1e-8)
+
+    normal_offset = (rel_obj_w * palm_normal_world).sum(dim=-1)
+    lateral_vec = rel_obj_w - normal_offset.unsqueeze(-1) * palm_normal_world
+    lateral_offset = torch.norm(lateral_vec, dim=-1)
+
+    contact_forces = _get_fingertip_contact_forces_world(env)
+    has_contact = (torch.norm(contact_forces, dim=-1) > contact_force_thresh).any(dim=-1)
+
+    too_far = dist > max_dist
+    behind_palm = normal_offset < -max_behind_offset
+    too_front = normal_offset > max_front_offset
+    too_lateral = lateral_offset > max_lateral
+
+    escaped = behind_palm | too_front | too_lateral | (too_far & (~has_contact))
+    return escaped, {
+        "dist": dist,
+        "normal_offset": normal_offset,
+        "lateral_offset": lateral_offset,
+        "has_contact": has_contact,
+        "too_far": too_far,
+        "behind_palm": behind_palm,
+        "too_front": too_front,
+        "too_lateral": too_lateral,
+    }
 
 
 def _quat_from_two_vectors(v_from: torch.Tensor, v_to: torch.Tensor) -> torch.Tensor:
@@ -840,6 +1077,15 @@ def _place_object_in_hand(
     ft_ids = _get_fingertip_body_ids_from_env(robot, env)
     ft_world = robot.data.body_pos_w[env_ids][:, ft_ids, :].clone()  # (n, F, 3)
 
+    full_pos_w, full_quat_w = _solve_rigid_alignment(
+        points_src=fingertip_positions_obj,
+        points_dst=ft_world,
+    )
+    full_reconstructed_world = _local_to_world_points(
+        fingertip_positions_obj, full_pos_w, full_quat_w
+    )
+    full_solve_err = torch.norm(full_reconstructed_world - ft_world, dim=-1)
+
     pos_w, quat_w = _solve_object_pose_from_contacts(
         points_obj=fingertip_positions_obj,
         points_world=ft_world,
@@ -847,12 +1093,24 @@ def _place_object_in_hand(
     reconstructed_world = _local_to_world_points(fingertip_positions_obj, pos_w, quat_w)
     solve_err = torch.norm(reconstructed_world - ft_world, dim=-1)
 
+    pose_pos_delta = torch.norm(pos_w - full_pos_w, dim=-1)
+    pose_quat_dot = (quat_w * full_quat_w).sum(dim=-1).abs().clamp(0.0, 1.0)
+    pose_rot_delta = 2.0 * torch.arccos(pose_quat_dot)
+
     root_state = obj.data.default_root_state[env_ids].clone()
     root_state[:, :3] = pos_w
     root_state[:, 3:7] = quat_w
     root_state[:, 7:] = 0.0
     obj.write_root_state_to_sim(root_state, env_ids=env_ids)
-    return solve_err.mean(dim=-1), solve_err.max(dim=-1).values
+    placement_debug = {
+        "chosen_mean_err": solve_err.mean(dim=-1),
+        "chosen_max_err": solve_err.max(dim=-1).values,
+        "full_mean_err": full_solve_err.mean(dim=-1),
+        "full_max_err": full_solve_err.max(dim=-1).values,
+        "pose_pos_delta": pose_pos_delta,
+        "pose_rot_delta": pose_rot_delta,
+    }
+    return solve_err.mean(dim=-1), solve_err.max(dim=-1).values, placement_debug
 
 
 def _measure_grasp_contact_error(
@@ -870,65 +1128,6 @@ def _measure_grasp_contact_error(
     ft_obj = _world_to_local_points(ft_world, obj_pos, obj_quat)
     err = torch.norm(ft_obj - fingertip_positions_obj, dim=-1)
     return err.mean(dim=-1), err.max(dim=-1).values
-
-
-def _log_reset_debug(
-    env,
-    env_ids: torch.Tensor,
-    start_fps_obj: torch.Tensor,   # (n, F, 3)
-    sampled_obj_names: Optional[list[str]] = None,
-    solve_mean_err: Optional[torch.Tensor] = None,
-    solve_max_err: Optional[torch.Tensor] = None,
-):
-    """
-    Print high-signal reset diagnostics for the first few resets so we can see
-    whether the object is actually being placed into the sampled start grasp.
-    """
-    debug_cfg = getattr(env.cfg, "reset_debug", {}) or {}
-    if not bool(debug_cfg.get("enabled", True)):
-        return
-
-    limit = int(debug_cfg.get("max_prints", 8))
-    counter = int(env.extras.get("_reset_debug_counter", 0))
-    if counter >= limit:
-        return
-
-    robot = env.scene["robot"]
-    obj = env.scene["object"]
-    ft_ids = _get_fingertip_body_ids_from_env(robot, env)
-
-    ft_world = robot.data.body_pos_w[env_ids][:, ft_ids, :].clone()
-    obj_pos = obj.data.root_pos_w[env_ids].clone()
-    obj_quat = obj.data.root_quat_w[env_ids].clone()
-    ft_obj = _world_to_local_points(ft_world, obj_pos, obj_quat)
-
-    err = torch.norm(ft_obj - start_fps_obj, dim=-1)
-    mean_err = err.mean(dim=-1)
-    max_err = err.max(dim=-1).values
-
-    start_idx = env.extras.get("start_grasp_idx")
-    goal_idx = env.extras.get("goal_grasp_idx")
-
-    num_to_print = min(len(env_ids), max(limit - counter, 0))
-    for local_i in range(num_to_print):
-        env_i = int(env_ids[local_i].item())
-        start_i = int(start_idx[env_i].item()) if start_idx is not None else -1
-        goal_i = int(goal_idx[env_i].item()) if goal_idx is not None else -1
-        obj_name = sampled_obj_names[local_i] if sampled_obj_names is not None else "unknown"
-        pos = obj_pos[local_i].detach().cpu().tolist()
-        quat = obj_quat[local_i].detach().cpu().tolist()
-        print(
-            "[reset-debug] "
-            f"env={env_i} object={obj_name} start={start_i} goal={goal_i} "
-            f"obj_pos={[round(v, 4) for v in pos]} "
-            f"obj_quat={[round(v, 4) for v in quat]} "
-            f"solve_mean_err={(solve_mean_err[local_i].item() if solve_mean_err is not None else float('nan')):.5f} "
-            f"solve_max_err={(solve_max_err[local_i].item() if solve_max_err is not None else float('nan')):.5f} "
-            f"mean_contact_err={mean_err[local_i].item():.5f} "
-            f"max_contact_err={max_err[local_i].item():.5f}"
-        )
-
-    env.extras["_reset_debug_counter"] = counter + num_to_print
 
 
 def _refine_hand_to_start_grasp(
@@ -1003,7 +1202,6 @@ def _refine_hand_to_start_grasp(
         robot.write_joint_state_to_sim(joint_pos, torch.zeros_like(joint_pos), env_ids=env_ids)
         robot.set_joint_position_target(joint_pos, env_ids=env_ids)
 
-
 def _look_at_quat(direction: torch.Tensor) -> torch.Tensor:
     """Quaternion (w,x,y,z) that rotates +Z to point along `direction`."""
     N = direction.shape[0]
@@ -1065,6 +1263,60 @@ def _quat_conjugate(quat: torch.Tensor) -> torch.Tensor:
     return torch.cat([quat[..., :1], -quat[..., 1:]], dim=-1)
 
 
+def _clamp_translation(delta: torch.Tensor, max_norm: float) -> torch.Tensor:
+    if max_norm <= 0.0:
+        return delta
+    norm = torch.norm(delta, dim=-1, keepdim=True)
+    scale = torch.clamp(max_norm / (norm + 1e-8), max=1.0)
+    return delta * scale
+
+
+def _scaled_delta_quat(
+    quat: torch.Tensor,
+    gain: float,
+    max_angle: float,
+) -> torch.Tensor:
+    quat = quat / (torch.norm(quat, dim=-1, keepdim=True) + 1e-8)
+    quat = torch.where(quat[:, :1] < 0.0, -quat, quat)
+
+    half_angle = torch.acos(torch.clamp(quat[:, 0], -1.0, 1.0))
+    angle = 2.0 * half_angle
+    scaled_angle = torch.clamp(angle * gain, max=max_angle)
+
+    axis = quat[:, 1:].clone()
+    axis_norm = torch.norm(axis, dim=-1, keepdim=True)
+    valid = axis_norm.squeeze(-1) > 1e-6
+    if valid.any():
+        axis[valid] = axis[valid] / axis_norm[valid]
+    if (~valid).any():
+        axis[~valid] = torch.tensor([0.0, 0.0, 1.0], device=quat.device, dtype=quat.dtype)
+
+    half = 0.5 * scaled_angle
+    sin_half = torch.sin(half).unsqueeze(-1)
+    cos_half = torch.cos(half).unsqueeze(-1)
+    return torch.cat([cos_half, axis * sin_half], dim=-1)
+
+
+def _quat_slerp(q0: torch.Tensor, q1: torch.Tensor, alpha: torch.Tensor) -> torch.Tensor:
+    q0 = q0 / (torch.norm(q0, dim=-1, keepdim=True) + 1e-8)
+    q1 = q1 / (torch.norm(q1, dim=-1, keepdim=True) + 1e-8)
+
+    dot = (q0 * q1).sum(dim=-1, keepdim=True)
+    q1 = torch.where(dot < 0.0, -q1, q1)
+    dot = (q0 * q1).sum(dim=-1, keepdim=True).clamp(-1.0, 1.0)
+
+    alpha = alpha.unsqueeze(-1)
+    theta = torch.acos(dot)
+    sin_theta = torch.sin(theta)
+
+    small = sin_theta.abs() < 1e-6
+    w0 = torch.sin((1.0 - alpha) * theta) / (sin_theta + 1e-8)
+    w1 = torch.sin(alpha * theta) / (sin_theta + 1e-8)
+    out = w0 * q0 + w1 * q1
+    out = torch.where(small, (1.0 - alpha) * q0 + alpha * q1, out)
+    return out / (torch.norm(out, dim=-1, keepdim=True) + 1e-8)
+
+
 def _solve_object_pose_from_contacts(
     points_obj: torch.Tensor,    # (n, F, 3)
     points_world: torch.Tensor,  # (n, F, 3)
@@ -1073,44 +1325,57 @@ def _solve_object_pose_from_contacts(
     Solve the rigid transform that maps object-frame grasp contacts to the
     current fingertip world positions.
 
-    When the stored hand joint configuration does not exactly realize all
-    grasp contacts, a full 4-point least-squares fit can place the object in
-    a visually poor compromise. In that case, evaluate all 3-point rigid
-    alignment subsets and keep the transform that best matches the full set.
+    Evaluate both the full least-squares rigid fit and all 3-point subsets,
+    then keep the transform with the smallest worst-case fingertip error.
+    This is more stable than using only the 3-point subsets or only the full
+    fit when the stored joint state does not realize every contact exactly.
     """
     n, num_points, _ = points_obj.shape
     if num_points <= 3:
         pos, quat = _solve_rigid_alignment(points_obj, points_world)
         return pos, quat
 
-    candidate_subsets = list(combinations(range(num_points), 3))
-    best_pos = None
-    best_quat = None
-    best_score = torch.full((n,), float("inf"), device=points_obj.device)
+    def _candidate_error(pos: torch.Tensor, quat: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        reconstructed = _local_to_world_points(points_obj, pos, quat)
+        err = torch.norm(reconstructed - points_world, dim=-1)
+        return err.max(dim=-1).values, err.mean(dim=-1)
 
+    candidate_solutions: list[tuple[torch.Tensor, torch.Tensor]] = [
+        _solve_rigid_alignment(points_obj, points_world)
+    ]
+    candidate_subsets = list(combinations(range(num_points), 3))
     for subset in candidate_subsets:
         idx = torch.tensor(subset, device=points_obj.device, dtype=torch.long)
-        pos, quat = _solve_rigid_alignment(
-            points_obj.index_select(1, idx),
-            points_world.index_select(1, idx),
+        candidate_solutions.append(
+            _solve_rigid_alignment(
+                points_obj.index_select(1, idx),
+                points_world.index_select(1, idx),
+            )
         )
-        reconstructed = _local_to_world_points(points_obj, pos, quat)
-        score = torch.norm(reconstructed - points_world, dim=-1).mean(dim=-1)
 
+    best_pos = None
+    best_quat = None
+    best_max_err = torch.full((n,), float("inf"), device=points_obj.device)
+    best_mean_err = torch.full((n,), float("inf"), device=points_obj.device)
+
+    for pos, quat in candidate_solutions:
+        max_err, mean_err = _candidate_error(pos, quat)
         if best_pos is None:
             best_pos = pos
             best_quat = quat
-            best_score = score
+            best_max_err = max_err
+            best_mean_err = mean_err
             continue
 
-        improved = score < best_score
-        best_score = torch.where(improved, score, best_score)
+        improved = (max_err < best_max_err - 1e-6) | (
+            torch.isclose(max_err, best_max_err, atol=1e-6) & (mean_err < best_mean_err)
+        )
+        best_max_err = torch.where(improved, max_err, best_max_err)
+        best_mean_err = torch.where(improved, mean_err, best_mean_err)
         best_pos = torch.where(improved.unsqueeze(-1), pos, best_pos)
         best_quat = torch.where(improved.unsqueeze(-1), quat, best_quat)
 
-    pos = best_pos
-    quat = best_quat
-    return pos, quat
+    return best_pos, best_quat
 
 
 def _solve_rigid_alignment(
@@ -1319,29 +1584,20 @@ def _get_fingertip_body_ids_from_env(robot, env) -> list[int]:
 
 def _load_grasp_graph(env):
     """Load and cache the MultiObjectGraspGraph (or GraspGraph) from cfg."""
-    path = getattr(env.cfg, "grasp_graph_path", None)
-    if path is None:
+    graph_paths = parse_graph_paths(getattr(env.cfg, "grasp_graph_path", None))
+    if not graph_paths:
         return None
-    if path in _GRASP_GRAPH_CACHE:
-        return _GRASP_GRAPH_CACHE[path]
+    cache_key = tuple(graph_paths)
+    if cache_key in _GRASP_GRAPH_CACHE:
+        return _GRASP_GRAPH_CACHE[cache_key]
 
-    p = Path(path)
-    if not p.exists():
-        print(f"[events] Warning: GraspGraph not found at {p}. "
-              f"Run scripts/run_grasp_generation.py first.")
-        return None
+    for graph_path in graph_paths:
+        if not Path(graph_path).exists():
+            print(f"[events] Warning: GraspGraph not found at {graph_path}. "
+                  f"Run scripts/run_grasp_generation.py first.")
+            return None
 
-    with open(p, "rb") as f:
-        graph = pickle.load(f)
-
-    from grasp_generation.rrt_expansion import GraspGraph, MultiObjectGraspGraph
-    if isinstance(graph, GraspGraph):
-        multi = MultiObjectGraspGraph()
-        multi.add(graph, {"name": graph.object_name, "shape_type": "cube",
-                          "size": 0.06, "mass": 0.1, "color": (0.8, 0.2, 0.2)})
-        graph = multi
-        print(f"[events] Wrapped single GraspGraph into MultiObjectGraspGraph")
-
-    _GRASP_GRAPH_CACHE[str(path)] = graph
+    graph = load_merged_graph(graph_paths)
+    _GRASP_GRAPH_CACHE[cache_key] = graph
     graph.summary()
     return graph

@@ -398,7 +398,7 @@ if _ISAACLAB_AVAILABLE:
         object_left_hand = RewTerm(
             func=mdp_rewards.object_left_hand_penalty,
             weight=-100.0,
-            params={"max_dist": 0.25},
+            params={"max_dist": 0.20},
         )
         joint_limit = RewTerm(
             func=mdp_rewards.joint_limit_penalty,
@@ -420,7 +420,7 @@ if _ISAACLAB_AVAILABLE:
     class AnyGraspTerminationsCfg:
         time_out = DoneTerm(func=mdp_events.time_out, time_out=True)
         object_drop = DoneTerm(func=mdp_events.object_dropped, params={"min_height": 0.2})
-        object_left_hand = DoneTerm(func=mdp_events.object_left_hand, params={"max_dist": 0.25})
+        object_left_hand = DoneTerm(func=mdp_events.object_left_hand, params={"max_dist": 0.20})
 
     @configclass
     class AnyGraspEventsCfg:
