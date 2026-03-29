@@ -546,8 +546,33 @@ class _IsaacLabVecEnv:
 
         info = dict(info) if isinstance(info, dict) else {}
         info["success_ratio"] = float(mdp_rewards.grasp_success_reward(self.env).mean().item())
-        info["drop_ratio"] = float(mdp_events.object_dropped(self.env).float().mean().item())
-        info["left_hand_ratio"] = float(mdp_events.object_left_hand(self.env).float().mean().item())
+
+        # drop_ratio / left_hand_ratio: CANNOT use object_dropped() / object_left_hand()
+        # after env.step() because Isaac Lab resets terminated envs INSIDE step().
+        # By the time step() returns, dropped envs are already at z=0.4 → always 0.
+        #
+        # Instead use the termination manager's per-term dones which are computed
+        # during the step and cached until the next step() call.
+        # Fallback: use (terminated & ~truncated) as a combined proxy.
+        try:
+            tm = self.env.termination_manager
+            # Isaac Lab stores per-term done tensors; try the public API first.
+            if hasattr(tm, "get_term"):
+                drop_done  = tm.get_term("object_drop").float()
+                lhand_done = tm.get_term("object_left_hand").float()
+            else:
+                # Internal attribute fallback (ManagerBasedEnv v1/v2 private dict)
+                _td = tm._term_dones
+                drop_done  = _td.get("object_drop",  terminated & ~truncated).float()
+                lhand_done = _td.get("object_left_hand", torch.zeros_like(terminated, dtype=torch.float)).float()
+            info["drop_ratio"]      = float(drop_done.mean().item())
+            info["left_hand_ratio"] = float(lhand_done.mean().item())
+        except Exception:
+            # Safe fallback: non-timeout terminations = drop OR left_hand combined
+            non_timeout = (terminated & ~truncated).float()
+            info["drop_ratio"]      = float(non_timeout.mean().item())
+            info["left_hand_ratio"] = 0.0
+
         info["rolling_goal_updates"] = n_updated
         return _to_rl_obs(obs), rew, done, info
 
