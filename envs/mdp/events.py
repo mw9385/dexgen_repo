@@ -142,6 +142,37 @@ def reset_to_random_grasp(
         np.stack(goal_fps_list), device=env.device, dtype=torch.float32
     )   # (n, num_fingers, 3)
 
+    # ── One-time diagnostics (printed on first reset call) ──────────────────
+    if not getattr(env, "_grasp_diag_logged", False):
+        env._grasp_diag_logged = True
+        has_goal_pos   = sum(1 for p in goal_object_pos_hand_list  if p is not None)
+        has_goal_quat  = sum(1 for q in goal_object_quat_hand_list if q is not None)
+        has_goal_joints= sum(1 for j in goal_joints_list           if j is not None)
+        has_start_joints=sum(1 for j in start_joints_list          if j is not None)
+        fp_dists = [
+            float(np.linalg.norm(np.array(g) - np.array(s)))
+            for g, s in zip(goal_fps_list, start_fps_list)
+        ]
+        jt_dists = []
+        for gj, sj in zip(goal_joints_list, start_joints_list):
+            if gj is not None and sj is not None:
+                jt_dists.append(float(np.linalg.norm(np.array(gj) - np.array(sj))))
+        print("[DIAG] ── Grasp data availability (first reset batch) ──────────────")
+        print(f"[DIAG]   goal object_pos_hand set:   {has_goal_pos}/{n}")
+        print(f"[DIAG]   goal object_quat_hand set:  {has_goal_quat}/{n}")
+        print(f"[DIAG]   goal joint_angles set:      {has_goal_joints}/{n}")
+        print(f"[DIAG]   start joint_angles set:     {has_start_joints}/{n}")
+        if fp_dists:
+            print(f"[DIAG]   start→goal fingertip dist:  mean={np.mean(fp_dists):.4f}m  "
+                  f"min={np.min(fp_dists):.4f}m  max={np.max(fp_dists):.4f}m")
+        if jt_dists:
+            print(f"[DIAG]   start→goal joint dist (L2): mean={np.mean(jt_dists):.4f}rad "
+                  f"min={np.min(jt_dists):.4f}rad  max={np.max(jt_dists):.4f}rad")
+        else:
+            print("[DIAG]   start→goal joint dist: N/A (no joint_angles in grasps)")
+        print("[DIAG] ──────────────────────────────────────────────────────────────")
+    # ────────────────────────────────────────────────────────────────────────
+
     fp_dim = env_num_fingers * 3
 
     # Store goal fingertip positions (object frame)
@@ -573,25 +604,20 @@ def update_rolling_goal(env, success_threshold: float = 0.02) -> int:
                 num_dof,
             )
 
-        # Update target_object_pos/quat_hand to the CURRENT sim state so
-        # object_pose_goal_reward uses the fresh reference (object is still
-        # at its current position; new goal is purely finger-configuration).
-        if "target_object_pos_hand" in env.extras:
-            from isaaclab.utils.math import quat_apply_inverse
-            robot = env.scene["robot"]
-            obj   = env.scene["object"]
-            rp_w  = robot.data.root_pos_w[env_id]   # (3,)
-            rq_w  = robot.data.root_quat_w[env_id]  # (4,)
-            op_w  = obj.data.root_pos_w[env_id]     # (3,)
-            oq_w  = obj.data.root_quat_w[env_id]    # (4,)
-            rel   = (op_w - rp_w).unsqueeze(0)
-            new_obj_pos_hand = quat_apply_inverse(rq_w.unsqueeze(0), rel)[0]
-            env.extras["target_object_pos_hand"][env_id] = new_obj_pos_hand
-            if "target_object_quat_hand" in env.extras:
-                new_obj_quat_hand = _quat_multiply(
-                    _quat_conjugate(rq_w.unsqueeze(0)), oq_w.unsqueeze(0)
-                )[0]
-                env.extras["target_object_quat_hand"][env_id] = new_obj_quat_hand
+        # Update target_object_pos/quat_hand only when the new goal grasp has a
+        # stored object pose. If none is stored, keep the existing value (which
+        # came from reset via the grasp graph). Overwriting with current sim
+        # state would make object_pose_goal_reward always 1.0 (goal = current).
+        new_goal_obj_pos  = getattr(new_goal_grasp, "object_pos_hand",  None)
+        new_goal_obj_quat = getattr(new_goal_grasp, "object_quat_hand", None)
+        if new_goal_obj_pos is not None and "target_object_pos_hand" in env.extras:
+            env.extras["target_object_pos_hand"][env_id] = torch.tensor(
+                new_goal_obj_pos, device=env.device, dtype=torch.float32
+            )
+        if new_goal_obj_quat is not None and "target_object_quat_hand" in env.extras:
+            env.extras["target_object_quat_hand"][env_id] = torch.tensor(
+                new_goal_obj_quat, device=env.device, dtype=torch.float32
+            )
 
         # Update indices: old goal becomes new start
         env.extras["goal_grasp_idx"][env_id]  = new_goal_idx
@@ -620,11 +646,17 @@ def _grasp_state_distance(grasp_a, grasp_b) -> float:
         quat_a = np.asarray(grasp_a.object_quat_hand, dtype=np.float32)
         quat_b = np.asarray(grasp_b.object_quat_hand, dtype=np.float32)
 
-        joint_dist = float(np.linalg.norm(q_a - q_b) / max(len(q_a), 1))
-        pos_dist = float(np.linalg.norm(pos_a - pos_b))
-        quat_dot = float(np.clip(abs(np.dot(quat_a, quat_b)), 0.0, 1.0))
-        rot_dist = float(2.0 * np.arccos(quat_dot))
-        return pos_dist + 0.05 * rot_dist + 0.02 * joint_dist
+        # Normalise joint distance by sqrt(N) so it's comparable regardless of DOF count.
+        # Previous weights (pos + 0.05*rot + 0.02*joint) made joint contribution
+        # negligible (0.02 × 0.1 rad/joint ≈ 0.002) vs pos_dist (~0.01 m),
+        # causing kNN to select grasps with nearly identical joint configs.
+        # New weights give joint distance equal weight to position distance.
+        joint_dist = float(np.linalg.norm(q_a - q_b) / max(len(q_a) ** 0.5, 1.0))
+        pos_dist   = float(np.linalg.norm(pos_a - pos_b))
+        quat_dot   = float(np.clip(abs(np.dot(quat_a, quat_b)), 0.0, 1.0))
+        rot_dist   = float(2.0 * np.arccos(quat_dot))
+        # joint_dist is per-sqrt(N) normalised, so 0.5 rad/√24 ≈ 0.1 (similar scale to pos 0.1 m)
+        return pos_dist + 0.05 * rot_dist + joint_dist
 
     fps_a = np.asarray(grasp_a.fingertip_positions, dtype=np.float32).reshape(-1)
     fps_b = np.asarray(grasp_b.fingertip_positions, dtype=np.float32).reshape(-1)
@@ -1307,10 +1339,14 @@ def _refine_hand_to_start_grasp(
     target_obj_state = obj.data.root_state_w[env_ids].clone()
 
     for _ in range(iterations):
+        # ── Kinematics-only update: do NOT call env.sim.step() here ──────────
+        # env.sim.step() advances ALL envs simultaneously, not just env_ids.
+        # Using dt=0.0 updates only the kinematic state (body transforms, FK)
+        # without running physics dynamics on non-reset envs.
         robot.write_data_to_sim()
-        env.sim.step(render=False)
-        robot.update(sim_dt)
-        obj.update(sim_dt)
+        robot.update(0.0)
+        obj.update(0.0)
+        # ─────────────────────────────────────────────────────────────────────
 
         # Keep the object fixed at the intended reset pose during refinement.
         obj.write_root_state_to_sim(target_obj_state, env_ids=env_ids)
