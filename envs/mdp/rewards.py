@@ -132,55 +132,59 @@ def object_pose_goal_reward(
     return torch.exp(-alpha_pos * d_pos)
 
 
-def finger_joint_goal_reward(env, alpha_hand: float = 0.1) -> torch.Tensor:
+def finger_joint_goal_reward(env, alpha_hand: float = 2.0) -> torch.Tensor:
     """
-    DexterityGen paper eq.(5): negative linear joint distance penalty.
+    Positive exponential reward for joint-space proximity to the goal grasp.
 
-        -alpha_hand * ||q - q*||_2
+        exp(-alpha_hand * ||q - q*||_2 / sqrt(num_dof))
 
-    Raw joint angles (rad) are used directly (not normalised), matching the
-    paper formulation. The weight in AnyGraspRewardsCfg is set to 1.0 and
-    alpha_hand tunes the per-step magnitude.
+    Normalised by sqrt(num_dof) so the effective distance is per-DOF
+    independent of the number of joints (Shadow Hand: 24 DOF).
 
-    Typical ranges (Shadow Hand, 24 DOF, errors in rad):
-      ||q - q*|| ~ 0.0  (at goal)  → 0.0
-      ||q - q*|| ~ 0.5             → -0.05
-      ||q - q*|| ~ 2.0  (far)      → -0.20
+    Typical ranges (Shadow Hand, 24 DOF):
+      ||q - q*|| ~ 0.0  → exp(0)      = 1.0   (at perfect goal)
+      ||q - q*|| ~ 1.0  → exp(-0.41)  = 0.67  (~0.2 rad/joint avg)
+      ||q - q*|| ~ 3.0  → exp(-1.22)  = 0.29  (~0.6 rad/joint avg, far)
 
-    Returns: (N,) <= 0
+    We deviate slightly from the paper's negative-linear formulation to get
+    a positive shaping signal that makes it profitable to move toward goal.
+    The negative-linear form makes "staying still" preferable to taking risks.
+
+    Returns: (N,) in (0, 1]
     """
     goal_joints = env.extras.get("target_joint_angles")
     if goal_joints is None:
         return torch.zeros(env.num_envs, device=env.device)
 
-    robot = env.scene["robot"]
-    q     = robot.data.joint_pos     # (N, num_dof)
-    dq    = torch.norm(q - goal_joints, dim=-1)   # (N,)
-    return -alpha_hand * dq
+    robot    = env.scene["robot"]
+    q        = robot.data.joint_pos     # (N, num_dof)
+    num_dof  = q.shape[-1]
+    dq_norm  = torch.norm(q - goal_joints, dim=-1) / (num_dof ** 0.5)  # (N,)
+    return torch.exp(-alpha_hand * dq_norm)
 
 
-def fingertip_tracking_reward(env, eps: float = 0.05) -> torch.Tensor:
+def fingertip_tracking_reward(env, alpha: float = 20.0) -> torch.Tensor:
     """
-    Inverse-distance reward per fingertip, averaged over fingers.
+    Exponential fingertip-tracking reward, averaged over fingertips.
 
-    reward = mean_i  1 / (||tip_i - goal_i|| + eps)
+        reward = mean_i  exp(-alpha * ||tip_i - goal_i||)
 
-    Replaces exp(-alpha*dist) which saturates near goal (reward→1, gradient→0).
-    The inverse form gives unbounded reward as each tip approaches its goal
-    and provides strong gradient throughout the entire range.
+    Output ∈ (0, 1] per finger. Rises smoothly toward 1.0 as each fingertip
+    approaches its goal position (stored in env.extras["target_fingertip_pos"]
+    from the grasp graph, in object frame).
 
-    With eps=0.05m (5 cm):
-      dist=0.00m (goal)  → 1/0.05  = 20.0  per finger
-      dist=0.05m (5 cm)  → 1/0.10  = 10.0  per finger (half-max)
-      dist=0.15m (15 cm) → 1/0.20  =  5.0  per finger
+    With alpha=20.0:
+      dist=0.00m (at goal) → exp(0)    = 1.00
+      dist=0.05m (5 cm)    → exp(-1.0) = 0.37
+      dist=0.10m (10 cm)   → exp(-2.0) = 0.14
 
-    Returns: (N,)
+    Returns: (N,) in (0, 1]
     """
     nf = _get_num_fingers(env)
     current = fingertip_positions_in_object_frame(env).reshape(-1, nf, 3)
     target  = target_fingertip_positions(env).reshape(-1, nf, 3)
-    dist    = torch.norm(current - target, dim=-1)         # (N, F)
-    return (1.0 / (dist + eps)).mean(dim=-1)               # (N,)
+    dist    = torch.norm(current - target, dim=-1)              # (N, F)
+    return torch.exp(-alpha * dist).mean(dim=-1)                # (N,)
 
 
 def grasp_success_reward(env, threshold: float = 0.01) -> torch.Tensor:

@@ -13,23 +13,22 @@ env:
   decimation: 4                  # control at 30 Hz (120 Hz sim / 4)
 
   rewards:
-    # DexterityGen paper §3.2 eq.(5) goal reward:
-    #   r_goal = exp(-alpha_pos*||p-p*|| - alpha_orn*d(R,R*))
-    #          - alpha_hand * ||q - q*||
-    #          + alpha_bonus * 1(goal achieved)
-    object_pose:        10.0    # exp(-5*d_pos - 2*d_rot) ∈ (0,1]; max +10.0/step; alpha ↓ for wider gradient basin
-    finger_joint_goal:  1.0     # -alpha_hand(0.3)*||q-q*||; stronger gradient toward goal joints
-    grasp_success:      250.0   # alpha_bonus: sparse "aha" signal
+    # Goal rewards — three positive dense signals + sparse bonus
+    # Each is ∈(0,1] so weight directly sets max per-step contribution.
+    object_pose:        5.0     # exp(-5*d_pos - 2*d_rot); object pose error in hand frame
+    finger_joint_goal:  8.0     # exp(-2*||dq||/sqrt(24)); joint proximity to goal grasp
+    fingertip_tracking: 8.0     # exp(-20*||tip-goal||) averaged over fingers
+    grasp_success:      250.0   # sparse bonus when all tips within 2cm
     # Contact / style
     fingertip_contact:   2.0    # fraction of tips in contact [0,1]
-    fingertip_velocity: -0.1    # mean(||v_tip||^2) over fingers (style penalty)
+    fingertip_velocity: -0.1    # mean(||v_tip||^2): style penalty
     # Regularization
     action_scale:       -0.001  # ||a||^2 action magnitude
-    torque:             -0.05   # mean(tau_i^2) — normalized by DOF count
-    mechanical_work:    -0.02   # mean(|tau_i * qdot_i|) — normalized by DOF count
+    torque:             -0.05   # mean(tau_i^2) normalized by DOF count
+    mechanical_work:    -0.02   # mean(|tau_i*qdot_i|) normalized by DOF count
     action_rate:        -0.01   # jerk penalty ||a_t - a_{t-1}||
-    # Safety
-    object_velocity:    -0.5    # penalise spinning/flinging object
+    # Safety (softened: object_velocity was dominating → swamped goal reward)
+    object_velocity:    -0.1    # softer fling penalty; lin_thresh=0.2m/s ang_thresh=2.0rad/s
     object_drop:       -100.0   # drop penalty (also terminates episode)
     object_left_hand:   -50.0   # escape penalty
     joint_limit:        -0.1    # soft limit penalty
