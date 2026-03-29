@@ -20,12 +20,20 @@ Stage 3  DexGen Controller      →  logs/dexgen/
 ./setup_isaaclab.sh
 ./docker/run.sh up && ./docker/run.sh exec
 
-# 2. Generate grasps (Stage 0)
-/workspace/IsaacLab/isaaclab.sh -p scripts/run_grasp_generation.py --headless
+# 2. Generate refined grasps per object (Stage 0)
+/workspace/IsaacLab/isaaclab.sh -p scripts/run_grasp_generation.py \
+    --headless --shapes cube --num_sizes 1 --isaac_refine --output_dir data/cube_graph
+/workspace/IsaacLab/isaaclab.sh -p scripts/run_grasp_generation.py \
+    --headless --shapes sphere --num_sizes 1 --isaac_refine --output_dir data/sphere_graph
+/workspace/IsaacLab/isaaclab.sh -p scripts/run_grasp_generation.py \
+    --headless --shapes cylinder --num_sizes 1 --isaac_refine --output_dir data/cylinder_graph
 
 # 3. Train RL policy (Stage 1)
 /workspace/IsaacLab/isaaclab.sh -p scripts/train_rl.py \
-    --grasp_graph data/grasp_graph.pkl --num_envs 512 --headless
+    --grasp_graph data/cube_graph/grasp_graph.pkl \
+    --grasp_graph data/sphere_graph/grasp_graph.pkl \
+    --grasp_graph data/cylinder_graph/grasp_graph.pkl \
+    --num_envs 512 --headless
 ```
 
 ## Requirements
@@ -67,6 +75,8 @@ Generates a grasp graph by sampling force-closure grasps on primitive objects, t
 
 **Pipeline:** Sample heuristic seeds → NFO quality filter → RRT expansion → IK joint seeding → Isaac Lab refinement → Save graph
 
+For training-quality graphs, Isaac refinement should be treated as the default path. Running without `--isaac_refine` is mainly useful for quick debug runs.
+
 **Options:**
 
 | Flag | Default | Description |
@@ -81,11 +91,9 @@ Generates a grasp graph by sampling force-closure grasps on primitive objects, t
 | `--finger_counts` | unset | Explicit list, e.g. `2,3,5` |
 | `--generation_preset` | default | `high_precision` enables larger candidate sets and Isaac refinement defaults |
 | `--fast_nfo` | off | Fast SVD approximation |
-| `--refine_iterations` | 8 | Sim refinement steps |
-
 **Output:** `data/grasp_graph.pkl` — each grasp stores `(joint_angles, object_pos_hand, object_quat_hand, fingertip_positions, quality)`.
 
-**Smoke test:**
+**Debug run:**
 
 ```bash
 /workspace/IsaacLab/isaaclab.sh -p scripts/run_grasp_generation.py \
@@ -103,58 +111,59 @@ This preset currently defaults to `num_seed_grasps=2000`, `num_grasps=1000`,
 `min_quality=0.01`, `fast_nfo=False`, `isaac_refine=True`,
 and `isaac_refine_batch_envs=32`.
 
-**Recommended refinement workflow:**
+**Recommended training workflow:**
 
-- For small graphs, `--isaac_refine` inside `run_grasp_generation.py` is fine.
-- For larger multi-object runs, Isaac refinement is more stable when done per object rather than in one long Stage-0 process.
-- In practice, generate the raw graph first, then refine `cube`, `sphere`, and `cylinder` separately, and train RL by passing multiple `--grasp_graph` files.
+- Treat `--isaac_refine` as the default for graphs that will be used for RL training.
+- For larger multi-object runs, Isaac refinement is more stable when each object is generated in a separate Stage-0 run.
+- In practice, run Stage 0 separately for `cube`, `sphere`, and `cylinder`, each with `--isaac_refine`, then train RL by passing multiple `--grasp_graph` files in a single training command.
 
 Example end-to-end workflow:
 
 ```bash
 cd /workspace/dexgen
 
-# 1. Generate a raw multi-object graph
+# 1. Generate one refined graph per object
 /workspace/IsaacLab/isaaclab.sh -p scripts/run_grasp_generation.py \
     --headless \
-    --shapes cube sphere cylinder \
+    --shapes cube \
     --size_min 0.06 --size_max 0.06 --num_sizes 1 \
     --num_fingers 5 \
     --num_seed_grasps 400 \
     --num_grasps 80 \
     --min_quality 0.005 \
-    --output_dir data/random_obj_f5_small_v1
+    --isaac_refine \
+    --output_dir data/cube_graph
 
-# 2. Refine each object graph separately
-/workspace/IsaacLab/isaaclab.sh -p scripts/refine_grasp_graph.py \
+/workspace/IsaacLab/isaaclab.sh -p scripts/run_grasp_generation.py \
     --headless \
-    --input data/random_obj_f5_small_v1/grasp_graph.pkl \
-    --output data/cube_small_refined_v1/grasp_graph.pkl \
-    --objects cube_060_f5 \
-    --batch_envs 8
+    --shapes sphere \
+    --size_min 0.06 --size_max 0.06 --num_sizes 1 \
+    --num_fingers 5 \
+    --num_seed_grasps 400 \
+    --num_grasps 80 \
+    --min_quality 0.005 \
+    --isaac_refine \
+    --output_dir data/sphere_graph
 
-/workspace/IsaacLab/isaaclab.sh -p scripts/refine_grasp_graph.py \
+/workspace/IsaacLab/isaaclab.sh -p scripts/run_grasp_generation.py \
     --headless \
-    --input data/random_obj_f5_small_v1/grasp_graph.pkl \
-    --output data/sphere_small_refined_v1/grasp_graph.pkl \
-    --objects sphere_060_f5 \
-    --batch_envs 8
-
-/workspace/IsaacLab/isaaclab.sh -p scripts/refine_grasp_graph.py \
-    --headless \
-    --input data/random_obj_f5_small_v1/grasp_graph.pkl \
-    --output data/cylinder_small_refined_v1/grasp_graph.pkl \
-    --objects cylinder_060_f5 \
-    --batch_envs 8
+    --shapes cylinder \
+    --size_min 0.06 --size_max 0.06 --num_sizes 1 \
+    --num_fingers 5 \
+    --num_seed_grasps 400 \
+    --num_grasps 80 \
+    --min_quality 0.005 \
+    --isaac_refine \
+    --output_dir data/cylinder_graph
 ```
 
 Example training command with per-object refined graphs:
 
 ```bash
 /workspace/IsaacLab/isaaclab.sh -p scripts/train_rl.py \
-    --grasp_graph data/cube_small_refined_v1/grasp_graph.pkl \
-    --grasp_graph data/sphere_small_refined_v1/grasp_graph.pkl \
-    --grasp_graph data/cylinder_small_refined_v1/grasp_graph.pkl \
+    --grasp_graph data/cube_graph/grasp_graph.pkl \
+    --grasp_graph data/sphere_graph/grasp_graph.pkl \
+    --grasp_graph data/cylinder_graph/grasp_graph.pkl \
     --num_envs 16 --headless
 ```
 
@@ -164,26 +173,29 @@ Trains an AnyGrasp-to-AnyGrasp transition policy using asymmetric actor-critic P
 
 ```bash
 /workspace/IsaacLab/isaaclab.sh -p scripts/train_rl.py \
-    --grasp_graph data/grasp_graph.pkl --num_envs 512 --headless
+    --grasp_graph data/cube_graph/grasp_graph.pkl \
+    --grasp_graph data/sphere_graph/grasp_graph.pkl \
+    --grasp_graph data/cylinder_graph/grasp_graph.pkl \
+    --num_envs 512 --headless
 ```
 
 ### How It Works
 
 1. **Reset:** Sample a start grasp from the graph, reconstruct `(joint positions, object pose)` directly in the simulator
 2. **Goal:** Nearest-neighbor grasp in fingertip space becomes the target
-3. **Policy:** Actor sees 76-dim obs → outputs normalized `[-1, 1]` joint targets
+3. **Policy:** Actor sees 107-dim obs → outputs normalized `[-1, 1]` joint targets
 4. **Reward:** Dense fingertip tracking + sparse grasp success bonus
 
 ### Architecture
 
 | | Input | Network | Output |
 |-|-------|---------|--------|
-| Actor | 76-dim policy obs | [512, 512, 256, 128] ELU | 16-dim actions |
-| Critic | 104-dim privileged obs | [512, 512, 256] ELU | value |
+| Actor | 107-dim policy obs | [512, 512, 256, 128] ELU | 24-dim actions |
+| Critic | 138-dim privileged obs | [512, 512, 256] ELU | value |
 
-**Policy observations (76):** joint pos (16) + joint vel (16) + fingertip pos in object frame (12) + target fingertip pos (12) + contact binary (4) + last action (16)
+**Policy observations (107):** joint pos (24) + joint vel (24) + fingertip pos (15) + target fingertip pos (15) + contact binary (5) + last action (24)
 
-**Critic adds (28):** object world pose (7) + object velocity (6) + fingertip forces (12) + DR params (3)
+**Critic adds (31):** object world pose (7) + object velocity (6) + fingertip forces (15) + DR params (3)
 
 ### Key Hyperparameters
 
@@ -232,7 +244,10 @@ See `configs/rl_training.yaml` for the full config.
 ```bash
 /workspace/IsaacLab/isaaclab.sh -p scripts/train_rl.py \
     --resume logs/rl/allegro_anygrasp_v2/checkpoints/model_10000.pt \
-    --grasp_graph data/grasp_graph.pkl --num_envs 512 --headless
+    --grasp_graph data/cube_graph/grasp_graph.pkl \
+    --grasp_graph data/sphere_graph/grasp_graph.pkl \
+    --grasp_graph data/cylinder_graph/grasp_graph.pkl \
+    --num_envs 512 --headless
 ```
 
 ## Stage 2: Dataset Collection
@@ -269,7 +284,7 @@ dexgen_repo/
 ├── envs/
 │   ├── anygrasp_env.py            # ManagerBasedRLEnvCfg (scene, obs, actions, rewards)
 │   └── mdp/
-│       ├── observations.py        # Actor (76d) + Critic (104d) obs functions
+│       ├── observations.py        # Actor (107d) + Critic (138d) obs functions
 │       ├── rewards.py             # 8 reward terms
 │       ├── events.py              # Reset logic (grasp → NN goal), terminations
 │       └── domain_rand.py         # Physics/action/noise randomization
@@ -305,7 +320,7 @@ All pipeline commands run inside the container at `/workspace/dexgen`.
 
 ## Troubleshooting
 
-**`GraspGraph not found`** — Run Stage 0 first.
+**`GraspGraph not found`** — Run Stage 0 first and pass the generated `grasp_graph.pkl` path(s) to Stage 1.
 
 **GUI not appearing** — Check `echo $DISPLAY` and `echo $XAUTHORITY` on host, then `./docker/run.sh down && ./docker/run.sh up`.
 
