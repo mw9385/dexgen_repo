@@ -22,7 +22,7 @@ Shadow Hand E-Series: 5 fingers, 22 actuated DOF + 2 wrist DOF in Isaac = 24 tot
   joint_pos_normalized       24   (encoder, normalised)
   joint_vel_normalized       24   (encoder derivative)
   fingertip_pos_obj_frame    15   (FK in object-centric frame, 5×3)
-  target_fingertip_pos       15   (goal from GraspGraph, 5×3)
+  rel_fingertip_to_goal      15   (goal−current in obj frame, 5×3)
   fingertip_contact_binary    5   (tactile: binary contact per tip)
   last_action                24   (previous joint targets)
   ─────────────────────────────────────────────────────────────────
@@ -30,7 +30,7 @@ Shadow Hand E-Series: 5 fingers, 22 actuated DOF + 2 wrist DOF in Isaac = 24 tot
 
   CRITIC (privileged) — 138 dims
   ─────────────────────────────────────────────────────────────────
-  [actor obs]               107
+  [actor obs]               107   (incl. rel_fingertip_to_goal)
   object_pos_world            3   (true 3-D position)
   object_quat_world           4   (true orientation)
   object_lin_vel              3   (true linear velocity)
@@ -273,9 +273,11 @@ if _ISAACLAB_AVAILABLE:
                 func=mdp_obs.fingertip_positions_in_object_frame,
                 noise=GaussianNoise(std=0.003),
             )
-            target_fingertip_pos = ObsTerm(func=mdp_obs.target_fingertip_positions)
-            fingertip_contact    = ObsTerm(func=mdp_obs.fingertip_contact_binary)
-            last_action          = ObsTerm(func=mdp_obs.last_action)
+            # Paper §3.2: goal encoded as relative transformation (goal - current)
+            # in object frame, so policy directly sees the remaining error vector.
+            rel_fingertip_to_goal = ObsTerm(func=mdp_obs.relative_fingertip_to_goal)
+            fingertip_contact     = ObsTerm(func=mdp_obs.fingertip_contact_binary)
+            last_action           = ObsTerm(func=mdp_obs.last_action)
 
             def __post_init__(self):
                 self.enable_corruption  = True
@@ -295,9 +297,9 @@ if _ISAACLAB_AVAILABLE:
                 func=mdp_obs.fingertip_positions_in_object_frame,
                 noise=GaussianNoise(std=0.003),
             )
-            target_fingertip_pos = ObsTerm(func=mdp_obs.target_fingertip_positions)
-            fingertip_contact    = ObsTerm(func=mdp_obs.fingertip_contact_binary)
-            last_action          = ObsTerm(func=mdp_obs.last_action)
+            rel_fingertip_to_goal = ObsTerm(func=mdp_obs.relative_fingertip_to_goal)
+            fingertip_contact     = ObsTerm(func=mdp_obs.fingertip_contact_binary)
+            last_action           = ObsTerm(func=mdp_obs.last_action)
 
             object_pos   = ObsTerm(func=mdp_obs.object_position_world)
             object_quat  = ObsTerm(func=mdp_obs.object_orientation_world)

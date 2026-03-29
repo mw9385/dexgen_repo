@@ -10,7 +10,7 @@ Observation functions – Actor (policy) and Critic (privileged).
   │ joint_pos_normalized       24   encoder, normalised to [-1, 1] │
   │ joint_vel_normalized       24   encoder derivative             │
   │ fingertip_pos_obj_frame    15   FK → object-centric frame, 5×3 │
-  │ target_fingertip_pos       15   goal from GraspGraph, 5×3      │
+  │ rel_fingertip_to_goal      15   (goal - current) in obj frame  │
   │ fingertip_contact_binary    5   tactile: 1 if tip in contact   │
   │ last_action                24   previous joint targets         │
   └─────────────────────────────────────────────────────────────────┘
@@ -104,6 +104,34 @@ def target_fingertip_positions(env) -> torch.Tensor:
         num_fingers = _get_num_fingers(env)
         return torch.zeros(env.num_envs, num_fingers * 3, device=env.device)
     return target
+
+
+def relative_fingertip_to_goal(env) -> torch.Tensor:
+    """
+    Relative transformation from current fingertip positions to goal,
+    expressed in the object frame.
+
+    DexterityGen §3.2: the actor's goal encoding is a "relative
+    transformation from current state to goal state" rather than the
+    absolute goal pose. This lets the policy directly see the remaining
+    error without needing to compute it from absolute positions.
+
+        rel = goal_fps_obj - current_fps_obj   (N, F*3)
+
+    At the goal the output is zero; further away it points toward the goal.
+    Clipped to ±0.5 m to prevent large initial errors from dominating obs.
+
+    Returns: (N, num_fingers*3)
+    """
+    num_fingers = _get_num_fingers(env)
+    zero = torch.zeros(env.num_envs, num_fingers * 3, device=env.device)
+
+    goal_fps = env.extras.get("target_fingertip_pos")  # (N, F*3) in obj frame
+    if goal_fps is None:
+        return zero
+
+    cur_fps = fingertip_positions_in_object_frame(env)  # (N, F*3) in obj frame
+    return (goal_fps - cur_fps).clamp(-0.5, 0.5)
 
 
 def fingertip_contact_binary(env) -> torch.Tensor:
