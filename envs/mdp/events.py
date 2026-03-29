@@ -551,6 +551,26 @@ def update_rolling_goal(env, success_threshold: float = 0.02) -> int:
                 num_dof,
             )
 
+        # Update target_object_pos/quat_hand to the CURRENT sim state so
+        # object_pose_goal_reward uses the fresh reference (object is still
+        # at its current position; new goal is purely finger-configuration).
+        if "target_object_pos_hand" in env.extras:
+            from isaaclab.utils.math import quat_apply_inverse
+            robot = env.scene["robot"]
+            obj   = env.scene["object"]
+            rp_w  = robot.data.root_pos_w[env_id]   # (3,)
+            rq_w  = robot.data.root_quat_w[env_id]  # (4,)
+            op_w  = obj.data.root_pos_w[env_id]     # (3,)
+            oq_w  = obj.data.root_quat_w[env_id]    # (4,)
+            rel   = (op_w - rp_w).unsqueeze(0)
+            new_obj_pos_hand = quat_apply_inverse(rq_w.unsqueeze(0), rel)[0]
+            env.extras["target_object_pos_hand"][env_id] = new_obj_pos_hand
+            if "target_object_quat_hand" in env.extras:
+                new_obj_quat_hand = _quat_multiply(
+                    _quat_conjugate(rq_w.unsqueeze(0)), oq_w.unsqueeze(0)
+                )[0]
+                env.extras["target_object_quat_hand"][env_id] = new_obj_quat_hand
+
         # Update indices: old goal becomes new start
         env.extras["goal_grasp_idx"][env_id]  = new_goal_idx
         env.extras["start_grasp_idx"][env_id] = cur_goal_idx
