@@ -81,12 +81,11 @@ ppo:
   reward_shaper_scale: 0.2
 
   # Rollout
-  # [FIX] horizon_length: 32 — longer PPO rollout for reset-heavy envs
-  horizon_length: 32
-  num_steps_per_env: 32
+  # Paper (arXiv:2502.04307) batch_size=8192: num_envs(512) × horizon(16) = 8192.
+  horizon_length: 16
+  num_steps_per_env: 16
   mini_epochs: 5
-  # Total rollout = num_envs(512) × horizon(32) = 16384 samples.
-  # minibatch_size=4096 → 4 minibatches/epoch.
+  # minibatch_size=4096 → 2 minibatches/epoch.
   minibatch_size: 4096
 
   # Training length
