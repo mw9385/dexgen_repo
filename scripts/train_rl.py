@@ -546,8 +546,28 @@ class _IsaacLabVecEnv:
 
         info = dict(info) if isinstance(info, dict) else {}
         info["success_ratio"] = float(mdp_rewards.grasp_success_reward(self.env).mean().item())
-        info["drop_ratio"] = float(mdp_events.object_dropped(self.env).float().mean().item())
-        info["left_hand_ratio"] = float(mdp_events.object_left_hand(self.env).float().mean().item())
+
+        # Isaac Lab resets done envs inside env.step() before returning obs/info.
+        # Read termination terms from the manager's cached per-step masks so these
+        # ratios reflect the step that just ended, not the freshly reset state.
+        term_manager = getattr(self.env, "termination_manager", None)
+        if term_manager is not None:
+            active_terms = set(getattr(term_manager, "active_terms", []))
+            if "object_drop" in active_terms:
+                drop_mask = term_manager.get_term("object_drop")
+                info["drop_ratio"] = float(drop_mask.float().mean().item())
+            else:
+                info["drop_ratio"] = float(mdp_events.object_dropped(self.env).float().mean().item())
+
+            if "object_left_hand" in active_terms:
+                left_hand_mask = term_manager.get_term("object_left_hand")
+                info["left_hand_ratio"] = float(left_hand_mask.float().mean().item())
+            else:
+                info["left_hand_ratio"] = float(mdp_events.object_left_hand(self.env).float().mean().item())
+        else:
+            info["drop_ratio"] = float(mdp_events.object_dropped(self.env).float().mean().item())
+            info["left_hand_ratio"] = float(mdp_events.object_left_hand(self.env).float().mean().item())
+
         info["rolling_goal_updates"] = n_updated
         return _to_rl_obs(obs), rew, done, info
 
