@@ -24,6 +24,7 @@ import numpy as np
 
 from isaaclab.utils.math import quat_apply, quat_apply_inverse, quat_from_matrix
 from grasp_generation.graph_io import load_merged_graph, parse_graph_paths
+from .observations import _get_fingertip_contact_forces_world
 
 
 # ---------------------------------------------------------------------------
@@ -41,7 +42,7 @@ def object_dropped(env, min_height: float = 0.2) -> torch.Tensor:
 
 def object_left_hand(env, max_dist: float = 0.25) -> torch.Tensor:
     """
-    True when the object has moved more than *max_dist* from the robot wrist.
+    True when the object has moved more than *max_dist* from the robot palm.
 
     Catches all escape directions (upward, sideways, downward) unlike the
     height-only `object_dropped` predicate.  Use together with object_dropped
@@ -49,8 +50,58 @@ def object_left_hand(env, max_dist: float = 0.25) -> torch.Tensor:
     """
     robot = env.scene["robot"]
     obj   = env.scene["object"]
-    dist  = torch.norm(obj.data.root_pos_w - robot.data.root_pos_w, dim=-1)
-    return dist > max_dist
+    palm_body_id = _get_palm_body_id_from_env(robot, env)
+    palm_pos_w = robot.data.body_pos_w[:, palm_body_id, :]
+    dist  = torch.norm(obj.data.root_pos_w - palm_pos_w, dim=-1)
+    contact_forces = _get_fingertip_contact_forces_world(env)
+    has_contact = (torch.norm(contact_forces, dim=-1) > 0.5).any(dim=-1)
+    return (dist > max_dist) & (~has_contact)
+
+
+def _log_reset_reasons(env, env_ids: torch.Tensor, max_dist: float = 0.25) -> None:
+    if env_ids.numel() == 0:
+        return
+    if not torch.any(env.episode_length_buf[env_ids] > 0):
+        return
+
+    robot = env.scene["robot"]
+    obj = env.scene["object"]
+    contact_forces = _get_fingertip_contact_forces_world(env)[env_ids]
+    has_contact = (torch.norm(contact_forces, dim=-1) > 0.5).any(dim=-1)
+
+    time_out_mask = time_out(env)[env_ids]
+    drop_mask = object_dropped(env)[env_ids]
+    left_hand_mask = object_left_hand(env, max_dist=max_dist)[env_ids]
+
+    active = time_out_mask | drop_mask | left_hand_mask
+    if not torch.any(active):
+        return
+
+    root_dist = torch.norm(
+        obj.data.root_pos_w[env_ids] - robot.data.root_pos_w[env_ids], dim=-1
+    )
+
+    palm_body_id = _get_palm_body_id_from_env(robot, env)
+    palm_pos_w = robot.data.body_pos_w[env_ids][:, palm_body_id, :]
+    palm_dist = torch.norm(obj.data.root_pos_w[env_ids] - palm_pos_w, dim=-1)
+
+    env_id_list = env_ids.detach().cpu().tolist()
+    active_ids = [env_id_list[i] for i, flag in enumerate(active.detach().cpu().tolist()) if flag]
+
+    print(
+        "[reset-reason] "
+        f"envs={active_ids[:8]}"
+        f"{'...' if len(active_ids) > 8 else ''} "
+        f"time_out={int(time_out_mask.sum().item())} "
+        f"drop={int(drop_mask.sum().item())} "
+        f"left_hand={int(left_hand_mask.sum().item())} "
+        f"contact_any={int(has_contact.sum().item())} "
+        f"root_dist_mean={float(root_dist.mean().item()):.3f} "
+        f"root_dist_max={float(root_dist.max().item()):.3f} "
+        f"palm_dist_mean={float(palm_dist.mean().item()):.3f} "
+        f"palm_dist_max={float(palm_dist.max().item()):.3f} "
+        f"left_hand_thresh={max_dist:.3f}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -71,6 +122,8 @@ def reset_to_random_grasp(
     if graph is None:
         _reset_to_default_pose(env, env_ids)
         return
+
+    _log_reset_reasons(env, env_ids)
 
     n = len(env_ids)
     # env_num_fingers is the FIXED finger count the env was built with.
