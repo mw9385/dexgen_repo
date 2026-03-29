@@ -402,8 +402,8 @@ if _ISAACLAB_AVAILABLE:
         # --- Stability / safety ---
         object_velocity = RewTerm(
             func=mdp_rewards.object_velocity_penalty,
-            weight=-0.5,
-            params={"lin_thresh": 0.1, "ang_thresh": 1.0},
+            weight=-0.1,
+            params={"lin_thresh": 0.2, "ang_thresh": 2.0},
         )
         object_drop = RewTerm(
             func=mdp_rewards.object_drop_penalty,

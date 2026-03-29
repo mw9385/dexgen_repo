@@ -29,7 +29,7 @@ env:
     mechanical_work:    -0.02   # mean(|tau_i * qdot_i|) — normalized by DOF count
     action_rate:        -0.01   # jerk penalty ||a_t - a_{t-1}||
     # Safety
-    object_velocity:    -0.5    # penalise spinning/flinging object
+    object_velocity:    -0.1    # softer fling penalty; don't swamp goal reward early
     object_drop:       -100.0   # drop penalty (also terminates episode)
     object_left_hand:   -50.0   # escape penalty
     joint_limit:        -0.1    # soft limit penalty
