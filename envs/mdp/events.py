@@ -54,40 +54,7 @@ def object_left_hand(env, max_dist: float = 0.20) -> torch.Tensor:
 
 
 def _log_reset_reasons(env, env_ids: torch.Tensor, max_dist: float = 0.20) -> None:
-    if env_ids.numel() == 0:
-        return
-    if not torch.any(env.episode_length_buf[env_ids] > 0):
-        return
-    counter = int(env.extras.get("_reset_reason_counter", 0)) + 1
-    env.extras["_reset_reason_counter"] = counter
-    if counter % 25 != 0:
-        return
-
-    _, escape_stats = _object_escape_mask(env, max_dist=max_dist)
-    has_contact = escape_stats["has_contact"][env_ids]
-
-    time_out_mask = time_out(env)[env_ids]
-    drop_mask = object_dropped(env)[env_ids]
-    left_hand_mask = object_left_hand(env, max_dist=max_dist)[env_ids]
-
-    active = time_out_mask | drop_mask | left_hand_mask
-    if not torch.any(active):
-        return
-    behind_mask = escape_stats["behind_palm"][env_ids]
-    lateral_mask = escape_stats["too_lateral"][env_ids]
-    far_mask = escape_stats["too_far"][env_ids]
-
-    print(
-        "[reset-reason] "
-        f"sample={counter} "
-        f"time_out={int(time_out_mask.sum().item())} "
-        f"drop={int(drop_mask.sum().item())} "
-        f"left_hand={int(left_hand_mask.sum().item())} "
-        f"left_far={int(far_mask.sum().item())} "
-        f"left_behind={int(behind_mask.sum().item())} "
-        f"left_lateral={int(lateral_mask.sum().item())} "
-        f"contact_any={int(has_contact.sum().item())}"
-    )
+    return
 
 
 # ---------------------------------------------------------------------------

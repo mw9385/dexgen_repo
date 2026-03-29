@@ -504,6 +504,13 @@ class _IsaacLabVecEnv:
 
         obs, rew, terminated, truncated, info = self.env.step(actions)
         done = terminated | truncated
+        from envs.mdp import events as mdp_events
+        from envs.mdp import rewards as mdp_rewards
+
+        info = dict(info) if isinstance(info, dict) else {}
+        info["success_ratio"] = float(mdp_rewards.grasp_success_reward(self.env).mean().item())
+        info["drop_ratio"] = float(mdp_events.object_dropped(self.env).float().mean().item())
+        info["left_hand_ratio"] = float(mdp_events.object_left_hand(self.env).float().mean().item())
         return _to_rl_obs(obs), rew, done, info
 
     def reset(self):
