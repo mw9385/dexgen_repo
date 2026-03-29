@@ -341,13 +341,13 @@ if _ISAACLAB_AVAILABLE:
         # fingertip_tracking already encodes the hand-object relationship.
         object_pose = RewTerm(
             func=mdp_rewards.object_pose_goal_reward,
-            weight=8.0,
+            weight=1.0,
             params={"pos_scale": 10.0, "rot_scale": 5.0},
         )
         finger_joint_goal = RewTerm(
             func=mdp_rewards.finger_joint_goal_reward,
-            weight=8.0,
-            params={"scale": 3.0},  # scale 5→3: wider gradient for early training
+            weight=15.0,
+            params={"scale": 1.0},
         )
         # alpha 20→10: exp(-20*0.1m)=0.14 vs exp(-10*0.1m)=0.37 —
         # larger gradient at 5-10 cm helps the policy close the gap early.

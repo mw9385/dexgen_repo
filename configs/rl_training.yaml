@@ -14,8 +14,8 @@ env:
 
   rewards:
     # Goal rewards
-    object_pose:        8.0     # exp(-10*d_pos) + exp(-5*d_rot) in wrist frame [0,2]
-    finger_joint_goal:  8.0     # exp(-3*||Δq_norm||) joint-space goal [0,1]
+    object_pose:        1.0     # downweighted: was dominating as near-constant reset reward
+    finger_joint_goal:  15.0    # stronger joint-space goal signal
     fingertip_tracking: 10.0    # exp(-10*dist) per fingertip, mean [0,1]  (alpha 20→10 wider gradient)
     grasp_success:      50.0    # sparse bonus: all tips within 2 cm
     # Contact / style
