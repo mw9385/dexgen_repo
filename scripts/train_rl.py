@@ -185,7 +185,7 @@ def _resolve_ppo_sizes(args, cfg_file: dict) -> tuple[int, int, int]:
 
     horizon_length = int(ppo_cfg.get("horizon_length", 16))
     seq_length = int(ppo_cfg.get("seq_length", 4))
-    requested_minibatch = int(ppo_cfg.get("minibatch_size", 16384))
+    requested_minibatch = int(ppo_cfg.get("minibatch_size", 4096))
 
     batch_size = args.num_envs * horizon_length
     minibatch_size = _resolve_valid_minibatch_size(batch_size, requested_minibatch, seq_length)
@@ -201,7 +201,7 @@ def build_rl_games_config(args, cfg_file: dict) -> dict:
       - normalize_input: True   (was False → reward signal was weak)
       - normalize_value: True   (was False → value function unstable)
       - reward_shaper scale_value: 0.1  (was 0.01 → reward too small)
-      - minibatch_size: 16384   (was 4096 → matches yaml)
+      - minibatch_size: 4096    (rollout=8192 → 2 minibatches/epoch)
       - horizon_length: 16      (was 8 → more stable gradient estimates)
     """
     ppo_cfg = cfg_file.get("ppo", {})

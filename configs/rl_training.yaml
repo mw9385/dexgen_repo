@@ -82,8 +82,10 @@ ppo:
   horizon_length: 16
   num_steps_per_env: 16
   mini_epochs: 5
-  # [FIX] minibatch_size: 16384 (was 4096 in code, mismatched with yaml)
-  minibatch_size: 16384
+  # Total rollout = num_envs(512) × horizon(16) = 8192 samples.
+  # minibatch_size MUST be ≤ rollout total.  4096 → 2 minibatches/epoch.
+  # Paper batch_size=8192 matches our rollout; minibatch is a subdivision.
+  minibatch_size: 4096
 
   # Training length
   max_iterations: 30000
@@ -109,7 +111,7 @@ central_value:
   normalize_input: true
   grad_norm: 1.0
   mini_epochs: 4
-  minibatch_size: 16384
+  minibatch_size: 4096
 
 logging:
   log_dir: logs/rl/shadow_anygrasp_v1
