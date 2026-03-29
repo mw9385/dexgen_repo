@@ -17,8 +17,8 @@ env:
     #   r_goal = exp(-alpha_pos*||p-p*|| - alpha_orn*d(R,R*))
     #          - alpha_hand * ||q - q*||
     #          + alpha_bonus * 1(goal achieved)
-    object_pose:        5.0     # exp(-10*d_pos - 5*d_rot) ∈ (0,1]; max +5.0/step
-    finger_joint_goal:  1.0     # -alpha_hand(0.1)*||q-q*||; negative penalty term
+    object_pose:        10.0    # exp(-5*d_pos - 2*d_rot) ∈ (0,1]; max +10.0/step; alpha ↓ for wider gradient basin
+    finger_joint_goal:  1.0     # -alpha_hand(0.3)*||q-q*||; stronger gradient toward goal joints
     grasp_success:      250.0   # alpha_bonus: sparse "aha" signal
     # Contact / style
     fingertip_contact:   2.0    # fraction of tips in contact [0,1]

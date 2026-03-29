@@ -343,22 +343,24 @@ if _ISAACLAB_AVAILABLE:
         #        - alpha_hand * ||q - q*||
         #        + alpha_bonus * 1(goal achieved)
         #
-        # object_pose: exp(-10*d_pos - 5*d_rot) ∈ (0,1].
-        #   weight=5.0 → per-step max +5.0 when perfectly at goal.
-        #   At start (different grasp) expect ~exp(-10*0.05-5*0.05)≈0.57 → +2.85/step.
+        # alpha 값이 크면 exponential이 급격히 0에 수렴 → goal에서 멀 때 gradient 없음.
+        # alpha_pos=5, alpha_orn=2 → 넓은 구간에서 gradient 유지:
+        #   d=5cm  → exp(-0.25-d_rot*2) ≈ 0.78  (goal 향한 gradient 강함)
+        #   d=10cm → exp(-0.5 -d_rot*2) ≈ 0.61
+        #   d=20cm → exp(-1.0 -d_rot*2) ≈ 0.37  (이전 alpha=10에선 0.14)
+        # weight=10.0 → max +10.0/step at goal.
         object_pose = RewTerm(
             func=mdp_rewards.object_pose_goal_reward,
-            weight=5.0,
-            params={"alpha_pos": 10.0, "alpha_orn": 5.0},
+            weight=10.0,
+            params={"alpha_pos": 5.0, "alpha_orn": 2.0},
         )
         # finger_joint_goal: -alpha_hand * ||q - q*||  (paper eq.5, negative term)
-        # weight=1.0; alpha_hand=0.1 → -0.1 * ||dq|| per step.
-        # At ||dq||=1rad → -0.1/step; at goal → 0.0.
-        # Negative reward so this is a penalty on joint distance, per paper.
+        # alpha_hand=0.3, weight=1.0 → at ||dq||=1.5rad: -0.45/step penalty.
+        # Stronger gradient signal toward goal joint angles.
         finger_joint_goal = RewTerm(
             func=mdp_rewards.finger_joint_goal_reward,
             weight=1.0,
-            params={"alpha_hand": 0.1},
+            params={"alpha_hand": 0.3},
         )
         # alpha_bonus (paper): large sparse bonus when goal is achieved.
         grasp_success = RewTerm(
