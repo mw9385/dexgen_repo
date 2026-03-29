@@ -40,7 +40,7 @@ def object_dropped(env, min_height: float = 0.2) -> torch.Tensor:
     return obj.data.root_pos_w[:, 2] < min_height
 
 
-def object_left_hand(env, max_dist: float = 0.25) -> torch.Tensor:
+def object_left_hand(env, max_dist: float = 0.18) -> torch.Tensor:
     """
     True when the object has moved more than *max_dist* from the robot palm.
 
@@ -58,7 +58,7 @@ def object_left_hand(env, max_dist: float = 0.25) -> torch.Tensor:
     return (dist > max_dist) & (~has_contact)
 
 
-def _log_reset_reasons(env, env_ids: torch.Tensor, max_dist: float = 0.25) -> None:
+def _log_reset_reasons(env, env_ids: torch.Tensor, max_dist: float = 0.18) -> None:
     if env_ids.numel() == 0:
         return
     if not torch.any(env.episode_length_buf[env_ids] > 0):
