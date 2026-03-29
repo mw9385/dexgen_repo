@@ -27,8 +27,8 @@ env:
     torque:             -0.05   # mean(tau_i^2) normalized by DOF count
     mechanical_work:    -0.02   # mean(|tau_i*qdot_i|) normalized by DOF count
     action_rate:        -0.01   # jerk penalty ||a_t - a_{t-1}||
-    # Safety (softened: object_velocity was dominating → swamped goal reward)
-    object_velocity:    -0.1    # softer fling penalty; lin_thresh=0.2m/s ang_thresh=2.0rad/s
+    # Safety
+    object_velocity:    -0.1    # softer fling penalty; don't swamp goal reward early
     object_drop:       -100.0   # drop penalty (also terminates episode)
     object_left_hand:   -50.0   # escape penalty
     joint_limit:        -0.1    # soft limit penalty
