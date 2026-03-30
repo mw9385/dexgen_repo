@@ -31,7 +31,7 @@ hand:
 # Object pool — generates grasps for all combinations of shape × size
 object_pool:
   shapes: [cube, sphere, cylinder]   # primitive shapes to include
-  size_min: 0.03                     # minimum object size (m)  — precision pinch
+  size_min: 0.05                     # minimum object size (m)  — clearly visible in sim
   size_max: 0.08                     # maximum object size (m)  — power grasp
   num_sizes: 3                       # size steps per shape (total: 3×3 = 9 objects)
 

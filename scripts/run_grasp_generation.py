@@ -137,13 +137,9 @@ def _apply_generation_preset(args):
         return
 
     preset_values = {
-        "num_seed_grasps": 2000,   # 7× more seed candidates (better coverage)
-        "num_grasps": 1000,         # 3× more RRT nodes (denser graph)
-        "min_quality": 0.005,       # same as default — do NOT raise this
-        # min_quality=0.01 was incorrectly stricter; NFO ε-metric values are
-        # typically 0.001–0.008 on primitive objects so 0.01 filters 100% of
-        # candidates and RRT generates zero grasps.  The quality improvement
-        # in high_precision comes from MORE grasps, not a stricter threshold.
+        "num_seed_grasps": 8000,   # many surface samples → top-K selection replaces RRT
+        "num_grasps": 1000,         # keep top-1000 quality surface grasps
+        "min_quality": 0.005,
         "mu": 0.5,
         "fast_nfo": False,
         "isaac_refine_batch_envs": 32,
@@ -406,47 +402,29 @@ def process_one_object(
         print(f"  [!] Only {len(filtered_set)} grasps passed NFO for {spec.name}, skipping.")
         return None, None
 
-    # Cap seeds to at most target_size // 2 (keeping highest quality).
-    # This guarantees the RRT while-loop always has expansion headroom:
-    #   len(seeds) ≤ target//2  <  target  → loop always runs.
-    # Without this cap, if NFO passes more seeds than the target, RRT is
-    # skipped entirely and the graph has no connectivity structure.
-    max_seeds = max(args.num_grasps // 2, 10)
-    if len(filtered_set) > max_seeds:
+    # Step 3: Select top-K by quality (no RRT expansion)
+    #
+    # RRT expansion generates grasps by perturbing fingertip positions in
+    # free 3D space without projecting back onto the object surface. This
+    # produces nodes that may float in space or penetrate the object, and
+    # their quality is only loosely validated by NFO (no surface guarantee).
+    #
+    # Instead: sample many surface grasps (num_seed_grasps), filter by NFO,
+    # then keep top-K by quality score. Every node in the final graph is a
+    # genuine surface grasp validated by the GraspSampler mesh sampling.
+    # Isaac refinement later validates each grasp in simulation.
+    if len(filtered_set) > args.num_grasps:
         filtered_set.grasps = sorted(
             filtered_set.grasps, key=lambda g: g.quality, reverse=True
-        )[:max_seeds]
-        print(f"  [NFO] Capped to top-{len(filtered_set)} seeds by quality "
-              f"(target_size={args.num_grasps}, cap={max_seeds})")
+        )[:args.num_grasps]
+        print(f"  [Select] Kept top-{len(filtered_set)} surface grasps by quality")
 
-    # Step 3: RRT expansion
-    #
-    # delta_max budget analysis:
-    #   multiplier = 0.30 gives effective delta_max of:
-    #     2cm object:  0.02 * 0.30 * 2.4 = 1.4 cm   (5-finger effective mean)
-    #     3.5cm object:0.035* 0.30 * 2.4 = 2.5 cm
-    #     5cm object:  0.05 * 0.30 * 2.4 = 3.6 cm
-    #
-    #   Previous 0.60 gave 8.6 cm mean for 6cm/5-finger.  8.6 cm in object frame
-    #   → each finger moves ~8.6 cm → requires several rad of joint change →
-    #   unreachable in 10-second episode.
-    #
-    #   With 0.30: ~4 cm mean displacement → ~0.6–0.8 rad L2 joint change →
-    #   clearly achievable in 300 steps while remaining tight enough for a
-    #   300-node graph to be well-connected (many edges per node).
-    #
-    #   We tried 0.15 (even tighter) but it required 2000+ grasps for connectivity.
-    #   0.30 is the sweet spot: reachable goals + good graph connectivity at 300 nodes.
-    #
-    # delta_pos (RRT step size) = delta_max / 3:
-    #   Each RRT step perturbs by ≤ delta_max/3 so multiple steps per edge.
-    delta_max_base = spec.size * 0.30          # was 0.60 — 2× tighter
-    delta_pos_base = delta_max_base / 3.0      # step ≤ 1/3 of edge budget
-    # RRT uses fast_mode=True internally (speed); quality threshold matches
-    # the per-finger threshold so expanded nodes meet the same standard.
+    # Build graph (computes edges between nearby grasps in fingertip space)
+    delta_max_base = spec.size * 0.30
+    delta_pos_base = delta_max_base / 3.0
     expander = RRTGraspExpander(
         nfo=NetForceOptimizer(min_quality=effective_min_quality, fast_mode=True),
-        target_size=args.num_grasps,
+        target_size=len(filtered_set),   # no expansion — build graph only
         delta_pos=delta_pos_base,
         delta_max=delta_max_base,
         manifold_contact_count=num_fingers,
