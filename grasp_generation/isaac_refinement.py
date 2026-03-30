@@ -57,7 +57,7 @@ def _refine_single_object_graph(
         "object_rot_jitter_deg": 0.0,
         "wrist_pos_jitter_std": 0.0,
         "wrist_rot_std_deg": 0.0,
-        "align_palm_up": False,
+        "align_palm_toward_object": True,   # palm faces object during refinement
     }
     env_cfg.hand = dict(getattr(env_cfg, "hand", {}) or {})
     env_cfg.hand["num_fingers"] = num_fingers
@@ -123,9 +123,17 @@ def _refine_chunk(env, env_ids: torch.Tensor, grasps: list, mdp_events):
 
     robot.update(0.0)
     mdp_events._place_object_in_hand(env, env_ids, start_fps)
-    mdp_events._refine_hand_to_start_grasp(env, env_ids, start_fps)
-    robot.update(0.0)
-    mdp_events._place_object_in_hand(env, env_ids, start_fps)
+
+    # Multiple rounds of (refine joints → re-place object) for tighter contact.
+    # Each round: differential IK moves fingertips closer to target positions,
+    # then the object is snapped to the new fingertip centroid.
+    # 3 rounds × 10 iterations = 30 total IK steps (vs previous 1 round × 3 steps).
+    _REFINEMENT_ROUNDS = 3
+    for _round in range(_REFINEMENT_ROUNDS):
+        mdp_events._refine_hand_to_start_grasp(env, env_ids, start_fps)
+        robot.update(0.0)
+        mdp_events._place_object_in_hand(env, env_ids, start_fps)
+
     final_mean, final_max = mdp_events._measure_grasp_contact_error(env, env_ids, start_fps)
     robot.update(0.0)
     obj.update(0.0)

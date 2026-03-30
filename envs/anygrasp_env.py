@@ -556,11 +556,11 @@ if _ISAACLAB_AVAILABLE:
             if self.reset_refinement is None:
                 self.reset_refinement = {
                     "enabled": True,
-                    "iterations": 3,
+                    "iterations": 10,   # 3 → 10: more IK steps for tighter contact
                     "step_gain": 0.6,
                     "damping": 0.05,
                     "max_delta": 0.2,
-                    "pos_threshold": 0.005,
+                    "pos_threshold": 0.003,
                 }
 
             # Finger link subsets — Shadow Hand Isaac Lab link names.
