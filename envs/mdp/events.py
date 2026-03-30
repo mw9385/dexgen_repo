@@ -910,8 +910,11 @@ def _randomise_wrist_pose(env, env_ids: torch.Tensor):
         wrist_pos += torch.randn(n, 3, device=env.device) * pos_jitter_std
 
     wrist_quat = default_robot_root[:, 3:7]
-    if bool(cfg.get("align_palm_up", False)):
-        wrist_quat = _align_wrist_palm_up(env, env_ids, wrist_quat)
+    # Align palm toward the object so fingers wrap around it.
+    # "align_palm_up" (legacy, palm faces +Z) is intentionally NOT used —
+    # it causes the object to rest passively on top of an upward-facing palm.
+    if bool(cfg.get("align_palm_toward_object", True)):
+        wrist_quat = _align_palm_toward_object(env, env_ids, wrist_quat, wrist_pos)
     rot_std = math.radians(float(cfg.get("wrist_rot_std_deg", 5.0)))
     if rot_std > 0.0:
         wrist_quat = _add_rotation_noise(wrist_quat, rot_std, env.device, n)
@@ -1097,11 +1100,40 @@ def _set_robot_root_pose_from_root_frame_grasp_pose(
 
 
 def _align_wrist_palm_up(env, env_ids: torch.Tensor, wrist_quat: torch.Tensor) -> torch.Tensor:
+    """Legacy: align palm normal to world +Z (upward). Causes object to rest on palm."""
     robot = env.scene["robot"]
     palm_normal_local = _get_local_palm_normal(robot, env).unsqueeze(0).expand(len(env_ids), 3)
     palm_normal_world = quat_apply(wrist_quat, palm_normal_local)
     target_up = torch.tensor([0.0, 0.0, 1.0], device=env.device).expand_as(palm_normal_world)
     correction = _quat_from_two_vectors(palm_normal_world, target_up)
+    return _quat_multiply(correction, wrist_quat)
+
+
+def _align_palm_toward_object(
+    env,
+    env_ids: torch.Tensor,
+    wrist_quat: torch.Tensor,
+    wrist_pos_w: torch.Tensor,
+) -> torch.Tensor:
+    """
+    Rotate the wrist so the palm normal points toward the object.
+
+    The hand is positioned above/around the object. Aligning the palm to
+    face the object ensures fingers wrap around it rather than the object
+    resting passively on top of an upward-facing palm.
+    """
+    robot = env.scene["robot"]
+    obj = env.scene["object"]
+
+    palm_normal_local = _get_local_palm_normal(robot, env).unsqueeze(0).expand(len(env_ids), 3)
+    palm_normal_world = quat_apply(wrist_quat, palm_normal_local)
+
+    # Unit vector from wrist toward object
+    obj_pos_w = obj.data.root_pos_w[env_ids]
+    toward_obj = obj_pos_w - wrist_pos_w
+    toward_obj = toward_obj / (torch.norm(toward_obj, dim=-1, keepdim=True) + 1e-8)
+
+    correction = _quat_from_two_vectors(palm_normal_world, toward_obj)
     return _quat_multiply(correction, wrist_quat)
 
 
