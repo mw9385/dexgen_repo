@@ -143,7 +143,10 @@ def _apply_generation_preset(args):
         "mu": 0.5,
         "fast_nfo": False,
         "isaac_refine_batch_envs": 32,
-        "keep_top_k": None,
+        # After Isaac simulation, keep only the 300 grasps with lowest contact
+        # error. This filters out grasps where the simulated hand and object
+        # don't actually align, which would cause the object to fall immediately.
+        "keep_top_k": 300,
     }
 
     for field_name, preset_value in preset_values.items():
