@@ -13,11 +13,15 @@ env:
   decimation: 4                  # control at 30 Hz (120 Hz sim / 4)
 
   rewards:
-    # Goal rewards — three positive dense signals + sparse bonus
+    # Goal rewards — three positive dense signals + soft success bonus
     object_pose:        5.0     # exp(-5*d_pos - 2*d_rot); object pose error in hand frame
     finger_joint_goal:  8.0     # exp(-2*||dq||/sqrt(24)); joint proximity to goal grasp
-    fingertip_tracking: 8.0     # exp(-20*||tip-goal||) averaged over fingers
-    grasp_success:      250.0   # sparse bonus when all tips within 3cm (loosened from 2cm)
+    fingertip_tracking: 8.0     # exp(-10*||tip-goal||) alpha=10→wider basin (was 20)
+    # Soft grasp success: fraction_in + all_in ∈ [0,2].  threshold=5cm, min_frac=0.6
+    # weight=125 → effective peak 125*2=250 (same nominal max as before).
+    # Fires when 3+/5 tips within 5cm, peaks when all 5 within 5cm.
+    # Previously: binary all()-within-3cm → never fired early → zero gradient.
+    grasp_success:      125.0   # soft: fraction_in + all_in_bonus; threshold=5cm
     # Contact reward — reduced: 2.0→0.5 to stop "stay-still" from being optimal
     # Previously 2.0 caused policy to learn contact maintenance instead of grasp transition
     fingertip_contact:   0.5
