@@ -240,91 +240,49 @@ def reset_to_random_grasp(
 
     # ------------------------------------------------------------------
     # 2. Set object / robot initial state.
-    #    For exact resets, keep the object at its canonical spawned pose and
-    #    move the hand around it using the stored object pose in the hand
-    #    frame.  This avoids the visual artifact where the object appears to
-    #    spawn far from the hand and then gets teleported into place.
+    #
+    #    Always use fingertip-driven placement (_place_object_in_hand):
+    #    1. Place wrist at nominal position above object (canonical offset)
+    #    2. Set joints to stored grasp configuration
+    #    3. Place object at fingertip centroid → object enclosed by fingers
+    #    4. Refine joints to better match fingertip targets
+    #    5. Re-place object at refined fingertip centroid
+    #
+    #    This avoids the "object at wrist" artifact that occurs when
+    #    object_pos_hand (stored relative to wrist root) is near-zero because
+    #    the Shadow Hand palm faces sideways in the default orientation and
+    #    the fingertip centroid ends up near the wrist root during refinement.
     # ------------------------------------------------------------------
     has_exact_pose = any(
         pos is not None and quat is not None
         for pos, quat in zip(start_object_pos_hand_list, start_object_quat_hand_list)
     )
     has_joints = any(j is not None for j in start_joints_list)
-    exact_reset_mode = os.getenv("DEXGEN_EXACT_RESET_MODE", "object_fixed").strip().lower()
 
-    if has_exact_pose and exact_reset_mode == "hand_fixed":
-        wrist_pos_w, wrist_quat_w = _sample_wrist_pose_world(
-            env, env_ids, apply_noise=False
-        )
-        _set_robot_root_pose(env, env_ids, wrist_pos_w, wrist_quat_w)
-        _randomise_object_pose(env, env_ids)
-    elif has_exact_pose:
-        _randomise_object_pose(env, env_ids)
-    else:
-        _randomise_object_pose(env, env_ids)
-        _randomise_wrist_pose(env, env_ids)
+    # Always: object at canonical pose, wrist at nominal position above object
+    _randomise_object_pose(env, env_ids)
+    _randomise_wrist_pose(env, env_ids)
 
     if has_joints:
         _set_robot_joints_direct(env, env_ids, start_joints_list)
     else:
         _set_robot_to_fingertip_config(env, env_ids, start_fps)
 
-    if has_exact_pose and exact_reset_mode == "hand_fixed":
-        robot = env.scene["robot"]
-        obj = env.scene["object"]
-        robot.update(0.0)
-        obj.update(0.0)
-        if all(frame == "root" for frame in start_object_pose_frame_list if frame is not None):
-            _set_object_pose_from_grasp(
-                env, env_ids, start_object_pos_hand_list, start_object_quat_hand_list
-            )
-        else:
-            _set_object_pose_from_hand_frame_grasp(
-                env, env_ids, start_object_pos_hand_list, start_object_quat_hand_list
-            )
-    elif has_exact_pose:
-        robot = env.scene["robot"]
-        obj = env.scene["object"]
-        robot.update(0.0)
-        obj.update(0.0)
-        if all(frame == "root" for frame in start_object_pose_frame_list if frame is not None):
-            _set_robot_root_pose_from_root_frame_grasp_pose(
-                env, env_ids, start_object_pos_hand_list, start_object_quat_hand_list
-            )
-        else:
-            _set_robot_root_pose_from_grasp_pose(
-                env, env_ids, start_object_pos_hand_list, start_object_quat_hand_list
-            )
-
     # ------------------------------------------------------------------
-    # 3. Place object.
-    #    ALWAYS use _place_object_in_hand (fingertip-matching) rather than
-    #    the stored object_pos_hand. This avoids hand-root frame mismatches
-    #    between Stage-0 data and the Isaac Lab articulation root.
+    # 3. Place object at fingertip centroid (object inside the hand).
     #    After writing root + joints we must update body transforms first.
     # ------------------------------------------------------------------
     robot = env.scene["robot"]
     robot.update(0.0)
 
     placement_debug = None
-    if has_exact_pose:
-        # Keep the object fixed and refine the hand so the sampled Stage-0
-        # fingertip contacts are matched without teleporting the object.
-        _refine_hand_to_start_grasp(env, env_ids, start_fps)
-        robot.update(0.0)
-        obj = env.scene["object"]
-        obj.update(0.0)
-        solve_mean_err, solve_max_err = _measure_grasp_contact_error(env, env_ids, start_fps)
-    else:
-        solve_mean_err, solve_max_err, placement_debug = _place_object_in_hand(env, env_ids, start_fps)
-        # Exact Stage-0 tuples still suffer from hand-model / joint-order /
-        # simulator discrepancies. Refine the hand against the sampled grasp
-        # and then place the object again using the refined fingertips.
-        _refine_hand_to_start_grasp(env, env_ids, start_fps)
-        robot.update(0.0)
-        solve_mean_err, solve_max_err, placement_debug = _place_object_in_hand(env, env_ids, start_fps)
-        # One final measurement from the actual sim state after re-placement.
-        solve_mean_err, solve_max_err = _measure_grasp_contact_error(env, env_ids, start_fps)
+    solve_mean_err, solve_max_err, placement_debug = _place_object_in_hand(env, env_ids, start_fps)
+    # Refine joints to better match the sampled grasp fingertip targets,
+    # then re-place the object at the improved fingertip centroid.
+    _refine_hand_to_start_grasp(env, env_ids, start_fps)
+    robot.update(0.0)
+    solve_mean_err, solve_max_err, placement_debug = _place_object_in_hand(env, env_ids, start_fps)
+    solve_mean_err, solve_max_err = _measure_grasp_contact_error(env, env_ids, start_fps)
 
     # ------------------------------------------------------------------
     # 7. Fill in target_object_pos/quat_hand for envs that had no stored
