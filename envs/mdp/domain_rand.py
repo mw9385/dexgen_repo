@@ -90,7 +90,12 @@ def randomize_action_delay(
     n = len(env_ids)
 
     if "action_delay_buf" not in env.extras:
-        n_dof = env.scene["robot"].data.joint_pos.shape[-1]
+        # Use action-space dim (not full joint dim) so the buffer matches
+        # the actual policy action tensor (wrist joints excluded for Shadow Hand).
+        try:
+            n_dof = env.action_manager.action.shape[-1]
+        except (AttributeError, RuntimeError):
+            n_dof = env.scene["robot"].data.joint_pos.shape[-1]
         env.extras["action_delay_buf"] = torch.zeros(
             env.num_envs, max_delay + 1, n_dof, device=env.device
         )
