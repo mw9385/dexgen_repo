@@ -169,10 +169,20 @@ def fingertip_contact_binary(env) -> torch.Tensor:
 
 
 def last_action(env) -> torch.Tensor:
-    """Previous joint position targets. Returns: (N, num_dof)"""
+    """
+    Previous joint position targets (finger joints only, wrist excluded).
+    Returns: (N, 22)
+    """
     action = env.extras.get("last_action")
     if action is None:
-        num_dof = env.scene["robot"].data.joint_pos.shape[-1]
+        # Not yet initialized — return zeros matching the action-space dim.
+        # Must be consistent with runtime (22, not 24) so the Observation
+        # Manager infers the correct shape at init time.
+        robot = env.scene["robot"]
+        num_dof = robot.data.joint_pos.shape[-1]
+        hand_cfg = getattr(env.cfg, "hand", None) or {}
+        if hand_cfg.get("name", "shadow") == "shadow" and num_dof == 24:
+            num_dof = num_dof - 2   # exclude WRJ1, WRJ0
         return torch.zeros(env.num_envs, num_dof, device=env.device)
     return action
 
