@@ -23,7 +23,7 @@ Usage:
     # Custom object pool
     /workspace/IsaacLab/isaaclab.sh -p scripts/run_grasp_generation.py \\
         --shapes cube sphere \\
-        --size_min 0.04 --size_max 0.09 --num_sizes 4 \\
+        --size_min 0.02 --size_max 0.05 --num_sizes 4 \\
         --num_grasps 300
 
     # Single custom mesh
@@ -385,9 +385,9 @@ def process_one_object(
     #
     # delta_max budget analysis:
     #   multiplier = 0.30 gives effective delta_max of:
-    #     4cm object:  0.04 * 0.30 * 2.4 = 2.9 cm   (5-finger effective mean)
-    #     6cm object:  0.06 * 0.30 * 2.4 = 4.3 cm
-    #     9cm object:  0.09 * 0.30 * 2.4 = 6.5 cm
+    #     2cm object:  0.02 * 0.30 * 2.4 = 1.4 cm   (5-finger effective mean)
+    #     3.5cm object:0.035* 0.30 * 2.4 = 2.5 cm
+    #     5cm object:  0.05 * 0.30 * 2.4 = 3.6 cm
     #
     #   Previous 0.60 gave 8.6 cm mean for 6cm/5-finger.  8.6 cm in object frame
     #   → each finger moves ~8.6 cm → requires several rad of joint change →

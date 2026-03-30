@@ -134,7 +134,7 @@ def _build_object_spawner(object_pool_specs: Optional[List[dict]] = None):
 
     if not object_pool_specs:
         return sim_utils.CuboidCfg(
-            size=(0.06, 0.06, 0.06),
+            size=(0.035, 0.035, 0.035),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 disable_gravity=False, max_depenetration_velocity=5.0,
             ),
@@ -198,11 +198,11 @@ if _ISAACLAB_AVAILABLE:
         object: RigidObjectCfg = RigidObjectCfg(
             prim_path="{ENV_REGEX_NS}/Object",
             spawn=sim_utils.CuboidCfg(
-                size=(0.06, 0.06, 0.06),
+                size=(0.035, 0.035, 0.035),
                 rigid_props=sim_utils.RigidBodyPropertiesCfg(
                     disable_gravity=False, max_depenetration_velocity=5.0,
                 ),
-                mass_props=sim_utils.MassPropertiesCfg(mass=0.1),
+                mass_props=sim_utils.MassPropertiesCfg(mass=0.05),
                 collision_props=sim_utils.CollisionPropertiesCfg(),
                 visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.8, 0.2, 0.2)),
             ),
@@ -516,15 +516,15 @@ if _ISAACLAB_AVAILABLE:
             # "Default diverse pool" covers cube/sphere/cylinder at 3 sizes so
             # even without running Stage 0 the env uses varied objects.
             _DEFAULT_POOL = [
-                {"shape_type": "cube",     "size": 0.045, "mass": 0.08, "color": (0.9, 0.2, 0.2)},
-                {"shape_type": "cube",     "size": 0.060, "mass": 0.10, "color": (0.8, 0.2, 0.2)},
-                {"shape_type": "cube",     "size": 0.075, "mass": 0.13, "color": (0.7, 0.2, 0.2)},
-                {"shape_type": "sphere",   "size": 0.045, "mass": 0.07, "color": (0.2, 0.5, 0.9)},
-                {"shape_type": "sphere",   "size": 0.060, "mass": 0.10, "color": (0.2, 0.4, 0.8)},
-                {"shape_type": "sphere",   "size": 0.075, "mass": 0.13, "color": (0.2, 0.3, 0.7)},
-                {"shape_type": "cylinder", "size": 0.045, "mass": 0.08, "color": (0.2, 0.8, 0.3)},
-                {"shape_type": "cylinder", "size": 0.060, "mass": 0.10, "color": (0.2, 0.7, 0.3)},
-                {"shape_type": "cylinder", "size": 0.075, "mass": 0.13, "color": (0.2, 0.6, 0.3)},
+                {"shape_type": "cube",     "size": 0.025, "mass": 0.04, "color": (0.9, 0.2, 0.2)},
+                {"shape_type": "cube",     "size": 0.035, "mass": 0.05, "color": (0.8, 0.2, 0.2)},
+                {"shape_type": "cube",     "size": 0.045, "mass": 0.07, "color": (0.7, 0.2, 0.2)},
+                {"shape_type": "sphere",   "size": 0.025, "mass": 0.03, "color": (0.2, 0.5, 0.9)},
+                {"shape_type": "sphere",   "size": 0.035, "mass": 0.05, "color": (0.2, 0.4, 0.8)},
+                {"shape_type": "sphere",   "size": 0.045, "mass": 0.07, "color": (0.2, 0.3, 0.7)},
+                {"shape_type": "cylinder", "size": 0.025, "mass": 0.04, "color": (0.2, 0.8, 0.3)},
+                {"shape_type": "cylinder", "size": 0.035, "mass": 0.05, "color": (0.2, 0.7, 0.3)},
+                {"shape_type": "cylinder", "size": 0.045, "mass": 0.07, "color": (0.2, 0.6, 0.3)},
             ]
             specs = self.object_pool_specs or _DEFAULT_POOL
             spawner = _build_object_spawner(specs)
