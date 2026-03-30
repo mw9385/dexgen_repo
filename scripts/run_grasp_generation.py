@@ -386,20 +386,26 @@ def process_one_object(
 
     # Step 3: RRT expansion
     #
-    # delta_max budget analysis (why 0.15?):
-    #   For a 6cm object: delta_max_base = 0.06 * 0.15 = 0.009 m (9 mm)
-    #   For 5 fingers:    effective      = 0.009 * 2.4  = 0.022 m (2.2 cm) mean dist
+    # delta_max budget analysis:
+    #   multiplier = 0.30 gives effective delta_max of:
+    #     4cm object:  0.04 * 0.30 * 2.4 = 2.9 cm   (5-finger effective mean)
+    #     6cm object:  0.06 * 0.30 * 2.4 = 4.3 cm
+    #     9cm object:  0.09 * 0.30 * 2.4 = 6.5 cm
     #
-    #   Previous 0.60 gave 8.6 cm mean → 5 fingers each moving ~8.6 cm in object
-    #   frame → requires several rad of joint change → unreachable in a 10-second episode.
+    #   Previous 0.60 gave 8.6 cm mean for 6cm/5-finger.  8.6 cm in object frame
+    #   → each finger moves ~8.6 cm → requires several rad of joint change →
+    #   unreachable in 10-second episode.
     #
-    #   With 0.15: each edge represents a ~2 cm mean fingertip displacement,
-    #   corresponding to ~0.3–0.5 rad per joint — reachable in ~50 steps.
+    #   With 0.30: ~4 cm mean displacement → ~0.6–0.8 rad L2 joint change →
+    #   clearly achievable in 300 steps while remaining tight enough for a
+    #   300-node graph to be well-connected (many edges per node).
+    #
+    #   We tried 0.15 (even tighter) but it required 2000+ grasps for connectivity.
+    #   0.30 is the sweet spot: reachable goals + good graph connectivity at 300 nodes.
     #
     # delta_pos (RRT step size) = delta_max / 3:
-    #   Each RRT step perturbs by ≤ delta_max/3 so multiple steps are needed to
-    #   traverse one edge.  This keeps the graph dense and connected.
-    delta_max_base = spec.size * 0.15          # was 0.60 — 4× tighter
+    #   Each RRT step perturbs by ≤ delta_max/3 so multiple steps per edge.
+    delta_max_base = spec.size * 0.30          # was 0.60 — 2× tighter
     delta_pos_base = delta_max_base / 3.0      # step ≤ 1/3 of edge budget
     expander = RRTGraspExpander(
         nfo=NetForceOptimizer(min_quality=args.min_quality, fast_mode=True),

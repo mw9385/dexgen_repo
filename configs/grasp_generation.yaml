@@ -38,18 +38,23 @@ object_pool:
   # Override with a directory of mesh files instead of primitives:
   # mesh_dir: assets/objects/
 
-# Grasp sampler (per object) — used only for legacy pipeline
+# Grasp sampler (per object)
 sampler:
   num_seed_grasps: 300     # seed grasps per object before NFO filtering
 
-# Net Force Optimization (NFO) — used only for legacy pipeline
+# Net Force Optimization (NFO)
 nfo:
   mu: 0.5                  # friction coefficient
   num_friction_edges: 8    # friction cone linearisation edges
   min_quality: 0.005       # minimum NFO ε-metric score
   fast_mode: false         # true = SVD approximation (faster, less accurate)
 
-# RRT expansion (per object) — used only for legacy pipeline
+# RRT expansion (per object)
+# delta_max = spec.size * 0.30  (set in run_grasp_generation.py)
+#   effective mean fingertip distance per edge (5-finger, 6cm object) ≈ 4.3 cm
+#   → ~0.6–0.8 rad L2 joint change per edge — reachable in ~50–100 RL steps
+#   300 nodes: sufficient connectivity at this delta_max (many edges per node)
+#   Use --num_grasps 500 or --generation_preset high_precision for better coverage
 rrt:
   target_size: 300         # target grasps per object after expansion
 
