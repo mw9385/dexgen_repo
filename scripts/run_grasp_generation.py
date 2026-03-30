@@ -374,15 +374,30 @@ def process_one_object(
 
     # Step 2: NFO quality filter
     #
-    # Quality threshold is finger-count-aware:
-    #   2-finger  → pinch_quality metric (opposition-based, range [0,1])
-    #               threshold = 0.3  (normals at least ~107° apart)
-    #   3+ finger → standard NFO ε-metric with torque normalisation
-    #               threshold = args.min_quality (from config/CLI)
+    # Threshold is finger-count-aware (physics-based):
+    #
+    #   2-finger : pinch_quality (opposition alignment, range [0,1])
+    #              The GraspSampler already pre-filters for opposition > 0.3.
+    #              We need a stricter threshold (0.5) so the seed set is small
+    #              enough that RRT actually has room to expand to target_size.
+    #              Requires normals roughly ≥ 120° apart → near-antipodal pinch.
+    #
+    #   3-finger : 3-contact force closure is harder to score highly than
+    #              4/5-finger; use half the default threshold so valid tripod
+    #              grasps are not over-filtered.
+    #
+    #   4-finger : standard NFO ε-metric with torque normalisation.
+    #
+    #   5-finger : same as 4-finger but naturally scores higher due to
+    #              better wrench-space coverage.
+    #
     if num_fingers <= 2:
-        effective_min_quality = 0.3   # pinch opposition threshold
+        effective_min_quality = 0.5
+    elif num_fingers == 3:
+        effective_min_quality = max(args.min_quality * 0.5, 0.002)
     else:
         effective_min_quality = args.min_quality
+
     nfo = NetForceOptimizer(mu=args.mu, min_quality=effective_min_quality,
                             fast_mode=args.fast_nfo)
     filtered_set = nfo.evaluate_set(seed_set, verbose=True)
@@ -390,6 +405,19 @@ def process_one_object(
     if len(filtered_set) < 10:
         print(f"  [!] Only {len(filtered_set)} grasps passed NFO for {spec.name}, skipping.")
         return None, None
+
+    # Cap seeds to at most target_size // 2 (keeping highest quality).
+    # This guarantees the RRT while-loop always has expansion headroom:
+    #   len(seeds) ≤ target//2  <  target  → loop always runs.
+    # Without this cap, if NFO passes more seeds than the target, RRT is
+    # skipped entirely and the graph has no connectivity structure.
+    max_seeds = max(args.num_grasps // 2, 10)
+    if len(filtered_set) > max_seeds:
+        filtered_set.grasps = sorted(
+            filtered_set.grasps, key=lambda g: g.quality, reverse=True
+        )[:max_seeds]
+        print(f"  [NFO] Capped to top-{len(filtered_set)} seeds by quality "
+              f"(target_size={args.num_grasps}, cap={max_seeds})")
 
     # Step 3: RRT expansion
     #
@@ -414,6 +442,8 @@ def process_one_object(
     #   Each RRT step perturbs by ≤ delta_max/3 so multiple steps per edge.
     delta_max_base = spec.size * 0.30          # was 0.60 — 2× tighter
     delta_pos_base = delta_max_base / 3.0      # step ≤ 1/3 of edge budget
+    # RRT uses fast_mode=True internally (speed); quality threshold matches
+    # the per-finger threshold so expanded nodes meet the same standard.
     expander = RRTGraspExpander(
         nfo=NetForceOptimizer(min_quality=effective_min_quality, fast_mode=True),
         target_size=args.num_grasps,
