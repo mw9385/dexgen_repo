@@ -31,8 +31,8 @@ hand:
 # Object pool — generates grasps for all combinations of shape × size
 object_pool:
   shapes: [cube, sphere, cylinder]   # primitive shapes to include
-  size_min: 0.04                     # minimum object size (m)
-  size_max: 0.09                     # maximum object size (m)
+  size_min: 0.02                     # minimum object size (m)
+  size_max: 0.05                     # maximum object size (m)
   num_sizes: 3                       # size steps per shape (total: 3×3 = 9 objects)
 
   # Override with a directory of mesh files instead of primitives:
