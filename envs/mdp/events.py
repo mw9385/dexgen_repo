@@ -358,15 +358,18 @@ def reset_to_random_grasp(
     # 8. Initialise action buffers (fixes last_action always being 0)
     # ------------------------------------------------------------------
     robot = env.scene["robot"]
-    current_q = robot.data.joint_pos[env_ids]  # (n, num_dof)
-    current_action = _joint_positions_to_normalized_action(robot, env_ids, current_q)
+    current_q = robot.data.joint_pos[env_ids]  # (n, num_dof=24)
+    current_action_full = _joint_positions_to_normalized_action(robot, env_ids, current_q)
+    # Action space excludes wrist (WRJ1/WRJ0 at indices 0-1), so slice [2:] for finger joints
+    action_dim = _get_action_dim(env, current_q.shape[-1])
+    current_action = current_action_full[:, (current_q.shape[-1] - action_dim):]
     if "last_action" not in env.extras:
         env.extras["last_action"] = torch.zeros(
-            env.num_envs, current_q.shape[-1], device=env.device
+            env.num_envs, action_dim, device=env.device
         )
     if "current_action" not in env.extras:
         env.extras["current_action"] = torch.zeros(
-            env.num_envs, current_q.shape[-1], device=env.device
+            env.num_envs, action_dim, device=env.device
         )
     # Reset action buffers to current joint positions for reset envs
     env.extras["last_action"][env_ids] = current_action
@@ -879,19 +882,41 @@ def _expand_grasp_joint_vector(
     target_num_dof: int,
 ) -> torch.Tensor:
     """
-    Expand/pad a stored grasp joint vector to the articulation DOF count.
+    Expand/pad a stored grasp joint vector to the full 24-DOF articulation count.
 
-    Some stored Shadow grasps use 22 finger joints, while Isaac Lab's Shadow
-    USD articulation exposes 24 joints with 2 wrist DOFs leading the vector.
+    Shadow Hand USD has 24 total joints:
+      [0-1]:  WRJ1, WRJ0        (wrist)
+      [2-5]:  FFJ4(pass), J3, J2, J1
+      [6-9]:  MFJ4(pass), J3, J2, J1
+      [10-13]: RFJ4(pass), J3, J2, J1
+      [14-18]: LFJ5(pass), LFJ4, J3, J2, J1
+      [19-23]: THJ4, J3, J2, J1, J0  (NO THJ5)
+
+    Supported input sizes:
+      24 → pass-through (new format, no expansion needed)
+      22 → old heuristic IK format: [FF×4, MF×4, RF×4, LF×5, TH×5] with
+           incorrect thumb (had THJ5 placeholder at TH[0]). Remaps correctly:
+             in[0-16]  → expanded[2-18]   (FF/MF/RF/LF blocks, all correct)
+             in[17]=0  skip (was THJ5 placeholder)
+             in[18-21] → expanded[19-22]  (THJ4-THJ1)
+             expanded[23] = 0             (THJ0, not in old format)
     """
     if joint_vec.shape[0] == target_num_dof:
         return joint_vec
-    if joint_vec.shape[0] == target_num_dof - 2:
-        expanded = torch.zeros(target_num_dof, device=joint_vec.device, dtype=joint_vec.dtype)
-        expanded[2:] = joint_vec
-        return expanded
 
     expanded = torch.zeros(target_num_dof, device=joint_vec.device, dtype=joint_vec.dtype)
+
+    if joint_vec.shape[0] == target_num_dof - 2:  # 22-DOF old format
+        # FF/MF/RF/LF blocks (in[0-16] → expanded[2-18]): correct as-is
+        n_finger_blocks = min(17, joint_vec.shape[0])
+        expanded[2:2 + n_finger_blocks] = joint_vec[:n_finger_blocks]
+        # TH block: skip old THJ5 placeholder (in[17]=0), map THJ4-THJ1 (in[18-21])
+        if joint_vec.shape[0] >= 22:
+            expanded[19:23] = joint_vec[18:22]  # THJ4, THJ3, THJ2, THJ1
+            # expanded[23] = THJ0 stays at 0
+        return expanded
+
+    # Fallback: zero-pad or truncate
     n_copy = min(target_num_dof, joint_vec.shape[0])
     expanded[:n_copy] = joint_vec[:n_copy]
     return expanded
@@ -1630,13 +1655,20 @@ def _set_robot_to_fingertip_config(
     Mapping:
       dist from object center → how "open" the hand is
       [0.02 m, 0.12 m] → joint scale [0.1, 0.9]
+
+    Shadow Hand 24-DOF USD layout (finger blocks only; wrist at [0-1] is untouched):
+      FF:  [2-5]   = FFJ4(passive), FFJ3, FFJ2, FFJ1
+      MF:  [6-9]   = MFJ4(passive), MFJ3, MFJ2, MFJ1
+      RF:  [10-13] = RFJ4(passive), RFJ3, RFJ2, RFJ1
+      LF:  [14-18] = LFJ5(passive), LFJ4, LFJ3, LFJ2, LFJ1
+      TH:  [19-23] = THJ4, THJ3, THJ2, THJ1, THJ0
     """
     robot = env.scene["robot"]
-    n     = len(env_ids)
 
-    hand_cfg       = getattr(env.cfg, "hand", None) or {}
-    num_fingers    = hand_cfg.get("num_fingers",    fingertip_positions.shape[1])
-    dof_per_finger = hand_cfg.get("dof_per_finger", 4)
+    hand_cfg    = getattr(env.cfg, "hand", None) or {}
+    num_fingers = hand_cfg.get("num_fingers", fingertip_positions.shape[1])
+    hand_name   = hand_cfg.get("name", "shadow")
+    num_dof     = robot.data.default_joint_pos.shape[-1]
 
     default_q = robot.data.default_joint_pos[env_ids].clone()
 
@@ -1646,12 +1678,40 @@ def _set_robot_to_fingertip_config(
     # Map [0.02, 0.12] → scale [0.1, 0.9]
     scale = ((ft_dist_from_obj - 0.02) / 0.10).clamp(0.0, 1.0) * 0.8 + 0.1
 
-    for f in range(num_fingers):
-        s = scale[:, f:f+1]
-        jrange = slice(f * dof_per_finger, f * dof_per_finger + dof_per_finger)
-        q_low  = robot.data.soft_joint_pos_limits[env_ids, jrange, 0]
-        q_high = robot.data.soft_joint_pos_limits[env_ids, jrange, 1]
-        default_q[:, jrange] = q_low + s * (q_high - q_low)
+    if hand_name == "shadow" and num_dof == 24:
+        # Shadow Hand 24-DOF USD layout — correct per-finger DOF starts
+        FINGER_STARTS = [2, 6, 10, 14, 19]   # FF, MF, RF, LF, TH
+        FINGER_NDOFS  = [4, 4,  4,  5,  5]
+
+        if num_fingers >= 5:
+            finger_to_block = [0, 1, 2, 3, 4]
+        elif num_fingers == 4:
+            finger_to_block = [0, 1, 2, 4]   # skip LF
+        elif num_fingers == 3:
+            finger_to_block = [0, 1, 4]
+        elif num_fingers == 2:
+            finger_to_block = [0, 4]
+        else:
+            finger_to_block = list(range(min(num_fingers, 5)))
+
+        for fi in range(min(num_fingers, len(finger_to_block))):
+            block  = finger_to_block[fi]
+            start  = FINGER_STARTS[block]
+            ndof   = FINGER_NDOFS[block]
+            s = scale[:, fi:fi+1]   # (n, 1)
+            jrange = slice(start, start + ndof)
+            q_low  = robot.data.soft_joint_pos_limits[env_ids, jrange, 0]
+            q_high = robot.data.soft_joint_pos_limits[env_ids, jrange, 1]
+            default_q[:, jrange] = q_low + s * (q_high - q_low)
+    else:
+        # Generic / Allegro fallback
+        dof_per_finger = hand_cfg.get("dof_per_finger", 4)
+        for f in range(num_fingers):
+            s = scale[:, f:f+1]
+            jrange = slice(f * dof_per_finger, f * dof_per_finger + dof_per_finger)
+            q_low  = robot.data.soft_joint_pos_limits[env_ids, jrange, 0]
+            q_high = robot.data.soft_joint_pos_limits[env_ids, jrange, 1]
+            default_q[:, jrange] = q_low + s * (q_high - q_low)
 
     robot.write_joint_state_to_sim(
         default_q,
@@ -1659,6 +1719,18 @@ def _set_robot_to_fingertip_config(
         env_ids=env_ids,
     )
     robot.set_joint_position_target(default_q, env_ids=env_ids)
+
+
+def _get_action_dim(env, num_dof: int) -> int:
+    """Return the action-space dimensionality (wrist joints excluded)."""
+    try:
+        return env.action_manager.action.shape[-1]
+    except (AttributeError, RuntimeError):
+        # Fallback: Shadow Hand excludes 2 wrist joints
+        hand_cfg = getattr(env.cfg, "hand", None) or {}
+        if hand_cfg.get("name", "shadow") == "shadow" and num_dof == 24:
+            return num_dof - 2   # 22 finger joints
+        return num_dof
 
 
 def _reset_to_default_pose(env, env_ids: torch.Tensor):
@@ -1673,9 +1745,11 @@ def _reset_to_default_pose(env, env_ids: torch.Tensor):
     env.extras["target_fingertip_pos"] = torch.zeros(
         env.num_envs, num_fingers * 3, device=env.device
     )
-    default_action = _joint_positions_to_normalized_action(robot, env_ids, joint_pos)
-    env.extras["last_action"] = torch.zeros(env.num_envs, num_dof, device=env.device)
-    env.extras["current_action"] = torch.zeros(env.num_envs, num_dof, device=env.device)
+    action_full = _joint_positions_to_normalized_action(robot, env_ids, joint_pos)
+    action_dim = _get_action_dim(env, num_dof)
+    default_action = action_full[:, (num_dof - action_dim):]  # drop wrist
+    env.extras["last_action"] = torch.zeros(env.num_envs, action_dim, device=env.device)
+    env.extras["current_action"] = torch.zeros(env.num_envs, action_dim, device=env.device)
     env.extras["last_action"][env_ids] = default_action
     env.extras["current_action"][env_ids] = default_action
 

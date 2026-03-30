@@ -8,29 +8,30 @@ Implements the core RL environment from DexterityGen §3.2 with:
   - Random object pool (cube / sphere / cylinder, multiple sizes)
   - Random Shadow Hand wrist position per episode
 
-Shadow Hand E-Series: 5 fingers, 22 actuated DOF + 2 wrist DOF in Isaac = 24 total DOF
-  FF×4 + MF×4 + RF×4 + LF×5 + TH×5 = 22 actuated DOF
-  Isaac Lab joints:  rh_FFJ1-4, rh_MFJ1-4, rh_RFJ1-4, rh_LFJ1-5, rh_THJ1-5
-  Fingertip links:   robot0_ffdistal, robot0_mfdistal, robot0_rfdistal, robot0_lfdistal, robot0_thdistal
+Shadow Hand E-Series: 5 fingers, 20 actuated DOF + 4 passive = 24 total USD joints
+  Actuated (20): WRJ1/WRJ0(wrist) + FFJ3/J2/J1 + MFJ3/J2/J1 + RFJ3/J2/J1 + LFJ4/J3/J2/J1 + THJ4/J3/J2/J1/J0
+  Passive  ( 4): FFJ4, MFJ4, RFJ4 (spread), LFJ5 (coupling) — driven by tendons, not directly controlled
+  Policy action space: 22 finger joints (excl. wrist WRJ1/WRJ0); wrist is fixed at reset pose
+  Fingertip links: robot0_ffdistal, robot0_mfdistal, robot0_rfdistal, robot0_lfdistal, robot0_thdistal
 
 =======================================================================
   OBSERVATION SPLIT  (see mdp/observations.py for full details)
 =======================================================================
 
-  ACTOR (policy) — 107 dims
+  ACTOR (policy) — 101 dims
   ─────────────────────────────────────────────────────────────────
-  joint_pos_normalized       24   (encoder, normalised)
-  joint_vel_normalized       24   (encoder derivative)
+  joint_pos_normalized       22   (finger joints only, excl. wrist)
+  joint_vel_normalized       22   (finger joints only, excl. wrist)
   fingertip_pos_obj_frame    15   (FK in object-centric frame, 5×3)
   rel_fingertip_to_goal      15   (goal−current in obj frame, 5×3)
   fingertip_contact_binary    5   (tactile: binary contact per tip)
-  last_action                24   (previous joint targets)
+  last_action                22   (previous joint targets, excl. wrist)
   ─────────────────────────────────────────────────────────────────
-  Total: 24+24+15+15+5+24 = 107
+  Total: 22+22+15+15+5+22 = 101
 
-  CRITIC (privileged) — 138 dims
+  CRITIC (privileged) — 132 dims
   ─────────────────────────────────────────────────────────────────
-  [actor obs]               107   (incl. rel_fingertip_to_goal)
+  [actor obs]               101   (incl. rel_fingertip_to_goal)
   object_pos_world            3   (true 3-D position)
   object_quat_world           4   (true orientation)
   object_lin_vel              3   (true linear velocity)
@@ -38,7 +39,7 @@ Shadow Hand E-Series: 5 fingers, 22 actuated DOF + 2 wrist DOF in Isaac = 24 tot
   fingertip_contact_forces   15   (full 3-D forces per tip, 5×3)
   dr_params                   3   (mass / friction / damping)
   ─────────────────────────────────────────────────────────────────
-  Total: 107+3+4+3+3+15+3 = 138
+  Total: 101+3+4+3+3+15+3 = 132
 
 =======================================================================
   DOMAIN RANDOMIZATION  (see mdp/domain_rand.py for ranges)
@@ -323,10 +324,22 @@ if _ISAACLAB_AVAILABLE:
 if _ISAACLAB_AVAILABLE:
     @configclass
     class AnyGraspActionsCfg:
-        """Normalized joint-position actions mapped to Allegro joint limits."""
+        """
+        Normalized joint-position actions for Shadow Hand finger joints only.
+
+        Wrist joints (WRJ1, WRJ0) are excluded from the policy action space.
+        The wrist is positioned at reset and remains fixed during the episode.
+        Action dim = 22 (all finger joints incl. passive spread joints at 0).
+        """
         joint_pos = JointPositionToLimitsActionCfg(
             asset_name="robot",
-            joint_names=[".*"],
+            joint_names=[
+                "robot0_FFJ.*",   # FFJ4(passive), FFJ3, FFJ2, FFJ1  (4 joints)
+                "robot0_MFJ.*",   # MFJ4(passive), MFJ3, MFJ2, MFJ1  (4 joints)
+                "robot0_RFJ.*",   # RFJ4(passive), RFJ3, RFJ2, RFJ1  (4 joints)
+                "robot0_LFJ.*",   # LFJ5(passive), LFJ4, LFJ3, LFJ2, LFJ1  (5 joints)
+                "robot0_THJ.*",   # THJ4, THJ3, THJ2, THJ1, THJ0  (5 joints)
+            ],
             rescale_to_limits=True,
         )
 
@@ -453,17 +466,17 @@ if _ISAACLAB_AVAILABLE:
         randomize_object_physics = EventTerm(
             func=mdp_dr.randomize_object_physics,
             mode="reset",
-            params={"mass_range": (0.03, 0.30), "friction_range": (0.30, 1.20), "restitution_range": (0.00, 0.40)},
+            params={"mass_range": (0.05, 0.15), "friction_range": (0.5, 1.0), "restitution_range": (0.00, 0.20)},
         )
         randomize_robot_physics = EventTerm(
             func=mdp_dr.randomize_robot_physics,
             mode="reset",
-            params={"damping_range": (0.01, 0.30), "armature_range": (0.001, 0.03)},
+            params={"damping_range": (0.01, 0.10), "armature_range": (0.001, 0.01)},
         )
         randomize_action_delay = EventTerm(
             func=mdp_dr.randomize_action_delay,
             mode="reset",
-            params={"max_delay": 2},
+            params={"max_delay": 1},
         )
         reset_to_random_grasp = EventTerm(func=mdp_events.reset_to_random_grasp, mode="reset")
 
