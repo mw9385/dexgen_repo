@@ -356,19 +356,25 @@ if _ISAACLAB_AVAILABLE:
             weight=8.0,
             params={"alpha_hand": 2.0},
         )
-        # Fingertip tracking: exp(-20*dist) ∈ (0,1], averaged over fingertips.
-        #   Direct dense signal for fingertip → goal position.
+        # Fingertip tracking: exp(-alpha*dist) ∈ (0,1], averaged over fingertips.
+        #   alpha=10 (was 20): wider basin so reward is meaningful at 5-10 cm away.
+        #   At 5cm: exp(-0.5)=0.61 (was exp(-1.0)=0.37) → stronger early gradient.
         #   weight=8.0 — same weight as joint goal, complementary signal.
         fingertip_tracking = RewTerm(
             func=mdp_rewards.fingertip_tracking_reward,
             weight=8.0,
-            params={"alpha": 20.0},
+            params={"alpha": 10.0},
         )
-        # alpha_bonus (paper): large sparse bonus when goal is achieved.
+        # Soft grasp success: fraction_in + all_in_bonus ∈ [0, 2].
+        #   threshold=5cm (was 3cm): easier to trigger, especially for 5-finger hands.
+        #   min_fraction=0.6: at least 3/5 fingers must be in range.
+        #   reward fires as soon as 3/5 fingertips reach threshold, max at 5/5.
+        #   weight=125 (was 250): output range is now [0,2] instead of [0,1],
+        #   so effective max reward is 125*2=250 — same nominal peak value.
         grasp_success = RewTerm(
             func=mdp_rewards.grasp_success_reward,
-            weight=250.0,
-            params={"threshold": 0.03},  # 2cm→3cm: easier to get first success signal
+            weight=125.0,
+            params={"threshold": 0.05, "min_fraction": 0.6},
         )
         # --- Style reward (DexGen paper: fingertip velocity) ---
         # weight -0.5→-0.1: now uses mean-over-fingers (not sum), so

@@ -520,7 +520,7 @@ def _sample_nearby_goal_index(
 # Rolling goal: update goal when current goal is achieved mid-episode
 # ---------------------------------------------------------------------------
 
-def update_rolling_goal(env, success_threshold: float = 0.02) -> int:
+def update_rolling_goal(env, success_threshold: float = 0.05) -> int:
     """
     Called every step. For each env where ALL fingertips are within
     *success_threshold* of the current goal, select a new nearby goal
@@ -532,8 +532,8 @@ def update_rolling_goal(env, success_threshold: float = 0.02) -> int:
 
     Args:
         success_threshold: distance (m) at which goal is considered reached.
-            Slightly looser than grasp_success_reward (1 cm) so the rolling
-            goal triggers before the sparse bonus fires.
+            5 cm (was 2 cm) — matches grasp_success_reward threshold so the
+            rolling goal triggers as soon as the bonus fires.
 
     Returns:
         Number of envs whose goal was updated this step.

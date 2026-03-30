@@ -187,13 +187,49 @@ def fingertip_tracking_reward(env, alpha: float = 20.0) -> torch.Tensor:
     return torch.exp(-alpha * dist).mean(dim=-1)                # (N,)
 
 
-def grasp_success_reward(env, threshold: float = 0.01) -> torch.Tensor:
-    """+1 when ALL fingertips within threshold. Returns: (N,) binary"""
+def grasp_success_reward(
+    env,
+    threshold: float = 0.05,
+    min_fraction: float = 0.6,
+) -> torch.Tensor:
+    """
+    Soft grasp-success reward.
+
+    Returns a value in [0, 1] that increases as more fingertips approach the
+    goal and reaches 1.0 only when ALL tips are within threshold.
+
+    Design:
+      - fraction_in  = mean(dist < threshold)  ∈ [0, 1]
+      - all_in_bonus = 1 if ALL tips < threshold else 0
+      - reward = fraction_in + all_in_bonus   (clipped to [0, 1] implicitly
+                                               since the weight carries scale)
+
+    The `min_fraction` gate suppresses the reward entirely when fewer than
+    min_fraction of fingers are close, preventing spurious signal when only
+    one stray finger happens to be near the goal by chance.
+
+    Previous binary all()-version required 5/5 fingertips within 2-3 cm
+    simultaneously, which almost never fires during early training and gives
+    zero gradient signal until the policy accidentally achieves it.
+
+    With threshold=5 cm:
+      3/5 fingers within 5 cm → fraction=0.6 → reward starts firing
+      5/5 fingers within 5 cm → fraction=1.0 + bonus=1.0 → max reward
+
+    Returns: (N,) in [0.0, 2.0]  (weight in config should be halved vs binary)
+    """
     nf = _get_num_fingers(env)
     current = fingertip_positions_in_object_frame(env).reshape(-1, nf, 3)
-    target = target_fingertip_positions(env).reshape(-1, nf, 3)
-    dist = torch.norm(current - target, dim=-1)
-    return (dist < threshold).all(dim=-1).float()
+    target  = target_fingertip_positions(env).reshape(-1, nf, 3)
+    dist    = torch.norm(current - target, dim=-1)          # (N, F)
+
+    in_threshold = (dist < threshold).float()               # (N, F)
+    fraction_in  = in_threshold.mean(dim=-1)                # (N,) ∈ [0, 1]
+    all_in       = in_threshold.min(dim=-1).values          # (N,) 0 or 1
+
+    # Gate: suppress reward if fewer than min_fraction fingers are in range
+    gate = (fraction_in >= min_fraction).float()
+    return gate * (fraction_in + all_in)                    # (N,) ∈ [0, 2]
 
 # ═══════════════════════════════════════════════════════════
 # 2. STYLE REWARD
