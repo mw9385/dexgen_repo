@@ -194,7 +194,7 @@ def _resolve_finger_counts(args, hand_cfg: dict) -> list[int]:
 
 def _solve_ik_for_grasp(
     fingertip_positions: np.ndarray,   # (num_fingers, 3) in object frame
-    num_dof: int = 22,
+    num_dof: int = 24,
     hand_name: str = "shadow",
 ) -> np.ndarray:
     """
@@ -202,18 +202,23 @@ def _solve_ik_for_grasp(
 
     Supported hands
     ---------------
-    shadow (22 actuated DOF = Isaac Lab rh_* joints):
-      Layout (Isaac Lab ordering):
-        0-3   rh_FFJ4, rh_FFJ3, rh_FFJ2, rh_FFJ1   (forefinger: J4=spread)
-        4-7   rh_MFJ4, rh_MFJ3, rh_MFJ2, rh_MFJ1   (middle finger)
-        8-11  rh_RFJ4, rh_RFJ3, rh_RFJ2, rh_RFJ1   (ring finger)
-        12-16 rh_LFJ5, rh_LFJ4, rh_LFJ3, rh_LFJ2, rh_LFJ1  (little finger, 5 DOF)
-        17-21 rh_THJ5, rh_THJ4, rh_THJ3, rh_THJ2, rh_THJ1  (thumb, 5 DOF)
-      NOTE: exact joint ordering varies by Isaac Lab version; we use a
-      simplified per-finger flexion heuristic that is robust to reordering:
-        - J1/J2/J3 (flexion): scale × [1.5, 1.2, 0.8]
-        - J4 (spread/abduction): 0.0 (neutral)
-        - J5 (LF only – extra MCP): 0.0
+    shadow (24-DOF USD layout, Isaac Lab Shadow Hand E-Series):
+      Indices in the 24-joint articulation array:
+        [0]     WRJ1   (wrist, always 0)
+        [1]     WRJ0   (wrist, always 0)
+        [2]     FFJ4   (passive spread, always 0)
+        [3-5]   FFJ3, FFJ2, FFJ1   (distal→proximal flexion)
+        [6]     MFJ4   (passive spread, always 0)
+        [7-9]   MFJ3, MFJ2, MFJ1
+        [10]    RFJ4   (passive spread, always 0)
+        [11-13] RFJ3, RFJ2, RFJ1
+        [14]    LFJ5   (passive coupling, always 0)
+        [15]    LFJ4   (spread, always 0)
+        [16-18] LFJ3, LFJ2, LFJ1
+        [19]    THJ4   (abduction)
+        [20-23] THJ3, THJ2, THJ1, THJ0  (flexion, distal→proximal)
+      NOTE: THJ5 does NOT exist in the Shadow Hand USD (unlike some models).
+      The 4 passive joints (FFJ4, MFJ4, RFJ4, LFJ5) are kept at 0.
 
     allegro / generic (16 DOF, 4 fingers × 4 joints):
       All 4 joints per finger = scale × 1.57
@@ -235,78 +240,66 @@ def _solve_ik_for_grasp(
     scale = np.clip((ft_dist - 0.02) / 0.10, 0.0, 1.0) * 0.8 + 0.1  # (num_fingers,)
 
     if hand_name == "shadow" or num_dof in (22, 24):
-        # ── Shadow Hand layout ──────────────────────────────────────────────
-        # For each of the 4 "long" fingers (FF/MF/RF/LF), joints per finger:
-        #   [spread, J3, J2, J1]  where J1 is most proximal flexion joint.
-        # Thumb (5 joints): [THJ5, THJ4, THJ3, THJ2, THJ1].
-        # We set flexion joints (J1-J3) proportional to scale and leave spread=0.
+        # ── Shadow Hand 24-DOF USD layout ────────────────────────────────────
+        # Per-finger block layout in the 24-DOF joint array:
+        #   WR:  [0-1]   = WRJ1, WRJ0       (wrist; always 0)
+        #   FF:  [2-5]   = FFJ4(passive), FFJ3, FFJ2, FFJ1
+        #   MF:  [6-9]   = MFJ4(passive), MFJ3, MFJ2, MFJ1
+        #   RF:  [10-13] = RFJ4(passive), RFJ3, RFJ2, RFJ1
+        #   LF:  [14-18] = LFJ5(passive), LFJ4, LFJ3, LFJ2, LFJ1
+        #   TH:  [19-23] = THJ4, THJ3, THJ2, THJ1, THJ0  (NO THJ5)
         #
-        # Finger order in grasps: FF(0), MF(1), RF(2), LF(3), TH(4)
-        # DOF block sizes: FF=4, MF=4, RF=4, LF=5, TH=5 → total 22
+        # Passive/spread joints (FFJ4=2, MFJ4=6, RFJ4=10, LFJ5=14, LFJ4=15)
+        # stay at 0; only flexion joints are set from scale.
 
-        # For each regular finger (4 DOF: [spread, J3, J2, J1]):
-        #   J3 (distal)  = scale * 0.80 rad
-        #   J2 (middle)  = scale * 1.20 rad
-        #   J1 (proximal)= scale * 1.50 rad
-        #   spread = 0.0
-        FINGER_DOFS = [4, 4, 4, 5, 5]      # FF, MF, RF, LF, TH
-        n_regular_fingers = min(num_fingers, 4)  # FF/MF/RF/LF
-        has_thumb = (num_fingers >= 4)  # last finger slot = thumb
+        # Finger start indices and per-finger sizes in the 24-DOF array:
+        FINGER_STARTS = [2, 6, 10, 14, 19]  # FF, MF, RF, LF, TH
+        FINGER_DOFS   = [4, 4,  4,  5,  5]
 
-        finger_map = list(range(min(num_fingers, 4)))  # which grasps → which DOF blocks
         if num_fingers >= 5:
-            # 5-finger: [FF, MF, RF, LF, TH] → blocks [0,1,2,3,4]
-            finger_to_block = list(range(5))
+            finger_to_block = [0, 1, 2, 3, 4]
         elif num_fingers == 4:
-            # 4-finger: [FF, MF, RF, TH] → blocks [0,1,2,4] (skip LF block)
+            # 4-finger: [FF, MF, RF, TH] → skip LF block (3)
             finger_to_block = [0, 1, 2, 4]
         elif num_fingers == 3:
-            # 3-finger: [FF, MF, TH] → blocks [0,1,4]
             finger_to_block = [0, 1, 4]
         elif num_fingers == 2:
-            # 2-finger: [FF, TH] → blocks [0,4]
             finger_to_block = [0, 4]
         else:
             finger_to_block = list(range(num_fingers))
 
-        # Build DOF start offsets from FINGER_DOFS blocks
-        dof_starts = [0]
-        for d in FINGER_DOFS:
-            dof_starts.append(dof_starts[-1] + d)
-        # dof_starts = [0, 4, 8, 12, 17, 22]
-
         for fi in range(min(num_fingers, len(finger_to_block))):
             s = float(scale[fi])
             block = finger_to_block[fi]
-            start = dof_starts[block]
+            start = FINGER_STARTS[block]
             ndof  = FINGER_DOFS[block]
 
             if block == 4:
-                # Thumb (5 DOF: [THJ5, THJ4, THJ3, THJ2, THJ1])
-                # THJ5 = rotation ~0; THJ4 = abduction; THJ1-THJ3 = flexion
+                # Thumb: [THJ4, THJ3, THJ2, THJ1, THJ0] at indices [19-23]
+                # NO THJ5 — Shadow Hand USD has 5 thumb joints starting at THJ4.
                 if start + 5 <= num_dof:
-                    joint_angles[start + 0] = 0.0          # THJ5 (rotation, neutral)
-                    joint_angles[start + 1] = s * 0.50     # THJ4 (abduction ≈ 0.5 max)
-                    joint_angles[start + 2] = s * 1.00     # THJ3 (flexion)
-                    joint_angles[start + 3] = s * 0.80     # THJ2 (flexion)
-                    joint_angles[start + 4] = s * 0.60     # THJ1 (flexion)
+                    joint_angles[start + 0] = s * 0.50     # THJ4 (abduction)
+                    joint_angles[start + 1] = s * 1.00     # THJ3 (flexion)
+                    joint_angles[start + 2] = s * 0.80     # THJ2 (flexion)
+                    joint_angles[start + 3] = s * 0.60     # THJ1 (flexion)
+                    joint_angles[start + 4] = s * 0.40     # THJ0 (flexion)
             elif block == 3:
-                # LF (5 DOF: [LFJ5, LFJ4, LFJ3, LFJ2, LFJ1])
+                # LF: [LFJ5(passive), LFJ4, LFJ3, LFJ2, LFJ1] at [14-18]
                 if start + 5 <= num_dof:
-                    joint_angles[start + 0] = 0.0          # LFJ5 (MCP extra, neutral)
-                    joint_angles[start + 1] = 0.0          # LFJ4 (spread, neutral)
+                    joint_angles[start + 0] = 0.0          # LFJ5 passive, always 0
+                    joint_angles[start + 1] = 0.0          # LFJ4 spread, neutral
                     joint_angles[start + 2] = s * 0.80     # LFJ3 (distal)
                     joint_angles[start + 3] = s * 1.20     # LFJ2 (middle)
                     joint_angles[start + 4] = s * 1.50     # LFJ1 (proximal)
             else:
-                # Regular finger (4 DOF: [spread, J3, J2, J1])
+                # Regular finger (4 DOF: [passive-spread, J3, J2, J1])
                 if start + 4 <= num_dof:
-                    joint_angles[start + 0] = 0.0          # J4 spread, neutral
+                    joint_angles[start + 0] = 0.0          # J4 passive spread, always 0
                     joint_angles[start + 1] = s * 0.80     # J3 distal flexion
                     joint_angles[start + 2] = s * 1.20     # J2 middle flexion
                     joint_angles[start + 3] = s * 1.50     # J1 proximal flexion
 
-        # Wrist DOF 22-23 (if present): keep at 0
+        # [0-1] WRJ1, WRJ0: always 0 (wrist is positioned by root pose, not joints)
     else:
         # ── Generic / Allegro fallback: uniform scale per finger ────────────
         dof_per_finger = max(1, num_dof // max(num_fingers, 1))
@@ -319,7 +312,7 @@ def _solve_ik_for_grasp(
     return joint_angles
 
 
-def _attach_joint_angles_to_graph(graph, num_dof: int = 22, dof_per_finger: int = 4,
+def _attach_joint_angles_to_graph(graph, num_dof: int = 24, dof_per_finger: int = 4,
                                    hand_name: str = "shadow"):
     """
     Solve heuristic IK for every grasp in a GraspGraph and store the result
@@ -348,7 +341,7 @@ def process_one_object(
     args,
     seed_offset: int,
     num_fingers: int = 4,
-    num_dof: int = 22,
+    num_dof: int = 24,
     dof_per_finger: int = 4,
     hand_name: str = "shadow",
 ) -> tuple:

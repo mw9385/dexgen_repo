@@ -41,12 +41,12 @@ env:
 # Asymmetric Actor-Critic PPO (rl_games)
 # ==============================================================================
 #
-#   Shadow Hand (24 DOF, 5 fingers):
-#   Actor  network: MLP [1024, 512, 512, 256, 256]  input: 107-dim policy obs
-#     joint_pos(24) + joint_vel(24) + fingertip_pos(15) + target_fps(15)
-#     + contact_binary(5) + last_action(24)
-#   Critic network: MLP [1024, 512, 512, 256, 256]  input: 138-dim privileged obs
-#     [actor 107] + obj_pose(7) + obj_vel(6) + contact_forces(15) + dr_params(3)
+#   Shadow Hand (22 finger DOF, 5 fingers; wrist excluded from policy):
+#   Actor  network: MLP [1024, 512, 512, 256, 256]  input: 101-dim policy obs
+#     joint_pos(22) + joint_vel(22) + fingertip_pos(15) + target_fps(15)
+#     + contact_binary(5) + last_action(22)
+#   Critic network: MLP [1024, 512, 512, 256, 256]  input: 132-dim privileged obs
+#     [actor 101] + obj_pose(7) + obj_vel(6) + contact_forces(15) + dr_params(3)
 #
 #   The central_value_config block enables the separate critic network.
 #   rl_games reads env observations["policy"] for actor and
@@ -152,16 +152,16 @@ logging:
 domain_randomization:
 
   object_physics:
-    mass_range:        [0.03, 0.30]   # kg
-    friction_range:    [0.30, 1.20]
-    restitution_range: [0.00, 0.40]
+    mass_range:        [0.05, 0.15]   # kg  (narrowed from [0.03, 0.30])
+    friction_range:    [0.50, 1.00]   # -   (narrowed from [0.30, 1.20])
+    restitution_range: [0.00, 0.20]   # -   (narrowed from [0.00, 0.40])
 
   robot_physics:
-    damping_range:     [0.01, 0.30]   # N·m·s/rad
-    armature_range:    [0.001, 0.03]  # kg·m²
+    damping_range:     [0.01, 0.10]   # N·m·s/rad  (narrowed from [0.01, 0.30])
+    armature_range:    [0.001, 0.01]  # kg·m²      (narrowed from [0.001, 0.03])
 
   action_delay:
-    max_delay: 2                       # steps  (0 = no delay)
+    max_delay: 1                       # steps  (reduced from 2; 0 = no delay)
 
   obs_noise:
     joint_pos_std:     0.005           # rad

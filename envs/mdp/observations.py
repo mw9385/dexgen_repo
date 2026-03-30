@@ -5,20 +5,20 @@ Observation functions – Actor (policy) and Critic (privileged).
   ASYMMETRIC ACTOR-CRITIC OBSERVATION SPLIT
 =======================================================================
 
-  ACTOR (policy) — 107 dims — available on a real robot at deployment
+  ACTOR (policy) — 101 dims — available on a real robot at deployment
   ┌─────────────────────────────────────────────────────────────────┐
-  │ joint_pos_normalized       24   encoder, normalised to [-1, 1] │
-  │ joint_vel_normalized       24   encoder derivative             │
+  │ joint_pos_normalized       22   finger joints only (excl wrist)│
+  │ joint_vel_normalized       22   finger joints only (excl wrist)│
   │ fingertip_pos_obj_frame    15   FK → object-centric frame, 5×3 │
   │ rel_fingertip_to_goal      15   (goal - current) in obj frame  │
   │ fingertip_contact_binary    5   tactile: 1 if tip in contact   │
-  │ last_action                24   previous joint targets         │
+  │ last_action                22   previous joint targets         │
   └─────────────────────────────────────────────────────────────────┘
-  Total: 24+24+15+15+5+24 = 107
+  Total: 22+22+15+15+5+22 = 101
 
-  CRITIC (privileged) — 138 dims — simulation-only, training only
+  CRITIC (privileged) — 132 dims — simulation-only, training only
   ┌─────────────────────────────────────────────────────────────────┐
-  │ [All actor obs]           107                                   │
+  │ [All actor obs]           101                                   │
   │ object_pos_world            3   true 3-D position              │
   │ object_quat_world           4   true orientation               │
   │ object_lin_vel              3   true linear velocity           │
@@ -26,10 +26,10 @@ Observation functions – Actor (policy) and Critic (privileged).
   │ fingertip_contact_forces   15   full 3-D force per tip, 5×3    │
   │ dr_params                   3   mass / obj_friction / damping  │
   └─────────────────────────────────────────────────────────────────┘
-  Total: 107 + 3 + 4 + 3 + 3 + 15 + 3 = 138
+  Total: 101 + 3 + 4 + 3 + 3 + 15 + 3 = 132
 
-  Hand: Shadow Hand E-Series — 5 fingers, 24 DOF in Isaac Lab
-        (2 wrist WRJ0/WRJ1 + 22 finger joints)
+  Hand: Shadow Hand E-Series — 5 fingers, 24 total USD DOF
+        Policy observes/controls 22 finger joints (wrist WRJ0/WRJ1 excluded)
 
 =======================================================================
   Tactile note:
@@ -52,24 +52,41 @@ import torch
 
 def joint_positions_normalized(env) -> torch.Tensor:
     """
-    Joint positions normalised to [-1, 1] using soft joint limits.
-    Returns: (N, 16)
+    Finger joint positions normalised to [-1, 1] using soft joint limits.
+
+    Returns finger joints only (wrist WRJ1/WRJ0 excluded), matching the
+    22-dimensional action space. Shadow Hand 24-DOF array: [0-1]=wrist,
+    [2-23]=finger joints → return [:, 2:].
+
+    Returns: (N, 22)
     """
     asset = env.scene["robot"]
     q = asset.data.joint_pos
     q_low  = asset.data.soft_joint_pos_limits[..., 0]
     q_high = asset.data.soft_joint_pos_limits[..., 1]
     q_norm = 2.0 * (q - q_low) / (q_high - q_low + 1e-6) - 1.0
-    return q_norm.clamp(-1.0, 1.0)
+    q_norm = q_norm.clamp(-1.0, 1.0)
+    # Exclude wrist joints at indices 0-1; keep finger joints [2:]
+    hand_cfg = getattr(env.cfg, "hand", None) or {}
+    if hand_cfg.get("name", "shadow") == "shadow" and q.shape[-1] == 24:
+        return q_norm[:, 2:]
+    return q_norm
 
 
 def joint_velocities_normalized(env) -> torch.Tensor:
     """
-    Joint velocities clipped and normalised by max velocity (~5 rad/s).
-    Returns: (N, 16)
+    Finger joint velocities clipped and normalised by max velocity (~5 rad/s).
+
+    Wrist joints excluded to match 22-dim action space.
+
+    Returns: (N, 22)
     """
     asset = env.scene["robot"]
-    return (asset.data.joint_vel / 5.0).clamp(-1.0, 1.0)
+    vel_norm = (asset.data.joint_vel / 5.0).clamp(-1.0, 1.0)
+    hand_cfg = getattr(env.cfg, "hand", None) or {}
+    if hand_cfg.get("name", "shadow") == "shadow" and vel_norm.shape[-1] == 24:
+        return vel_norm[:, 2:]
+    return vel_norm
 
 
 def fingertip_positions_in_object_frame(env) -> torch.Tensor:

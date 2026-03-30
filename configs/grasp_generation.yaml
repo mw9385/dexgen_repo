@@ -19,14 +19,14 @@
 hand:
   name: shadow
   num_fingers: 5
-  num_dof: 22
-  dof_per_finger: 4              # average (LF=5, TH=5, FF/MF/RF=4)
+  num_dof: 24                    # total USD joints (20 actuated + 4 passive)
+  dof_per_finger: 4              # average (LF=5, TH=5, FF/MF/RF=4); wrist not counted
   fingertip_links:
-    - rh_fftip    # index (first finger)
-    - rh_mftip    # middle finger
-    - rh_rftip    # ring finger
-    - rh_lftip    # little finger
-    - rh_thtip    # thumb
+    - robot0_ffdistal   # forefinger
+    - robot0_mfdistal   # middle finger
+    - robot0_rfdistal   # ring finger
+    - robot0_lfdistal   # little finger
+    - robot0_thdistal   # thumb
 
 # Object pool — generates grasps for all combinations of shape × size
 object_pool:
