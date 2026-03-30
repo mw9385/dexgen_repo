@@ -137,9 +137,13 @@ def _apply_generation_preset(args):
         return
 
     preset_values = {
-        "num_seed_grasps": 2000,
-        "num_grasps": 1000,
-        "min_quality": 0.01,
+        "num_seed_grasps": 2000,   # 7× more seed candidates (better coverage)
+        "num_grasps": 1000,         # 3× more RRT nodes (denser graph)
+        "min_quality": 0.005,       # same as default — do NOT raise this
+        # min_quality=0.01 was incorrectly stricter; NFO ε-metric values are
+        # typically 0.001–0.008 on primitive objects so 0.01 filters 100% of
+        # candidates and RRT generates zero grasps.  The quality improvement
+        # in high_precision comes from MORE grasps, not a stricter threshold.
         "mu": 0.5,
         "fast_nfo": False,
         "isaac_refine_batch_envs": 32,
