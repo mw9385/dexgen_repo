@@ -112,9 +112,38 @@ For training-quality graphs, Isaac refinement should be treated as the default p
     --headless --generation_preset high_precision
 ```
 
-This preset currently defaults to `num_seed_grasps=2000`, `num_grasps=1000`,
-`min_quality=0.01`, `fast_nfo=False`, `isaac_refine=True`,
-and `isaac_refine_batch_envs=32`.
+`high_precision` preset values:
+
+| Parameter | default | high_precision |
+|-----------|---------|----------------|
+| `num_seed_grasps` | 300 | 2000 |
+| `num_grasps` (RRT target) | 300 | 1000 |
+| `fast_nfo` | False | False |
+| `isaac_refine` | True | True (forced) |
+| `isaac_refine_batch_envs` | 16 | 32 |
+
+**Multi-finger generation:**
+
+`--max_num_fingers N`을 지정하면 2부터 N까지의 모든 손가락 개수에 대해 자동으로 grasp를 생성합니다.
+
+| Flag | 생성되는 finger count |
+|------|----------------------|
+| `--max_num_fingers 5` | 2, 3, 4, 5 |
+| `--num_fingers 4` | 4 (단일) |
+| `--finger_counts 2,3,5` | 2, 3, 5 (지정) |
+
+각 `(object × finger_count)` 조합마다 별도 GraspGraph가 생성되며, 이름은 `"cube_0.035_f2"`, `"cube_0.035_f3"` 등으로 태깅됩니다.
+
+**Multi-finger + High-precision (권장):**
+
+```bash
+/workspace/IsaacLab/isaaclab.sh -p scripts/run_grasp_generation.py \
+    --headless \
+    --max_num_fingers 5 \
+    --generation_preset high_precision
+```
+
+이 명령 하나로 모든 shape × size × finger_count 조합(예: 3 shape × 3 size × 4 finger = 36개 graph)을 고품질로 생성합니다. object별로 체크포인트가 저장되므로 중간에 중단돼도 결과가 보존됩니다.
 
 **Recommended training workflow:**
 
