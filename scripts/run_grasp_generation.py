@@ -105,9 +105,16 @@ def parse_args():
     )
     p.add_argument(
         "--isaac_refine",
-        action="store_true",
-        default=False,
-        help="After Stage 0 generation, validate grasps in Isaac Sim and overwrite each grasp with the true simulated tuple.",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "After Stage 0, validate grasps in Isaac Sim and overwrite each grasp "
+            "with the true simulated (joint_angles, object_pos_hand, object_quat_hand). "
+            "DEFAULT: True — without this, object_pos_hand is None and the RL reset "
+            "cannot reproduce the correct hand-object relative pose; the hand and object "
+            "will be placed at random positions each episode.  "
+            "Use --no-isaac_refine only for quick smoke-tests."
+        ),
     )
     p.add_argument(
         "--isaac_refine_batch_envs",
@@ -659,6 +666,15 @@ def main():
                 keep_top_k=args.keep_top_k,
             )
             multi_graph.save(graph_path)
+        else:
+            print(
+                "\n[WARNING] --no-isaac_refine: grasp.object_pos_hand / object_quat_hand "
+                "are NOT set.\n"
+                "  The RL reset will place hand and object at RANDOM relative positions "
+                "each episode\n"
+                "  because it cannot reproduce the correct hand-object pose without the\n"
+                "  simulated FK result.  Re-run with --isaac_refine for correct training data.\n"
+            )
 
         # ------------------------------------------------------------------
         # Validate the saved graph

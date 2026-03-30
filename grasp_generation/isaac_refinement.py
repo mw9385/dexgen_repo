@@ -86,10 +86,12 @@ def _refine_single_object_graph(
                 ),
             )[: int(keep_top_k)]
 
+        # Use the same 0.15 multiplier as run_grasp_generation.py so that graph
+        # edges after refinement are consistent with the pre-refinement graph.
         refined = build_graph_from_grasps(
             all_grasps,
             object_name=subgraph.object_name,
-            delta_max=float(object_spec.get("size", 0.06)) * 0.60,
+            delta_max=float(object_spec.get("size", 0.06)) * 0.15,
             num_fingers=num_fingers,
         )
         refined.grasp_set = GraspSet(grasps=all_grasps, object_name=subgraph.object_name)
