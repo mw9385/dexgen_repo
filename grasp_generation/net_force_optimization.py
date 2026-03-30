@@ -31,6 +31,40 @@ from .grasp_sampler import Grasp, GraspSet
 
 
 # ---------------------------------------------------------------------------
+# 2-finger pinch quality (opposition-based)
+# ---------------------------------------------------------------------------
+
+def pinch_quality(positions: np.ndarray, normals: np.ndarray) -> float:
+    """
+    Quality metric for 2-contact (pinch) grasps.
+
+    Full 6-DOF force closure is generally unachievable with only 2 contacts
+    (the LP wrench-space analysis always returns 0).  Instead we use an
+    opposition-alignment score:
+
+        quality = max(0, -n0 · n1)
+
+    where n0, n1 are the unit outward normals.  A perfectly antipodal pair
+    (normals pointing in exactly opposite directions) scores 1.0; contacts
+    on the same side score 0.
+
+    A secondary weight adds a mild bonus for contacts that are spread apart
+    (spread_fraction = dist / max_possible_dist, capped at 1).
+    """
+    n0 = normals[0] / (np.linalg.norm(normals[0]) + 1e-8)
+    n1 = normals[1] / (np.linalg.norm(normals[1]) + 1e-8)
+    opposition = float(-np.dot(n0, n1))      # +1 = perfect antipodal
+    opposition = max(0.0, opposition)
+
+    # Mild spread bonus (contact distance normalised by max object dimension)
+    dist = float(np.linalg.norm(positions[0] - positions[1]))
+    obj_span = float(np.linalg.norm(positions.mean(axis=0))) * 2.0 + 1e-3
+    spread = min(1.0, dist / obj_span)
+
+    return float(opposition * 0.8 + spread * 0.2)
+
+
+# ---------------------------------------------------------------------------
 # Contact Wrench Computation
 # ---------------------------------------------------------------------------
 
@@ -97,26 +131,46 @@ def contact_wrench_matrix(
     normals: np.ndarray,
     mu: float = 0.5,
     num_edges: int = 8,
+    characteristic_length: Optional[float] = None,
 ) -> np.ndarray:
     """
     Build the grasp wrench matrix W for K contacts.
 
     Args:
-        positions: (K, 3) contact point positions (object frame)
-        normals:   (K, 3) outward surface normals
-        mu:        friction coefficient
-        num_edges: friction cone linearisation edges per contact
+        positions:             (K, 3) contact point positions (object frame)
+        normals:               (K, 3) outward surface normals
+        mu:                    friction coefficient
+        num_edges:             friction cone linearisation edges per contact
+        characteristic_length: object size used to normalise torque components
+                               so the ε-metric is size-independent.
+                               If None, estimated from max contact distance.
 
     Returns:
         W: (6, K * num_edges) grasp wrench matrix
+
+    Note on torque normalisation
+    ----------------------------
+    The ε-metric (largest inscribed ball in wrench space) scales with the
+    torque components of the wrenches, which are O(||p|| * ||f||).  For
+    small objects ||p|| is small → small torque → small ε → fails quality
+    threshold even for geometrically valid grasps.  Dividing the torque
+    rows by a characteristic length L (≈ object radius) makes the metric
+    dimensionless and size-independent, matching robotics convention.
     """
     K = len(positions)
+    if characteristic_length is None:
+        # Estimate: mean contact-to-centroid distance, at least 1 cm
+        centroid = positions.mean(axis=0)
+        characteristic_length = float(
+            max(np.linalg.norm(positions - centroid, axis=-1).mean(), 0.01)
+        )
+
     cols = []
     for i in range(K):
         edges = friction_cone_edges(normals[i], mu, num_edges)  # (E, 3)
         for e in edges:
-            force = e                            # (3,)
-            torque = np.cross(positions[i], e)   # (3,)
+            force = e                                                      # (3,)
+            torque = np.cross(positions[i], e) / characteristic_length    # (3,) normalised
             cols.append(np.concatenate([force, torque]))
     W = np.stack(cols, axis=1).astype(np.float32)   # (6, K*E)
     return W
@@ -226,7 +280,20 @@ class NetForceOptimizer:
         self.fast_mode = fast_mode
 
     def evaluate(self, grasp: Grasp) -> float:
-        """Compute the NFO quality score for a single grasp."""
+        """
+        Compute the quality score for a single grasp.
+
+        For 2-contact grasps the LP wrench-space analysis always returns 0
+        (two contacts cannot achieve 6-DOF force closure in 3-D space).
+        We use an opposition-based pinch quality instead.
+
+        For 3+ contact grasps the standard NFO ε-metric is used with
+        torque normalisation so the score is size-independent.
+        """
+        K = len(grasp.fingertip_positions)
+        if K <= 2:
+            return pinch_quality(grasp.fingertip_positions, grasp.contact_normals)
+
         W = contact_wrench_matrix(
             grasp.fingertip_positions,
             grasp.contact_normals,

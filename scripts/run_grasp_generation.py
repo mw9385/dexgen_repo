@@ -373,7 +373,17 @@ def process_one_object(
         return None, None
 
     # Step 2: NFO quality filter
-    nfo = NetForceOptimizer(mu=args.mu, min_quality=args.min_quality,
+    #
+    # Quality threshold is finger-count-aware:
+    #   2-finger  → pinch_quality metric (opposition-based, range [0,1])
+    #               threshold = 0.3  (normals at least ~107° apart)
+    #   3+ finger → standard NFO ε-metric with torque normalisation
+    #               threshold = args.min_quality (from config/CLI)
+    if num_fingers <= 2:
+        effective_min_quality = 0.3   # pinch opposition threshold
+    else:
+        effective_min_quality = args.min_quality
+    nfo = NetForceOptimizer(mu=args.mu, min_quality=effective_min_quality,
                             fast_mode=args.fast_nfo)
     filtered_set = nfo.evaluate_set(seed_set, verbose=True)
 
@@ -405,7 +415,7 @@ def process_one_object(
     delta_max_base = spec.size * 0.30          # was 0.60 — 2× tighter
     delta_pos_base = delta_max_base / 3.0      # step ≤ 1/3 of edge budget
     expander = RRTGraspExpander(
-        nfo=NetForceOptimizer(min_quality=args.min_quality, fast_mode=True),
+        nfo=NetForceOptimizer(min_quality=effective_min_quality, fast_mode=True),
         target_size=args.num_grasps,
         delta_pos=delta_pos_base,
         delta_max=delta_max_base,
