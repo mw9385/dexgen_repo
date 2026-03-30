@@ -23,7 +23,7 @@ Usage:
     # Custom object pool
     /workspace/IsaacLab/isaaclab.sh -p scripts/run_grasp_generation.py \\
         --shapes cube sphere \\
-        --size_min 0.02 --size_max 0.05 --num_sizes 4 \\
+        --size_min 0.03 --size_max 0.08 --num_sizes 3 \\
         --num_grasps 300
 
     # Single custom mesh
