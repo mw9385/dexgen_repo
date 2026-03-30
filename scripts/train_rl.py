@@ -287,7 +287,9 @@ def build_rl_games_config(args, cfg_file: dict) -> dict:
                 "critic_coef": float(ppo_cfg.get("critic_coef", 4)),
                 "clip_value": True,
                 "seq_length": seq_length,
-                "bounds_loss_coef": 0.0001,
+                # bounds_loss was exploding (0→70) causing policy to saturate actions.
+                # 0.0001 was too small to prevent action clamping. 0.005 adds real penalty.
+                "bounds_loss_coef": float(ppo_cfg.get("bounds_loss_coef", 0.005)),
                 "log_dir": args.log_dir,
 
                 # Asymmetric Actor-Critic
