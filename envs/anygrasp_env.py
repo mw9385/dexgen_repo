@@ -368,7 +368,7 @@ if _ISAACLAB_AVAILABLE:
         grasp_success = RewTerm(
             func=mdp_rewards.grasp_success_reward,
             weight=250.0,
-            params={"threshold": 0.02},
+            params={"threshold": 0.03},  # 2cm→3cm: easier to get first success signal
         )
         # --- Style reward (DexGen paper: fingertip velocity) ---
         # weight -0.5→-0.1: now uses mean-over-fingers (not sum), so
