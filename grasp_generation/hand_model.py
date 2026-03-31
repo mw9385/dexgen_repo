@@ -403,7 +403,7 @@ class DexGraspNetHandModel:
         # capsule: nearest point on z-axis segment [0, height]
         heights = self._cap_heights.view(1, L, 1).expand(B, L, N).reshape(B * L * N)
         radii = self._cap_radii.view(1, L, 1).expand(B, L, N).reshape(B * L * N)
-        z_clamped = torch.clamp(x_flat[:, 2], min=0.0, max=heights)
+        z_clamped = torch.min(torch.max(x_flat[:, 2], torch.zeros_like(heights)), heights)
         dx = x_flat[:, 0]
         dy = x_flat[:, 1]
         dz = x_flat[:, 2] - z_clamped
