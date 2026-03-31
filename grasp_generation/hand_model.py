@@ -206,7 +206,7 @@ class DexGraspNetHandModel:
         print(f"[HandModel] Shadow Hand: {self.n_dofs} DOFs, "
               f"{self.n_contact_candidates} contact candidates, "
               f"{self.n_keypoints} penetration keypoints, "
-              f"{len(self._collision_links)} collision links")
+              f"{self._n_col_links} collision links")
 
     def _build_mesh_recurse(self, body, contact_points, penetration_points):
         """Build collision geometry per link (no torchsdf needed)."""
