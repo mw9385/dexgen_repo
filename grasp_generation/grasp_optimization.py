@@ -233,7 +233,9 @@ def initialize_grasp_poses(hand_model: DexGraspNetHandModel,
     """
     Initialize hand poses around the object for Simulated Annealing.
 
-    Adapted from DexGraspNet's initialize_convex_hull for primitive shapes.
+    Hand is initialized with palm facing UPWARD, approaching the object
+    from below. This matches the typical manipulation setup where the
+    hand supports the object from underneath.
     """
     mesh = object_model.mesh
 
@@ -243,11 +245,21 @@ def initialize_grasp_poses(hand_model: DexGraspNetHandModel,
     vertices += 0.15 * vertices / (np.linalg.norm(vertices, axis=1, keepdims=True) + 1e-8)
     inflated = trimesh.Trimesh(vertices=vertices, faces=hull.faces).convex_hull
 
-    # Sample approach directions using FPS-like spreading
     hull_points, _ = trimesh.sample.sample_surface(inflated, batch_size * 10)
-    # Subsample uniformly
-    indices = np.random.choice(len(hull_points), size=batch_size, replace=len(hull_points) < batch_size)
-    p = torch.tensor(hull_points[indices], dtype=torch.float, device=device)
+
+    # Filter: keep only points BELOW the object center (approach from below)
+    # This biases initialization so the palm faces upward
+    center_z = mesh.centroid[2]
+    below_mask = hull_points[:, 2] < center_z
+    if below_mask.sum() < batch_size:
+        # Not enough points below, use all
+        candidates = hull_points
+    else:
+        candidates = hull_points[below_mask]
+
+    indices = np.random.choice(len(candidates), size=batch_size,
+                               replace=len(candidates) < batch_size)
+    p = torch.tensor(candidates[indices], dtype=torch.float, device=device)
 
     # Find closest point on original mesh → approach normal
     closest, _, _ = trimesh.proximity.closest_point(mesh, p.cpu().numpy())
@@ -260,7 +272,8 @@ def initialize_grasp_poses(hand_model: DexGraspNetHandModel,
         + (distance_range[1] - distance_range[0])
         * torch.rand(batch_size, dtype=torch.float, device=device)
     )
-    deviate_theta = (-math.pi / 6 + math.pi / 3 * torch.rand(batch_size, device=device))
+    # Reduced deviation angle to keep palm more consistently upward
+    deviate_theta = (-math.pi / 8 + math.pi / 4 * torch.rand(batch_size, device=device))
     process_theta = 2 * math.pi * torch.rand(batch_size, device=device)
     rotate_theta = 2 * math.pi * torch.rand(batch_size, device=device)
 
@@ -269,8 +282,9 @@ def initialize_grasp_poses(hand_model: DexGraspNetHandModel,
     rotation = torch.zeros(batch_size, 3, 3, dtype=torch.float, device=device)
     translation = torch.zeros(batch_size, 3, dtype=torch.float, device=device)
 
+    # rotation_hand: palm facing UP (rotated π from original downward-facing pose)
     rotation_hand = torch.tensor(
-        transforms3d.euler.euler2mat(0, -np.pi / 3, 0, axes='rzxz'),
+        transforms3d.euler.euler2mat(0, -np.pi / 3 + np.pi, 0, axes='rzxz'),
         dtype=torch.float, device=device,
     )
 
