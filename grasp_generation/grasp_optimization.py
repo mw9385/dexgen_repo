@@ -40,9 +40,9 @@ from .hand_model import (
 def cal_energy(hand_model: DexGraspNetHandModel,
                object_model: PrimitiveObjectModel,
                w_dis=100.0, w_pen=100.0, w_spen=10.0, w_joints=1.0,
-               w_pose=10.0, w_orient=50.0):
+               w_pose=10.0):
     """
-    Compute composite grasp energy (DexGraspNet formulation + E_pose + E_orient).
+    Compute composite grasp energy (DexGraspNet formulation + E_pose).
 
     Returns:
         total_energy, E_fc, E_dis, E_pen, E_spen, E_joints, E_pose — all (B,)
@@ -103,19 +103,8 @@ def cal_energy(hand_model: DexGraspNetHandModel,
     joint_diff = hand_model.hand_pose[:, 9:] - joint_angles_mu.unsqueeze(0)
     E_pose = (joint_diff ** 2).sum(dim=-1)
 
-    # E_orient: penalize palm facing downward
-    # Shadow Hand palm normal in local frame is approximately +Z after FK.
-    # The global rotation R transforms local frame to world frame.
-    # We want R @ [0,0,1] (palm normal in world) to point UP (+Z world).
-    # E_orient = (1 - palm_z_world)^2 → minimized when palm faces straight up.
-    R = hand_model.global_rotation  # (B, 3, 3)
-    palm_normal_local = torch.tensor([0.0, 0.0, 1.0], device=device)
-    palm_normal_world = (R @ palm_normal_local).squeeze(-1)  # (B, 3)
-    # palm_normal_world[:, 2] is the Z component: +1 = facing up, -1 = facing down
-    E_orient = (1.0 - palm_normal_world[:, 2]) ** 2
-
     total = (E_fc + w_dis * E_dis + w_pen * E_pen + w_spen * E_spen
-             + w_joints * E_joints + w_pose * E_pose + w_orient * E_orient)
+             + w_joints * E_joints + w_pose * E_pose)
     return total, E_fc, E_dis, E_pen, E_spen, E_joints, E_pose
 
 
@@ -245,9 +234,7 @@ def initialize_grasp_poses(hand_model: DexGraspNetHandModel,
     """
     Initialize hand poses around the object for Simulated Annealing.
 
-    Hand is initialized with palm facing UPWARD, approaching the object
-    from below. This matches the typical manipulation setup where the
-    hand supports the object from underneath.
+    Adapted from DexGraspNet's initialize_convex_hull for primitive shapes.
     """
     mesh = object_model.mesh
 
@@ -258,20 +245,9 @@ def initialize_grasp_poses(hand_model: DexGraspNetHandModel,
     inflated = trimesh.Trimesh(vertices=vertices, faces=hull.faces).convex_hull
 
     hull_points, _ = trimesh.sample.sample_surface(inflated, batch_size * 10)
-
-    # Filter: keep only points BELOW the object center (approach from below)
-    # This biases initialization so the palm faces upward
-    center_z = mesh.centroid[2]
-    below_mask = hull_points[:, 2] < center_z
-    if below_mask.sum() < batch_size:
-        # Not enough points below, use all
-        candidates = hull_points
-    else:
-        candidates = hull_points[below_mask]
-
-    indices = np.random.choice(len(candidates), size=batch_size,
-                               replace=len(candidates) < batch_size)
-    p = torch.tensor(candidates[indices], dtype=torch.float, device=device)
+    indices = np.random.choice(len(hull_points), size=batch_size,
+                               replace=len(hull_points) < batch_size)
+    p = torch.tensor(hull_points[indices], dtype=torch.float, device=device)
 
     # Find closest point on original mesh → approach normal
     closest, _, _ = trimesh.proximity.closest_point(mesh, p.cpu().numpy())
@@ -284,8 +260,7 @@ def initialize_grasp_poses(hand_model: DexGraspNetHandModel,
         + (distance_range[1] - distance_range[0])
         * torch.rand(batch_size, dtype=torch.float, device=device)
     )
-    # Reduced deviation angle to keep palm more consistently upward
-    deviate_theta = (-math.pi / 8 + math.pi / 4 * torch.rand(batch_size, device=device))
+    deviate_theta = (-math.pi / 6 + math.pi / 3 * torch.rand(batch_size, device=device))
     process_theta = 2 * math.pi * torch.rand(batch_size, device=device)
     rotate_theta = 2 * math.pi * torch.rand(batch_size, device=device)
 
@@ -294,9 +269,8 @@ def initialize_grasp_poses(hand_model: DexGraspNetHandModel,
     rotation = torch.zeros(batch_size, 3, 3, dtype=torch.float, device=device)
     translation = torch.zeros(batch_size, 3, dtype=torch.float, device=device)
 
-    # rotation_hand: palm facing UP (rotated π from original downward-facing pose)
     rotation_hand = torch.tensor(
-        transforms3d.euler.euler2mat(0, -np.pi / 3 + np.pi, 0, axes='rzxz'),
+        transforms3d.euler.euler2mat(0, -np.pi / 3, 0, axes='rzxz'),
         dtype=torch.float, device=device,
     )
 
@@ -377,7 +351,6 @@ class GraspOptimizer:
         w_spen: float = 10.0,
         w_joints: float = 1.0,
         w_pose: float = 10.0,
-        w_orient: float = 50.0,
         # SA optimizer params
         n_iter: int = 2000,
         batch_size: int = 128,
@@ -403,7 +376,6 @@ class GraspOptimizer:
         self.w_spen = w_spen
         self.w_joints = w_joints
         self.w_pose = w_pose
-        self.w_orient = w_orient
         self.n_iter = n_iter
         self.batch_size = batch_size
         self.n_contact = n_contact
@@ -482,8 +454,7 @@ class GraspOptimizer:
         # Compute initial energy
         energy, E_fc, E_dis, E_pen, E_spen, E_joints, E_pose = cal_energy(
             self.hand_model, self.object_model,
-            self.w_dis, self.w_pen, self.w_spen, self.w_joints,
-            self.w_pose, self.w_orient,
+            self.w_dis, self.w_pen, self.w_spen, self.w_joints, self.w_pose,
         )
         energy.sum().backward()
 
