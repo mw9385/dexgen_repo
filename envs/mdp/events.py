@@ -910,11 +910,9 @@ def _randomise_wrist_pose(env, env_ids: torch.Tensor):
         wrist_pos += torch.randn(n, 3, device=env.device) * pos_jitter_std
 
     wrist_quat = default_robot_root[:, 3:7]
-    # Align palm toward the object so fingers wrap around it.
-    # "align_palm_up" (legacy, palm faces +Z) is intentionally NOT used —
-    # it causes the object to rest passively on top of an upward-facing palm.
-    if bool(cfg.get("align_palm_toward_object", True)):
-        wrist_quat = _align_palm_toward_object(env, env_ids, wrist_quat, wrist_pos)
+    # Align palm upward (+Z) so the hand supports the object from below.
+    # This prevents the object from falling and enables stable grasps.
+    wrist_quat = _align_wrist_palm_up(env, env_ids, wrist_quat)
     rot_std = math.radians(float(cfg.get("wrist_rot_std_deg", 5.0)))
     if rot_std > 0.0:
         wrist_quat = _add_rotation_noise(wrist_quat, rot_std, env.device, n)

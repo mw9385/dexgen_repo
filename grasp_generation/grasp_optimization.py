@@ -377,6 +377,7 @@ class GraspOptimizer:
         w_spen: float = 10.0,
         w_joints: float = 1.0,
         w_pose: float = 10.0,
+        w_orient: float = 50.0,
         # SA optimizer params
         n_iter: int = 2000,
         batch_size: int = 128,
@@ -402,6 +403,7 @@ class GraspOptimizer:
         self.w_spen = w_spen
         self.w_joints = w_joints
         self.w_pose = w_pose
+        self.w_orient = w_orient
         self.n_iter = n_iter
         self.batch_size = batch_size
         self.n_contact = n_contact
@@ -480,7 +482,8 @@ class GraspOptimizer:
         # Compute initial energy
         energy, E_fc, E_dis, E_pen, E_spen, E_joints, E_pose = cal_energy(
             self.hand_model, self.object_model,
-            self.w_dis, self.w_pen, self.w_spen, self.w_joints, self.w_pose,
+            self.w_dis, self.w_pen, self.w_spen, self.w_joints,
+            self.w_pose, self.w_orient,
         )
         energy.sum().backward()
 
@@ -491,7 +494,8 @@ class GraspOptimizer:
 
             new_energy, new_fc, new_dis, new_pen, new_spen, new_joints, new_pose = cal_energy(
                 self.hand_model, self.object_model,
-                self.w_dis, self.w_pen, self.w_spen, self.w_joints, self.w_pose,
+                self.w_dis, self.w_pen, self.w_spen, self.w_joints,
+                self.w_pose, self.w_orient,
             )
             new_energy.sum().backward()
 

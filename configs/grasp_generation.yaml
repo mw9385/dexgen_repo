@@ -127,6 +127,7 @@ optimization:
   w_spen: 10.0
   w_joints: 1.0
   w_pose: 10.0
+  w_orient: 50.0            # palm facing UP (+Z). Higher = stricter upward constraint
 
   # ── Success thresholds (filtering after optimization) ─────────────────────
   #

@@ -180,8 +180,8 @@ if _ISAACLAB_AVAILABLE:
         robot: ArticulationCfg = SHADOW_HAND_CFG.replace(
             prim_path="{ENV_REGEX_NS}/ShadowHand",
             init_state=ArticulationCfg.InitialStateCfg(
-                pos=(0.0, 0.0, 0.6),
-                rot=(1.0, 0.0, 0.0, 0.0),
+                pos=(0.0, 0.0, 0.35),     # below object — palm faces up
+                rot=(0.0, 1.0, 0.0, 0.0), # 180° X-rotation → palm UP
                 joint_pos={
                     "robot0_THJ4": 0.5,   # thumb rotation: natural resting pose
                     "robot0_THJ3": 0.3,
