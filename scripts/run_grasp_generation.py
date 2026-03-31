@@ -428,6 +428,7 @@ def _process_one_object_optimization(
     optimizer = GraspOptimizer(
         hand_model=hand_model,
         mesh=spec.mesh,
+        shape_type=spec.shape_type,
         w_contact=opt_cfg.get("w_contact", 100.0),
         w_penetration=opt_cfg.get("w_penetration", 50.0),
         w_fc=opt_cfg.get("w_fc", 10.0),
