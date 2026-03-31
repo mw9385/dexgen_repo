@@ -44,6 +44,7 @@ from isaaclab.app import AppLauncher
 from grasp_generation import (
     GraspSampler, NetForceOptimizer, RRTGraspExpander,
     ObjectPool, MultiObjectGraspGraph, refine_multi_object_graph_with_isaac,
+    GraspOptimizer, build_hand_model,
 )
 
 
@@ -83,6 +84,26 @@ def parse_args():
                    help="Friction coefficient for NFO")
     p.add_argument("--fast_nfo", action=argparse.BooleanOptionalAction, default=None,
                    help="Use fast SVD approximation for NFO")
+
+    # Grasp generation method
+    p.add_argument(
+        "--method", type=str, default="optimization",
+        choices=["optimization", "surface_sampling"],
+        help=(
+            "Grasp generation method. "
+            "'optimization': DexGraspNet-style differentiable optimization (recommended). "
+            "'surface_sampling': legacy surface sampling + NFO filtering."
+        ),
+    )
+    # Optimization-specific params
+    p.add_argument("--opt_iterations", type=int, default=None,
+                   help="Number of optimization iterations per batch (default: 200)")
+    p.add_argument("--opt_batch_size", type=int, default=None,
+                   help="Batch size for parallel grasp optimization (default: 256)")
+    p.add_argument("--opt_lr", type=float, default=None,
+                   help="Learning rate for grasp optimizer (default: 0.005)")
+    p.add_argument("--sdf_resolution", type=int, default=None,
+                   help="SDF voxel grid resolution (default: 64)")
 
     p.add_argument("--output_dir", type=str, default=None)
     p.add_argument("--seed", type=int, default=42)
@@ -347,19 +368,143 @@ def process_one_object(
     """
     Run the full grasp generation pipeline for one ObjectSpec.
     Returns (GraspGraph, isaac_lab_spec) or (None, None) on failure.
+
+    Supports two methods:
+      - 'optimization': DexGraspNet-style differentiable optimization (recommended)
+      - 'surface_sampling': legacy surface sampling + NFO filtering
     """
     from grasp_generation.grasp_sampler import GraspSampler
+    from grasp_generation.rrt_expansion import build_graph_from_grasps
 
     print(f"\n{'='*55}")
     print(f"  Object:      {spec.name}  (shape={spec.shape_type}, size={spec.size:.3f}m)")
     print(f"  num_fingers: {num_fingers}  |  num_dof: {num_dof}")
+    print(f"  method:      {args.method}")
     print(f"{'='*55}")
+
+    method = getattr(args, "method", "optimization")
+
+    if method == "optimization":
+        graph, isaac_spec = _process_one_object_optimization(
+            spec, args, seed_offset, num_fingers, num_dof, dof_per_finger, hand_name,
+        )
+    else:
+        graph, isaac_spec = _process_one_object_surface_sampling(
+            spec, args, seed_offset, num_fingers, num_dof, dof_per_finger, hand_name,
+        )
+
+    return graph, isaac_spec
+
+
+def _process_one_object_optimization(
+    spec, args, seed_offset, num_fingers, num_dof, dof_per_finger, hand_name,
+) -> tuple:
+    """
+    DexGraspNet-style grasp generation via differentiable optimization.
+
+    Pipeline:
+      1. Build hand kinematic model (differentiable FK)
+      2. Build object SDF for contact/penetration energy
+      3. Optimize hand pose + joint angles via gradient descent
+      4. Filter by contact quality and NFO score
+      5. Build GraspGraph with edges between similar grasps
+    """
+    from grasp_generation.rrt_expansion import build_graph_from_grasps
+
+    # Build hand model
+    hand_model = build_hand_model(hand_name, num_fingers)
+
+    # Resolve optimization parameters
+    opt_iterations = getattr(args, "opt_iterations", None) or 200
+    opt_batch_size = getattr(args, "opt_batch_size", None) or 256
+    opt_lr = getattr(args, "opt_lr", None) or 0.005
+    sdf_resolution = getattr(args, "sdf_resolution", None) or 64
+
+    # Read energy weights from config if available
+    opt_cfg = {}
+    if hasattr(args, '_opt_cfg'):
+        opt_cfg = args._opt_cfg
+
+    optimizer = GraspOptimizer(
+        hand_model=hand_model,
+        mesh=spec.mesh,
+        w_contact=opt_cfg.get("w_contact", 100.0),
+        w_penetration=opt_cfg.get("w_penetration", 50.0),
+        w_fc=opt_cfg.get("w_fc", 10.0),
+        w_self=opt_cfg.get("w_self", 20.0),
+        w_joint=opt_cfg.get("w_joint", 5.0),
+        lr=opt_lr,
+        num_iterations=opt_iterations,
+        batch_size=opt_batch_size,
+        mu=args.mu,
+        sdf_resolution=sdf_resolution,
+    )
+
+    # Run optimization
+    grasp_set = optimizer.optimize(
+        num_grasps=args.num_grasps,
+        min_quality=args.min_quality,
+        verbose=True,
+    )
+
+    if len(grasp_set) < 2:
+        print(f"  [!] Only {len(grasp_set)} grasps from optimization for {spec.name}, skipping.")
+        return None, None
+
+    # Tag object info on grasps
+    for g in grasp_set.grasps:
+        g.object_name = spec.name
+        g.object_scale = spec.size / 0.06
+
+    # Expand joint_angles to full num_dof if needed
+    # The optimizer produces joint angles for active finger joints only;
+    # map these to the full DOF vector expected by Isaac Lab.
+    _expand_optimizer_joints(grasp_set, hand_model, num_dof, num_fingers, hand_name)
+
+    # NFO post-filter for additional quality assurance
+    effective_min_quality = _effective_nfo_threshold(num_fingers, args.min_quality)
+    nfo = NetForceOptimizer(mu=args.mu, min_quality=effective_min_quality,
+                            fast_mode=True)
+    grasp_set = nfo.evaluate_set(grasp_set, verbose=True)
+
+    if len(grasp_set) < 2:
+        print(f"  [!] Only {len(grasp_set)} grasps passed NFO post-filter, skipping.")
+        return None, None
+
+    # Build graph
+    delta_max_base = spec.size * 0.30
+    graph = build_graph_from_grasps(
+        grasp_set.grasps,
+        object_name=spec.name,
+        delta_max=delta_max_base,
+        num_fingers=num_fingers,
+    )
+
+    n_with_joints = sum(1 for g in graph.grasp_set.grasps if g.joint_angles is not None)
+    print(f"  [Opt] {n_with_joints}/{len(graph)} grasps have joint_angles + object_pose stored")
+
+    isaac_spec = {
+        "name": spec.name,
+        "shape_type": spec.shape_type,
+        "size": spec.size,
+        "mass": spec.mass,
+        "color": spec.color,
+    }
+
+    return graph, isaac_spec
+
+
+def _process_one_object_surface_sampling(
+    spec, args, seed_offset, num_fingers, num_dof, dof_per_finger, hand_name,
+) -> tuple:
+    """Legacy surface sampling + NFO filtering pipeline."""
+    from grasp_generation.grasp_sampler import GraspSampler
 
     # Step 1: Sample seed grasps
     sampler = GraspSampler(
         mesh=spec.mesh,
         object_name=spec.name,
-        object_scale=spec.size / 0.06,   # relative to 6 cm reference
+        object_scale=spec.size / 0.06,
         num_candidates=args.num_seed_grasps * 20,
         num_grasps=args.num_seed_grasps,
         num_fingers=num_fingers,
@@ -372,30 +517,7 @@ def process_one_object(
         return None, None
 
     # Step 2: NFO quality filter
-    #
-    # Threshold is finger-count-aware (physics-based):
-    #
-    #   2-finger : pinch_quality (opposition alignment, range [0,1])
-    #              The GraspSampler already pre-filters for opposition > 0.3.
-    #              We need a stricter threshold (0.5) so the seed set is small
-    #              enough that RRT actually has room to expand to target_size.
-    #              Requires normals roughly ≥ 120° apart → near-antipodal pinch.
-    #
-    #   3-finger : 3-contact force closure is harder to score highly than
-    #              4/5-finger; use half the default threshold so valid tripod
-    #              grasps are not over-filtered.
-    #
-    #   4-finger : standard NFO ε-metric with torque normalisation.
-    #
-    #   5-finger : same as 4-finger but naturally scores higher due to
-    #              better wrench-space coverage.
-    #
-    if num_fingers <= 2:
-        effective_min_quality = 0.5
-    elif num_fingers == 3:
-        effective_min_quality = max(args.min_quality * 0.5, 0.002)
-    else:
-        effective_min_quality = args.min_quality
+    effective_min_quality = _effective_nfo_threshold(num_fingers, args.min_quality)
 
     nfo = NetForceOptimizer(mu=args.mu, min_quality=effective_min_quality,
                             fast_mode=args.fast_nfo)
@@ -405,29 +527,19 @@ def process_one_object(
         print(f"  [!] Only {len(filtered_set)} grasps passed NFO for {spec.name}, skipping.")
         return None, None
 
-    # Step 3: Select top-K by quality (no RRT expansion)
-    #
-    # RRT expansion generates grasps by perturbing fingertip positions in
-    # free 3D space without projecting back onto the object surface. This
-    # produces nodes that may float in space or penetrate the object, and
-    # their quality is only loosely validated by NFO (no surface guarantee).
-    #
-    # Instead: sample many surface grasps (num_seed_grasps), filter by NFO,
-    # then keep top-K by quality score. Every node in the final graph is a
-    # genuine surface grasp validated by the GraspSampler mesh sampling.
-    # Isaac refinement later validates each grasp in simulation.
+    # Step 3: Select top-K by quality
     if len(filtered_set) > args.num_grasps:
         filtered_set.grasps = sorted(
             filtered_set.grasps, key=lambda g: g.quality, reverse=True
         )[:args.num_grasps]
         print(f"  [Select] Kept top-{len(filtered_set)} surface grasps by quality")
 
-    # Build graph (computes edges between nearby grasps in fingertip space)
+    # Build graph
     delta_max_base = spec.size * 0.30
     delta_pos_base = delta_max_base / 3.0
     expander = RRTGraspExpander(
         nfo=NetForceOptimizer(min_quality=effective_min_quality, fast_mode=True),
-        target_size=len(filtered_set),   # no expansion — build graph only
+        target_size=len(filtered_set),
         delta_pos=delta_pos_base,
         delta_max=delta_max_base,
         manifold_contact_count=num_fingers,
@@ -435,15 +547,13 @@ def process_one_object(
     )
     graph = expander.expand(filtered_set)
 
-    # Step 4: Solve heuristic IK for all grasps and store joint_angles
+    # Step 4: Solve heuristic IK
     _attach_joint_angles_to_graph(graph, num_dof=num_dof, dof_per_finger=dof_per_finger,
                                   hand_name=hand_name)
 
-    # Verify: check that joint_angles are stored
     n_with_joints = sum(1 for g in graph.grasp_set.grasps if g.joint_angles is not None)
     print(f"  [IK] {n_with_joints}/{len(graph)} grasps have joint_angles stored")
 
-    # Isaac Lab spawn spec for this object
     isaac_spec = {
         "name": spec.name,
         "shape_type": spec.shape_type,
@@ -453,6 +563,100 @@ def process_one_object(
     }
 
     return graph, isaac_spec
+
+
+def _effective_nfo_threshold(num_fingers: int, min_quality: float) -> float:
+    """Finger-count-aware NFO quality threshold."""
+    if num_fingers <= 2:
+        return 0.5
+    elif num_fingers == 3:
+        return max(min_quality * 0.5, 0.002)
+    else:
+        return min_quality
+
+
+def _expand_optimizer_joints(
+    grasp_set,
+    hand_model,
+    num_dof: int,
+    num_fingers: int,
+    hand_name: str,
+):
+    """
+    Map optimizer joint angles (active finger DOF only) to the full
+    num_dof vector expected by Isaac Lab.
+
+    The optimizer's hand_model has num_dof = sum of active finger joints,
+    which may differ from the full USD joint count (e.g., Shadow Hand
+    has passive/spread joints not in the optimizer).
+    """
+    if hand_name == "shadow" or num_dof in (22, 24):
+        # Shadow Hand mapping: optimizer joints → full 24-DOF vector
+        # Optimizer finger order matches build_shadow_hand():
+        #   num_fingers=5: [FF(3), MF(3), RF(3), LF(3), TH(4)] = 16 active
+        #   num_fingers=4: [FF(3), MF(3), RF(3), TH(4)] = 13 active
+        #   num_fingers=3: [FF(3), MF(3), TH(4)] = 10 active
+        #   num_fingers=2: [FF(3), TH(4)] = 7 active
+
+        # Finger block starts in the 24-DOF array:
+        #   FF: [2-5] → active: [3,4,5] (skip FFJ4=2)
+        #   MF: [6-9] → active: [7,8,9] (skip MFJ4=6)
+        #   RF: [10-13] → active: [11,12,13] (skip RFJ4=10)
+        #   LF: [14-18] → active: [16,17,18] (skip LFJ5=14, LFJ4=15)
+        #   TH: [19-23] → active: [19,20,21,22] (THJ4,THJ3,THJ2,THJ1; skip THJ0=23)
+        finger_to_full_indices = {
+            5: {
+                0: [3, 4, 5],        # FF
+                1: [7, 8, 9],        # MF
+                2: [11, 12, 13],     # RF
+                3: [16, 17, 18],     # LF
+                4: [19, 20, 21, 22], # TH
+            },
+            4: {
+                0: [3, 4, 5],
+                1: [7, 8, 9],
+                2: [11, 12, 13],
+                3: [19, 20, 21, 22],
+            },
+            3: {
+                0: [3, 4, 5],
+                1: [7, 8, 9],
+                2: [19, 20, 21, 22],
+            },
+            2: {
+                0: [3, 4, 5],
+                1: [19, 20, 21, 22],
+            },
+        }
+
+        mapping = finger_to_full_indices.get(num_fingers, {})
+
+        for grasp in grasp_set.grasps:
+            if grasp.joint_angles is None:
+                continue
+            opt_q = grasp.joint_angles
+            full_q = np.zeros(num_dof, dtype=np.float32)
+
+            offset = 0
+            for fi in sorted(mapping.keys()):
+                indices = mapping[fi]
+                n_joints = len(indices)
+                if offset + n_joints <= len(opt_q):
+                    for j, idx in enumerate(indices):
+                        if idx < num_dof:
+                            full_q[idx] = opt_q[offset + j]
+                offset += n_joints
+
+            grasp.joint_angles = full_q
+    else:
+        # Generic / Allegro: optimizer DOF matches full DOF (all active)
+        for grasp in grasp_set.grasps:
+            if grasp.joint_angles is None:
+                continue
+            if len(grasp.joint_angles) < num_dof:
+                full_q = np.zeros(num_dof, dtype=np.float32)
+                full_q[:len(grasp.joint_angles)] = grasp.joint_angles
+                grasp.joint_angles = full_q
 
 
 # ---------------------------------------------------------------------------
@@ -558,7 +762,11 @@ def main():
         sampler_cfg = cfg_file.get("sampler", {})
         nfo_cfg = cfg_file.get("nfo", {})
         rrt_cfg = cfg_file.get("rrt", {})
+        opt_cfg = cfg_file.get("optimization", {})
         _apply_generation_preset(args)
+
+        # Store optimization energy weights for process_one_object
+        args._opt_cfg = opt_cfg
 
         # ------------------------------------------------------------------
         # Resolve config-overridable CLI values.
@@ -586,6 +794,20 @@ def main():
             args.fast_nfo = bool(nfo_cfg.get("fast_mode", False))
         args.output_dir = args.output_dir or cfg_file.get("output_dir", "data")
 
+        # Resolve optimization params from YAML if not set via CLI
+        if args.opt_iterations is None:
+            args.opt_iterations = int(opt_cfg.get("num_iterations", 200))
+        if args.opt_batch_size is None:
+            args.opt_batch_size = int(opt_cfg.get("batch_size", 256))
+        if args.opt_lr is None:
+            args.opt_lr = float(opt_cfg.get("lr", 0.005))
+        if args.sdf_resolution is None:
+            args.sdf_resolution = int(opt_cfg.get("sdf_resolution", 64))
+
+        # Resolve method from YAML if CLI default
+        if args.method == "optimization" and "method" in cfg_file:
+            args.method = cfg_file["method"]
+
         output_dir = Path(args.output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -602,9 +824,16 @@ def main():
         print(f"[Stage 0] Object pool: shapes={args.shapes}, "
               f"size_range=({args.size_min:.3f}, {args.size_max:.3f}), "
               f"num_sizes={args.num_sizes}")
-        print(f"[Stage 0] Sampler/NFO/RRT: seeds={args.num_seed_grasps}, "
-              f"target={args.num_grasps}, min_quality={args.min_quality}, "
-              f"mu={args.mu}, fast_nfo={args.fast_nfo}")
+        print(f"[Stage 0] Method:     {args.method}")
+        print(f"[Stage 0] Generation: target={args.num_grasps}, "
+              f"min_quality={args.min_quality}, mu={args.mu}")
+        if args.method == "optimization":
+            print(f"[Stage 0] Optimizer:  iterations={getattr(args, 'opt_iterations', None) or 200}, "
+                  f"batch_size={getattr(args, 'opt_batch_size', None) or 256}, "
+                  f"lr={getattr(args, 'opt_lr', None) or 0.005}")
+        else:
+            print(f"[Stage 0] Sampler:    seeds={args.num_seed_grasps}, "
+                  f"fast_nfo={args.fast_nfo}")
 
         # ------------------------------------------------------------------
         # Build object pool

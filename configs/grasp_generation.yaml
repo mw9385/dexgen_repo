@@ -49,14 +49,33 @@ nfo:
   min_quality: 0.005       # minimum NFO ε-metric score
   fast_mode: false         # true = SVD approximation (faster, less accurate)
 
-# RRT expansion (per object)
-# delta_max = spec.size * 0.30  (set in run_grasp_generation.py)
-#   effective mean fingertip distance per edge (5-finger, 6cm object) ≈ 4.3 cm
-#   → ~0.6–0.8 rad L2 joint change per edge — reachable in ~50–100 RL steps
-#   300 nodes: sufficient connectivity at this delta_max (many edges per node)
-#   Use --num_grasps 500 or --generation_preset high_precision for better coverage
+# Grasp generation method:
+#   'optimization'      : DexGraspNet-style differentiable optimization (recommended)
+#   'surface_sampling'  : legacy surface sampling + NFO filtering
+method: optimization
+
+# ==============================================================================
+# Optimization-based grasp generation (DexGraspNet-style)
+# ==============================================================================
+# Gradient-based optimization of hand pose + joint angles on the object SDF.
+# Produces grasps with physically consistent joint angles and guaranteed
+# surface contact, unlike RRT which perturbs in free space.
+optimization:
+  num_iterations: 200       # gradient descent steps per batch
+  batch_size: 256           # parallel grasp candidates per batch
+  lr: 0.005                 # Adam learning rate
+  sdf_resolution: 64        # SDF voxel grid resolution (higher = more accurate)
+
+  # Energy weights (DexGraspNet-style composite energy)
+  w_contact: 100.0          # fingertips must be ON the object surface
+  w_penetration: 50.0       # no hand-object interpenetration
+  w_fc: 10.0                # force closure quality (grasp stability)
+  w_self: 20.0              # no finger self-collision
+  w_joint: 5.0              # stay within joint limits
+
+# RRT expansion (legacy, used when method=surface_sampling)
 rrt:
-  target_size: 300         # target grasps per object after expansion
+  target_size: 300           # target grasps per object after expansion
 
 # Output
 output_dir: data
