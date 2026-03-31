@@ -38,7 +38,9 @@ from isaaclab.app import AppLauncher
 def parse_args():
     p = argparse.ArgumentParser(description="Refine grasps in Isaac Sim")
     p.add_argument("--grasp_graph", type=str, required=True,
-                   help="Path to grasp_graph.pkl from run_grasp_generation.py")
+                   help="Path to input grasp_graph.pkl (raw, from run_grasp_generation.py)")
+    p.add_argument("--output", type=str, default=None,
+                   help="Path to save refined graph (default: overwrite input file)")
     p.add_argument("--batch_envs", type=int, default=16,
                    help="Batch size for Isaac refinement environments")
     p.add_argument("--keep_top_k", type=int, default=None,
@@ -173,19 +175,21 @@ def main():
             snap = snap[:len(g.grasp_set.grasps)]
             _print_comparison(name, g.grasp_set.grasps, snap)
 
-        # Save refined graph (overwrite)
-        graph.save(str(graph_path))
+        # Save refined graph
+        output_path = Path(args.output) if args.output else graph_path
+        graph.save(str(output_path))
 
         print(f"\n{'='*60}")
         print(f" Refinement Complete")
         print(f"{'='*60}")
         graph.summary()
-        print(f"\n  Saved: {graph_path}")
+        print(f"\n  Input (raw): {graph_path}")
+        print(f"  Output:      {output_path}")
         print(f"\nNext step:")
         print(f"  /workspace/IsaacLab/isaaclab.sh -p scripts/visualize_env.py "
-              f"--grasp_graph {graph_path} --action_mode hold")
+              f"--grasp_graph {output_path} --action_mode hold")
         print(f"  /workspace/IsaacLab/isaaclab.sh -p scripts/train_rl.py "
-              f"--grasp_graph {graph_path} --num_envs 512 --headless")
+              f"--grasp_graph {output_path} --num_envs 512 --headless")
 
     finally:
         sim_app.close()
