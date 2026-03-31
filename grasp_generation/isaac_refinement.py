@@ -112,10 +112,18 @@ def _refine_chunk(env, env_ids: torch.Tensor, grasps: list, mdp_events):
     robot = env.scene["robot"]
     obj = env.scene["object"]
 
+    # Determine how many fingertips the env expects
+    env_num_fingers = int(
+        (getattr(env.cfg, "hand", None) or {}).get("num_fingers", 5)
+    )
+
     fingertip_targets = []
     joint_list = []
     for grasp in grasps:
-        fingertip_targets.append(grasp.fingertip_positions.copy())
+        # Pad grasp fingertip positions to match env's num_fingers
+        fps = grasp.fingertip_positions.copy()
+        fps = mdp_events._pad_fingertip_positions(fps, env_num_fingers)
+        fingertip_targets.append(fps)
         joint_list.append(getattr(grasp, "joint_angles", None))
 
     start_fps = torch.tensor(np.stack(fingertip_targets), device=env.device, dtype=torch.float32)
