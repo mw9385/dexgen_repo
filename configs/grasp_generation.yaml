@@ -62,22 +62,22 @@ method: optimization
 # surface contact, unlike RRT which perturbs in free space.
 optimization:
   # Simulated Annealing parameters
-  num_iterations: 1000        # SA iterations per batch (sufficient for primitives)
+  num_iterations: 5000        # more iterations for tighter contact
   batch_size: 512             # large batch = more candidates per run
   step_size: 0.005            # RMSProp initial step size
   starting_temperature: 18.0  # SA starting temperature
   temperature_decay: 0.95     # temperature & step size decay rate
 
-  # Energy weights (DexGraspNet defaults)
-  w_dis: 100.0              # contact distance: fingertips must touch object
-  w_pen: 100.0              # reverse penetration: no hand-object interpenetration
-  w_spen: 10.0              # self-penetration: no finger self-collision
+  # Energy weights — boost w_dis to prioritize contact precision
+  w_dis: 500.0              # contact distance: HIGH priority
+  w_pen: 100.0              # reverse penetration
+  w_spen: 10.0              # self-penetration
   w_joints: 1.0             # joint limit violation
 
-  # Success thresholds for filtering (relaxed for analytical SDF on primitives)
-  thres_fc: 5.0              # max force closure energy (relaxed from 0.3)
-  thres_dis: 0.05            # max contact distance 50mm (relaxed from 5mm)
-  thres_pen: 0.05            # max penetration (relaxed from 0.02)
+  # Success thresholds — strict dis, relaxed fc
+  thres_fc: 5.0              # force closure (relaxed)
+  thres_dis: 0.01            # max contact distance 10mm (strict)
+  thres_pen: 0.05            # max penetration
 
 # RRT expansion (legacy, used when method=surface_sampling)
 rrt:
