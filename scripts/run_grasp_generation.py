@@ -35,6 +35,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import torch
 import yaml
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -44,7 +45,7 @@ from isaaclab.app import AppLauncher
 from grasp_generation import (
     GraspSampler, NetForceOptimizer, RRTGraspExpander,
     ObjectPool, MultiObjectGraspGraph, refine_multi_object_graph_with_isaac,
-    GraspOptimizer, build_hand_model,
+    GraspOptimizer, build_hand_model, build_object_model,
 )
 
 
@@ -400,51 +401,54 @@ def _process_one_object_optimization(
     spec, args, seed_offset, num_fingers, num_dof, dof_per_finger, hand_name,
 ) -> tuple:
     """
-    DexGraspNet-style grasp generation via differentiable optimization.
+    DexGraspNet-based grasp generation via Simulated Annealing.
 
     Pipeline:
-      1. Build hand kinematic model (differentiable FK)
-      2. Build object SDF for contact/penetration energy
-      3. Optimize hand pose + joint angles via gradient descent
-      4. Filter by contact quality and NFO score
-      5. Build GraspGraph with edges between similar grasps
+      1. Build DexGraspNet hand model (MJCF FK via pytorch_kinematics)
+      2. Build primitive object model (analytical SDF)
+      3. Initialize hand poses around object (convex hull approach)
+      4. Optimize via Simulated Annealing + RMSProp
+      5. Filter by energy thresholds (E_fc, E_dis, E_pen)
+      6. Build GraspGraph with edges between similar grasps
     """
     from grasp_generation.rrt_expansion import build_graph_from_grasps
 
-    # Build hand model
-    hand_model = build_hand_model(hand_name, num_fingers)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    # Build DexGraspNet hand model
+    hand_model = build_hand_model(hand_name, device=device)
 
     # Resolve optimization parameters
-    opt_iterations = getattr(args, "opt_iterations", None) or 200
-    opt_batch_size = getattr(args, "opt_batch_size", None) or 256
-    opt_lr = getattr(args, "opt_lr", None) or 0.005
-    sdf_resolution = getattr(args, "sdf_resolution", None) or 64
+    opt_iterations = getattr(args, "opt_iterations", None) or 2000
+    opt_batch_size = getattr(args, "opt_batch_size", None) or 128
 
-    # Read energy weights from config if available
-    opt_cfg = {}
-    if hasattr(args, '_opt_cfg'):
-        opt_cfg = args._opt_cfg
+    # Read energy weights from config
+    opt_cfg = getattr(args, '_opt_cfg', {})
 
     optimizer = GraspOptimizer(
         hand_model=hand_model,
         mesh=spec.mesh,
         shape_type=spec.shape_type,
-        w_contact=opt_cfg.get("w_contact", 100.0),
-        w_penetration=opt_cfg.get("w_penetration", 50.0),
-        w_fc=opt_cfg.get("w_fc", 10.0),
-        w_self=opt_cfg.get("w_self", 20.0),
-        w_joint=opt_cfg.get("w_joint", 5.0),
-        lr=opt_lr,
-        num_iterations=opt_iterations,
+        size=spec.size,
+        w_dis=opt_cfg.get("w_dis", 100.0),
+        w_pen=opt_cfg.get("w_pen", 100.0),
+        w_spen=opt_cfg.get("w_spen", 10.0),
+        w_joints=opt_cfg.get("w_joints", 1.0),
+        n_iter=opt_iterations,
         batch_size=opt_batch_size,
-        mu=args.mu,
-        sdf_resolution=sdf_resolution,
+        n_contact=min(num_fingers, 4),
+        step_size=opt_cfg.get("step_size", 0.005),
+        starting_temperature=opt_cfg.get("starting_temperature", 18.0),
+        temperature_decay=opt_cfg.get("temperature_decay", 0.95),
+        thres_fc=opt_cfg.get("thres_fc", 0.3),
+        thres_dis=opt_cfg.get("thres_dis", 0.005),
+        thres_pen=opt_cfg.get("thres_pen", 0.02),
+        device=device,
     )
 
     # Run optimization
     grasp_set = optimizer.optimize(
         num_grasps=args.num_grasps,
-        min_quality=args.min_quality,
         verbose=True,
     )
 
@@ -457,10 +461,10 @@ def _process_one_object_optimization(
         g.object_name = spec.name
         g.object_scale = spec.size / 0.06
 
-    # Expand joint_angles to full num_dof if needed
-    # The optimizer produces joint angles for active finger joints only;
-    # map these to the full DOF vector expected by Isaac Lab.
-    _expand_optimizer_joints(grasp_set, hand_model, num_dof, num_fingers, hand_name)
+    # DexGraspNet's HandModel outputs 22 DOF (Shadow Hand active joints).
+    # Isaac Lab expects 24 DOF (22 active + WRJ0, WRJ1 wrist).
+    # Expand by inserting wrist joints (zeros) at the front.
+    _expand_dexgraspnet_joints_to_isaac(grasp_set, num_dof)
 
     # NFO post-filter for additional quality assurance
     effective_min_quality = _effective_nfo_threshold(num_fingers, args.min_quality)
@@ -564,6 +568,44 @@ def _process_one_object_surface_sampling(
     }
 
     return graph, isaac_spec
+
+
+def _expand_dexgraspnet_joints_to_isaac(grasp_set, num_dof: int = 24):
+    """
+    Expand DexGraspNet's 22-DOF joint angles to Isaac Lab's 24-DOF.
+
+    DexGraspNet Shadow Hand: 22 DOF (no wrist)
+      FFJ3,FFJ2,FFJ1,FFJ0, MFJ3,MFJ2,MFJ1,MFJ0,
+      RFJ3,RFJ2,RFJ1,RFJ0, LFJ4,LFJ3,LFJ2,LFJ1,LFJ0,
+      THJ4,THJ3,THJ2,THJ1,THJ0
+
+    Isaac Lab Shadow Hand: 24 DOF
+      WRJ1,WRJ0, FFJ4,FFJ3,FFJ2,FFJ1, MFJ4,MFJ3,MFJ2,MFJ1,
+      RFJ4,RFJ3,RFJ2,RFJ1, LFJ5,LFJ4,LFJ3,LFJ2,LFJ1,
+      THJ4,THJ3,THJ2,THJ1,THJ0
+
+    We insert WRJ1=0, WRJ0=0 at front, and FFJ4=0, MFJ4=0, RFJ4=0, LFJ5=0
+    at appropriate positions.
+    """
+    for grasp in grasp_set.grasps:
+        if grasp.joint_angles is None:
+            continue
+        q22 = grasp.joint_angles
+        if len(q22) >= num_dof:
+            continue  # already full size
+
+        q24 = np.zeros(num_dof, dtype=np.float32)
+        # Map 22-DOF DexGraspNet → 24-DOF Isaac Lab
+        # DexGraspNet order: [FF(4), MF(4), RF(4), LF(5), TH(5)] = 22
+        # Isaac Lab order:   [WR(2), FF(4), MF(4), RF(4), LF(5), TH(5)] = 24
+        # Just insert 2 wrist zeros at the front
+        if len(q22) == 22:
+            q24[0] = 0.0   # WRJ1
+            q24[1] = 0.0   # WRJ0
+            q24[2:] = q22   # rest maps 1:1
+        else:
+            q24[:len(q22)] = q22
+        grasp.joint_angles = q24
 
 
 def _effective_nfo_threshold(num_fingers: int, min_quality: float) -> float:
