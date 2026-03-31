@@ -124,11 +124,22 @@ def generate_grasps(spec, args, num_fingers, num_dof, hand_name, device):
         g.object_name = spec.name
         g.object_scale = spec.size / 0.06
 
-    # 22 DOF → 24 DOF (insert wrist zeros)
+    # 22 DOF → 24 DOF: remap DexGraspNet joints to Isaac Sim USD layout.
+    #
+    # DexGraspNet MJCF (22 DOF):  FF[0:4] MF[4:8] RF[8:12] LF[12:17] TH[17:22]
+    #   Thumb = [THJ5, THJ4, THJ3, THJ2, THJ1]
+    #
+    # Isaac Sim USD (24 DOF):  WR[0:2] FF[2:6] MF[6:10] RF[10:14] LF[14:19] TH[19:24]
+    #   Thumb = [THJ4, THJ3, THJ2, THJ1, THJ0]  (NO THJ5, has THJ0)
+    #
+    # THJ5 (DexGraspNet index 17) does not exist in Isaac Sim → skip.
+    # THJ0 (Isaac Sim index 23) does not exist in DexGraspNet → zero.
     for g in grasp_set.grasps:
         if g.joint_angles is not None and len(g.joint_angles) == 22:
             q24 = np.zeros(num_dof, dtype=np.float32)
-            q24[2:] = g.joint_angles
+            q24[2:19] = g.joint_angles[:17]    # FF/MF/RF/LF (identical)
+            q24[19:23] = g.joint_angles[18:22]  # THJ4, THJ3, THJ2, THJ1
+            # q24[23] = 0  (THJ0, not in DexGraspNet)
             g.joint_angles = q24
 
     # NFO post-filter
