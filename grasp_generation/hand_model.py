@@ -133,9 +133,16 @@ class DexGraspNetHandModel:
         self.device = device
 
         # Load kinematic chain from MJCF
-        self.chain = pk.build_chain_from_mjcf(
-            open(MJCF_PATH).read()
-        ).to(dtype=torch.float, device=device)
+        # MJCF parser resolves mesh paths relative to CWD, so we must
+        # chdir to the grasp_generation directory where meshes live.
+        original_cwd = os.getcwd()
+        try:
+            os.chdir(str(_DEXGRASPNET_GRASP))
+            self.chain = pk.build_chain_from_mjcf(
+                open(MJCF_PATH).read()
+            ).to(dtype=torch.float, device=device)
+        finally:
+            os.chdir(original_cwd)
         self.n_dofs = len(self.chain.get_joint_parameter_names())
 
         # Load contact + penetration points

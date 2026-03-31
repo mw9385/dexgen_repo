@@ -1,4 +1,5 @@
 """Debug script: test HandModel loading step by step."""
+import os
 import sys
 import subprocess
 
@@ -18,9 +19,14 @@ print('1. imports ok')
 import pytorch_kinematics as pk
 print('2. pk imported')
 
-chain = pk.build_chain_from_mjcf(
-    open('/workspace/dexgen/third_party/DexGraspNet/grasp_generation/mjcf/shadow_hand_wrist_free.xml').read()
-)
+# MJCF parser resolves mesh paths relative to CWD
+mjcf_dir = '/workspace/dexgen/third_party/DexGraspNet/grasp_generation'
+mjcf_file = os.path.join(mjcf_dir, 'mjcf', 'shadow_hand_wrist_free.xml')
+
+original_cwd = os.getcwd()
+os.chdir(mjcf_dir)
+chain = pk.build_chain_from_mjcf(open(mjcf_file).read())
+os.chdir(original_cwd)
 print('3. chain built:', len(chain.get_joint_parameter_names()), 'DOFs')
 
 import torch
