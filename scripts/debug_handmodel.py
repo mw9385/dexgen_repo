@@ -1,7 +1,17 @@
 """Debug script: test HandModel loading step by step."""
 import sys
+import subprocess
+
 sys.path.insert(0, '/workspace/dexgen/third_party/DexGraspNet/thirdparty/pytorch_kinematics')
 sys.path.insert(0, '/workspace/dexgen')
+
+# Auto-install missing dependencies
+for pkg in ['transforms3d', 'transformations', 'lxml']:
+    try:
+        __import__(pkg)
+    except ImportError:
+        print(f'Installing missing package: {pkg}')
+        subprocess.check_call([sys.executable, '-m', 'pip', 'install', pkg])
 
 print('1. imports ok')
 

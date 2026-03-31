@@ -55,8 +55,8 @@ RUN if [ ! -f third_party/DexGraspNet/grasp_generation/mjcf/shadow_hand_wrist_fr
         git submodule update --init third_party/DexGraspNet || true; \
     fi
 
-# DexGraspNet 의존성 (transforms3d, pytorch_kinematics는 third_party에 번들)
-RUN ${ISAACSIM_PYTHON_EXE} -m pip install --no-cache-dir transforms3d>=0.4.1
+# DexGraspNet 의존성 (pytorch_kinematics는 third_party에 번들)
+RUN ${ISAACSIM_PYTHON_EXE} -m pip install --no-cache-dir transforms3d transformations lxml
 
 ENV PYTHONPATH="${DEXGEN_DIR}:${DEXGEN_DIR}/third_party/DexGraspNet/thirdparty/pytorch_kinematics:${ISAACLAB_DIR}/source/isaaclab:${ISAACLAB_DIR}/source/isaaclab_assets:${PYTHONPATH}"
 

@@ -13,6 +13,8 @@ numpy>=1.24.0
 # DexGraspNet grasp optimization dependencies
 # pytorch_kinematics is bundled in third_party/DexGraspNet/thirdparty/
 transforms3d>=0.4.1         # Euler angle / rotation matrix conversions
+transformations>=2022.9.26   # Required by pytorch_kinematics (URDF module)
+lxml                         # Required by pytorch_kinematics (MJCF parser)
 
 # Deep learning (PyTorch is pre-installed in Isaac Sim image; listed for reference)
 # torch>=2.2.0         # already in Isaac Sim base image
