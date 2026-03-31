@@ -1,26 +1,15 @@
 # ==============================================================================
-# Stage 0 – Grasp Generation Configuration (Multi-Object Pool)
+# Stage 0 – Grasp Generation Configuration
 # ==============================================================================
 
 # ==============================================================================
 # Hand configuration
 # ==============================================================================
-# num_fingers    : how many fingertip contact points to use (2 / 3 / 4 / 5)
-# num_dof        : total controllable DOF (used by DR and obs dimension)
-# dof_per_finger : joints per finger (average; LF=5, TH=5, others=4)
-# fingertip_links: Isaac Lab link names used by ContactSensor & FK lookup
-#
-# Pre-configured hands:
-#   shadow   : num_fingers=5, num_dof=22, fingertips=rh_fftip/mftip/rftip/lftip/thtip
-#   allegro  : num_fingers=4, num_dof=16, dof_per_finger=4
-#   leap     : num_fingers=4, num_dof=16, dof_per_finger=4
-# ==============================================================================
-
 hand:
   name: shadow
   num_fingers: 5
-  num_dof: 24                    # total USD joints (20 actuated + 4 passive)
-  dof_per_finger: 4              # average (LF=5, TH=5, FF/MF/RF=4); wrist not counted
+  num_dof: 24                    # total USD joints (22 actuated + 2 wrist)
+  dof_per_finger: 4
   fingertip_links:
     - robot0_ffdistal   # forefinger
     - robot0_mfdistal   # middle finger
@@ -30,33 +19,139 @@ hand:
 
 # Object pool — generates grasps for all combinations of shape × size
 object_pool:
-  shapes: [cube, sphere, cylinder]   # primitive shapes to include
-  size_min: 0.05                     # minimum object size (m)  — clearly visible in sim
-  size_max: 0.08                     # maximum object size (m)  — power grasp
+  shapes: [cube, sphere, cylinder]
+  size_min: 0.05                     # minimum object size (m)
+  size_max: 0.08                     # maximum object size (m)
   num_sizes: 3                       # size steps per shape (total: 3×3 = 9 objects)
 
-  # Override with a directory of mesh files instead of primitives:
-  # mesh_dir: assets/objects/
-
-# Grasp sampler (per object)
+# Grasp sampler (legacy, used when method=surface_sampling)
 sampler:
-  num_seed_grasps: 300     # seed grasps per object before NFO filtering
+  num_seed_grasps: 300
 
-# Net Force Optimization (NFO)
+# NFO quality scoring (used as post-filter after optimization)
 nfo:
   mu: 0.5                  # friction coefficient
-  num_friction_edges: 8    # friction cone linearisation edges
-  min_quality: 0.005       # minimum NFO ε-metric score
-  fast_mode: false         # true = SVD approximation (faster, less accurate)
+  num_friction_edges: 8
+  min_quality: 0.005
+  fast_mode: false
 
-# RRT expansion (per object)
-# delta_max = spec.size * 0.30  (set in run_grasp_generation.py)
-#   effective mean fingertip distance per edge (5-finger, 6cm object) ≈ 4.3 cm
-#   → ~0.6–0.8 rad L2 joint change per edge — reachable in ~50–100 RL steps
-#   300 nodes: sufficient connectivity at this delta_max (many edges per node)
-#   Use --num_grasps 500 or --generation_preset high_precision for better coverage
+# Grasp generation method:
+#   'optimization'      : DexGraspNet Simulated Annealing (recommended)
+#   'surface_sampling'  : legacy heuristic sampling + NFO
+method: optimization
+
+# ==============================================================================
+# DexGraspNet Simulated Annealing Optimization
+# ==============================================================================
+#
+# Algorithm:
+#   1. Initialize random hand poses around object (convex hull approach)
+#   2. Optimize hand_pose = [translation(3) | rotation_6d(6) | joints(22)]
+#      via Simulated Annealing with RMSProp gradient steps
+#   3. Filter by energy thresholds → keep only good grasps
+#
+# SA behavior:
+#   - High temperature (T=18): accepts bad moves → explores diverse configurations
+#   - Low temperature (T→0): only accepts improvements → fine-tunes contact
+#   - Temperature decays by 'temperature_decay' every 'annealing_period' steps
+#   - Step size decays similarly for convergence
+#
+# ==============================================================================
+optimization:
+
+  # ── Simulated Annealing schedule ──────────────────────────────────────────
+  #
+  # num_iterations : total optimization steps per batch
+  #                  Higher = better convergence, slower. 3000-6000 for production.
+  #
+  # batch_size     : number of grasp candidates optimized in parallel
+  #                  Higher = more GPU usage, more grasps per run.
+  #                  Limited by GPU memory. RTX 4090: 512-2048 safe.
+  #
+  # step_size      : initial RMSProp learning rate
+  #                  Decays by temperature_decay every stepsize_period steps.
+  #                  Too high → unstable, too low → slow convergence.
+  #
+  # starting_temperature : SA initial temperature
+  #                        Higher = more exploration at start.
+  #                        18.0 is DexGraspNet default.
+  #
+  # temperature_decay    : multiplicative decay factor (applied every annealing_period)
+  #                        0.95 = 5% decay. Lower = faster cooling = less exploration.
+  #
+  num_iterations: 5000
+  batch_size: 512
+  step_size: 0.005
+  starting_temperature: 18.0
+  temperature_decay: 0.95
+
+  # ── Energy weights ────────────────────────────────────────────────────────
+  #
+  # Total energy = E_fc + w_dis*E_dis + w_pen*E_pen + w_spen*E_spen
+  #                     + w_joints*E_joints + w_pose*E_pose
+  #
+  # E_fc (force closure, weight=1.0 implicit):
+  #   Measures grasp stability. ||contact_normal @ grasp_jacobian||^2.
+  #   Low = contact normals span full 6D wrench space = stable grasp.
+  #   High = fingers on same side = object can escape in some direction.
+  #   Typical converged value: 0.1-2.0 (good), >5.0 (poor).
+  #
+  # E_dis (contact distance):
+  #   Sum of absolute distances from each contact point to object surface.
+  #   0 = perfect contact. Unit: meters.
+  #   Weight 500 makes this the dominant optimization objective.
+  #   Typical converged value: 0.0005-0.005m.
+  #
+  # E_pen (reverse penetration):
+  #   Samples 500 points on object surface, measures how far they penetrate
+  #   into the hand mesh. Prevents hand-object interpenetration.
+  #   0 = no penetration. Higher weight = stricter collision avoidance.
+  #
+  # E_spen (self-penetration):
+  #   Pairwise distance check between hand penetration keypoints (19 points).
+  #   Penalizes fingers passing through each other. Threshold: 2cm.
+  #
+  # E_joints (joint limit violation):
+  #   Penalizes joint angles exceeding their physical range.
+  #   Low weight (1.0) because SA initialization already respects limits.
+  #
+  # E_pose (natural pose prior):
+  #   Penalizes deviation from a canonical power grasp pose.
+  #   Prevents unnatural finger bending (e.g., hyperextension, twisted joints).
+  #   The canonical pose is: [0.1, 0, 0.6, 0, 0, 0, 0.6, 0, -0.1, 0, 0.6, 0,
+  #                           0, -0.2, 0, 0.6, 0, 0, 1.2, 0, -0.2, 0]
+  #   Higher weight = more conservative/natural poses but less diverse grasps.
+  #
+  w_dis: 500.0
+  w_pen: 100.0
+  w_spen: 10.0
+  w_joints: 1.0
+  w_pose: 10.0
+
+  # ── Success thresholds (filtering after optimization) ─────────────────────
+  #
+  # Only grasps passing ALL three thresholds are kept in the final graph.
+  # Stricter thresholds = higher quality but fewer grasps.
+  #
+  # thres_fc  : max force closure energy. Lower = more stable grasps only.
+  #             0.3 = DexGraspNet original (very strict, requires exact mesh SDF)
+  #             3.0 = good for analytical SDF on primitives
+  #
+  # thres_dis : max mean contact distance (meters).
+  #             0.005 = 5mm (strict, may need many iterations)
+  #             0.01  = 10mm (moderate)
+  #
+  # thres_pen : max penetration energy.
+  #             0.02 = DexGraspNet original
+  #             0.03 = slightly relaxed for box-approximated collision
+  #
+  thres_fc: 3.0
+  thres_dis: 0.005
+  thres_pen: 0.03
+
+# RRT expansion (legacy, used when method=surface_sampling)
 rrt:
-  target_size: 300         # target grasps per object after expansion
+  target_size: 300
 
 # Output
 output_dir: data

@@ -41,8 +41,8 @@ def parse_args():
     p.add_argument("--num_steps", type=int, default=0,
                    help="Max steps to run (0 = run until window closed)")
     p.add_argument("--action_mode", type=str, default="zero",
-                   choices=["zero", "random"],
-                   help="zero: all-zero actions | random: uniform [-1,1]")
+                   choices=["zero", "random", "hold"],
+                   help="zero: all-zero actions | random: uniform [-1,1] | hold: maintain initial grasp pose")
     p.add_argument("--hold_steps", type=int, default=0,
                    help="Send zero actions for this many steps before switching to action_mode")
     p.add_argument("--seed", type=int, default=42)
@@ -139,7 +139,10 @@ def main():
     try:
         while sim_app.is_running():
             with torch.inference_mode():
-                if steps < args.hold_steps or args.action_mode == "zero":
+                if args.action_mode == "hold" or (steps < args.hold_steps):
+                    actions = torch.zeros(args.num_envs, action_dim,
+                                         device=env.unwrapped.device)
+                elif args.action_mode == "zero":
                     actions = torch.zeros(args.num_envs, action_dim,
                                          device=env.unwrapped.device)
                 else:

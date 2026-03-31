@@ -5,6 +5,11 @@ from .rrt_expansion import (
 )
 from .graph_io import load_merged_graph, parse_graph_paths
 from .isaac_refinement import refine_multi_object_graph_with_isaac
+from .hand_model import (
+    DexGraspNetHandModel, PrimitiveObjectModel,
+    build_hand_model, build_object_model,
+)
+from .grasp_optimization import GraspOptimizer
 
 __all__ = [
     "GraspSampler",
@@ -20,4 +25,9 @@ __all__ = [
     "load_merged_graph",
     "parse_graph_paths",
     "refine_multi_object_graph_with_isaac",
+    "DexGraspNetHandModel",
+    "PrimitiveObjectModel",
+    "build_hand_model",
+    "build_object_model",
+    "GraspOptimizer",
 ]

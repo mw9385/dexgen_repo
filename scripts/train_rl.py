@@ -292,8 +292,8 @@ def build_rl_games_config(args, cfg_file: dict) -> dict:
                 "bounds_loss_coef": float(ppo_cfg.get("bounds_loss_coef", 0.005)),
                 "log_dir": args.log_dir,
 
-                # Asymmetric Actor-Critic
-                "use_central_value": True,
+                # Symmetric Actor-Critic (actor sees full obs = critic obs)
+                "use_central_value": False,
                 "central_value_config": {
                     "minibatch_size": cv_minibatch_size,
                     "mini_epochs": int(cv_cfg.get("mini_epochs", 4)),

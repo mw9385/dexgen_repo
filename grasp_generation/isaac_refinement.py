@@ -73,10 +73,18 @@ def _refine_single_object_graph(
     try:
         device = env.device
         all_grasps = subgraph.grasp_set.grasps
-        for chunk_start in range(0, len(all_grasps), env_cfg.scene.num_envs):
+        total_chunks = (len(all_grasps) + env_cfg.scene.num_envs - 1) // env_cfg.scene.num_envs
+        print(f"  [Refine] {len(all_grasps)} grasps, {total_chunks} chunks of {env_cfg.scene.num_envs}")
+        for chunk_idx, chunk_start in enumerate(range(0, len(all_grasps), env_cfg.scene.num_envs)):
             chunk = all_grasps[chunk_start : chunk_start + env_cfg.scene.num_envs]
             env_ids = torch.arange(len(chunk), device=device, dtype=torch.long)
-            _refine_chunk(env, env_ids, chunk, mdp_events)
+            print(f"  [Refine] Chunk {chunk_idx+1}/{total_chunks} ({len(chunk)} grasps)...", flush=True)
+            try:
+                _refine_chunk(env, env_ids, chunk, mdp_events)
+            except Exception as e:
+                print(f"  [Refine] WARNING: chunk {chunk_idx+1} failed: {e}")
+                import traceback; traceback.print_exc()
+                continue
 
         if keep_top_k is not None and len(all_grasps) > keep_top_k:
             all_grasps = sorted(
@@ -104,10 +112,18 @@ def _refine_chunk(env, env_ids: torch.Tensor, grasps: list, mdp_events):
     robot = env.scene["robot"]
     obj = env.scene["object"]
 
+    # Determine how many fingertips the env expects
+    env_num_fingers = int(
+        (getattr(env.cfg, "hand", None) or {}).get("num_fingers", 5)
+    )
+
     fingertip_targets = []
     joint_list = []
     for grasp in grasps:
-        fingertip_targets.append(grasp.fingertip_positions.copy())
+        # Pad grasp fingertip positions to match env's num_fingers
+        fps = grasp.fingertip_positions.copy()
+        fps = mdp_events._pad_fingertip_positions(fps, env_num_fingers)
+        fingertip_targets.append(fps)
         joint_list.append(getattr(grasp, "joint_angles", None))
 
     start_fps = torch.tensor(np.stack(fingertip_targets), device=env.device, dtype=torch.float32)

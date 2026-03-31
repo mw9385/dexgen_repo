@@ -180,8 +180,8 @@ if _ISAACLAB_AVAILABLE:
         robot: ArticulationCfg = SHADOW_HAND_CFG.replace(
             prim_path="{ENV_REGEX_NS}/ShadowHand",
             init_state=ArticulationCfg.InitialStateCfg(
-                pos=(0.0, 0.0, 0.6),
-                rot=(1.0, 0.0, 0.0, 0.0),
+                pos=(0.0, 0.0, 0.35),     # below object — palm faces up
+                rot=(0.0, 1.0, 0.0, 0.0), # 180° X-rotation → palm UP
                 joint_pos={
                     "robot0_THJ4": 0.5,   # thumb rotation: natural resting pose
                     "robot0_THJ3": 0.3,
@@ -262,6 +262,7 @@ if _ISAACLAB_AVAILABLE:
     class AnyGraspObservationsCfg:
         @configclass
         class PolicyObs(ObsGroup):
+            # Full observation: actor sees everything critic sees
             joint_pos = ObsTerm(
                 func=mdp_obs.joint_positions_normalized,
                 noise=GaussianNoise(std=0.005),
@@ -274,11 +275,17 @@ if _ISAACLAB_AVAILABLE:
                 func=mdp_obs.fingertip_positions_in_object_frame,
                 noise=GaussianNoise(std=0.003),
             )
-            # Paper §3.2: goal encoded as relative transformation (goal - current)
-            # in object frame, so policy directly sees the remaining error vector.
             rel_fingertip_to_goal = ObsTerm(func=mdp_obs.relative_fingertip_to_goal)
             fingertip_contact     = ObsTerm(func=mdp_obs.fingertip_contact_binary)
             last_action           = ObsTerm(func=mdp_obs.last_action)
+
+            # Previously critic-only — now shared with actor
+            object_pos    = ObsTerm(func=mdp_obs.object_position_world)
+            object_quat   = ObsTerm(func=mdp_obs.object_orientation_world)
+            object_linvel = ObsTerm(func=mdp_obs.object_linear_velocity)
+            object_angvel = ObsTerm(func=mdp_obs.object_angular_velocity)
+            contact_forces = ObsTerm(func=mdp_obs.fingertip_contact_forces)
+            dr_params      = ObsTerm(func=mdp_obs.domain_randomization_params)
 
             def __post_init__(self):
                 self.enable_corruption  = True
