@@ -842,36 +842,41 @@ def _expand_grasp_joint_vector(
     """
     Expand/pad a stored grasp joint vector to the full 24-DOF articulation count.
 
-    Shadow Hand USD has 24 total joints:
-      [0-1]:  WRJ1, WRJ0        (wrist)
-      [2-5]:  FFJ4(pass), J3, J2, J1
-      [6-9]:  MFJ4(pass), J3, J2, J1
-      [10-13]: RFJ4(pass), J3, J2, J1
-      [14-18]: LFJ5(pass), LFJ4, J3, J2, J1
-      [19-23]: THJ4, J3, J2, J1, J0  (NO THJ5)
+    Shadow Hand USD (24 DOF):
+      [0-1]:   WRJ1, WRJ0           (wrist)
+      [2-5]:   FFJ4(passive), FFJ3, FFJ2, FFJ1
+      [6-9]:   MFJ4(passive), MFJ3, MFJ2, MFJ1
+      [10-13]: RFJ4(passive), RFJ3, RFJ2, RFJ1
+      [14-18]: LFJ5(passive), LFJ4, LFJ3, LFJ2, LFJ1
+      [19-23]: THJ4, THJ3, THJ2, THJ1, THJ0
 
     Supported input sizes:
-      24 → pass-through (new format, no expansion needed)
-      22 → old heuristic IK format: [FF×4, MF×4, RF×4, LF×5, TH×5] with
-           incorrect thumb (had THJ5 placeholder at TH[0]). Remaps correctly:
-             in[0-16]  → expanded[2-18]   (FF/MF/RF/LF blocks, all correct)
-             in[17]=0  skip (was THJ5 placeholder)
-             in[18-21] → expanded[19-22]  (THJ4-THJ1)
-             expanded[23] = 0             (THJ0, not in old format)
+      24 → pass-through (already in Isaac Sim format)
+      22 → DexGraspNet MJCF format (shadow_hand_wrist_free.xml):
+             [0-3]:   FFJ3, FFJ2, FFJ1, FFJ0(coupled)
+             [4-7]:   MFJ3, MFJ2, MFJ1, MFJ0(coupled)
+             [8-11]:  RFJ3, RFJ2, RFJ1, RFJ0(coupled)
+             [12-16]: LFJ4, LFJ3, LFJ2, LFJ1, LFJ0(coupled)
+             [17-21]: THJ4, THJ3, THJ2, THJ1, THJ0
+           MJCF has J0 (coupled DIP) not in Isaac → skip.
+           Isaac has J4/J5 (passive spread) not in MJCF → zero.
     """
     if joint_vec.shape[0] == target_num_dof:
         return joint_vec
 
     expanded = torch.zeros(target_num_dof, device=joint_vec.device, dtype=joint_vec.dtype)
 
-    if joint_vec.shape[0] == target_num_dof - 2:  # 22-DOF old format
-        # FF/MF/RF/LF blocks (in[0-16] → expanded[2-18]): correct as-is
-        n_finger_blocks = min(17, joint_vec.shape[0])
-        expanded[2:2 + n_finger_blocks] = joint_vec[:n_finger_blocks]
-        # TH block: skip old THJ5 placeholder (in[17]=0), map THJ4-THJ1 (in[18-21])
-        if joint_vec.shape[0] >= 22:
-            expanded[19:23] = joint_vec[18:22]  # THJ4, THJ3, THJ2, THJ1
-            # expanded[23] = THJ0 stays at 0
+    if joint_vec.shape[0] == target_num_dof - 2:  # 22-DOF MJCF format
+        # FF: in[0:3]=(FFJ3,2,1) → out[3:6], skip in[3]=FFJ0
+        expanded[3:6] = joint_vec[0:3]
+        # MF: in[4:7]=(MFJ3,2,1) → out[7:10], skip in[7]=MFJ0
+        expanded[7:10] = joint_vec[4:7]
+        # RF: in[8:11]=(RFJ3,2,1) → out[11:14], skip in[11]=RFJ0
+        expanded[11:14] = joint_vec[8:11]
+        # LF: in[12:16]=(LFJ4,3,2,1) → out[15:19], skip in[16]=LFJ0
+        expanded[15:19] = joint_vec[12:16]
+        # TH: in[17:22]=(THJ4,3,2,1,0) → out[19:24] (direct match)
+        expanded[19:24] = joint_vec[17:22]
         return expanded
 
     # Fallback: zero-pad or truncate
