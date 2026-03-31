@@ -39,9 +39,10 @@ from .hand_model import (
 
 def cal_energy(hand_model: DexGraspNetHandModel,
                object_model: PrimitiveObjectModel,
-               w_dis=100.0, w_pen=100.0, w_spen=10.0, w_joints=1.0, w_pose=10.0):
+               w_dis=100.0, w_pen=100.0, w_spen=10.0, w_joints=1.0,
+               w_pose=10.0, w_orient=50.0):
     """
-    Compute composite grasp energy (DexGraspNet formulation + E_pose).
+    Compute composite grasp energy (DexGraspNet formulation + E_pose + E_orient).
 
     Returns:
         total_energy, E_fc, E_dis, E_pen, E_spen, E_joints, E_pose — all (B,)
@@ -102,8 +103,19 @@ def cal_energy(hand_model: DexGraspNetHandModel,
     joint_diff = hand_model.hand_pose[:, 9:] - joint_angles_mu.unsqueeze(0)
     E_pose = (joint_diff ** 2).sum(dim=-1)
 
+    # E_orient: penalize palm facing downward
+    # Shadow Hand palm normal in local frame is approximately +Z after FK.
+    # The global rotation R transforms local frame to world frame.
+    # We want R @ [0,0,1] (palm normal in world) to point UP (+Z world).
+    # E_orient = (1 - palm_z_world)^2 → minimized when palm faces straight up.
+    R = hand_model.global_rotation  # (B, 3, 3)
+    palm_normal_local = torch.tensor([0.0, 0.0, 1.0], device=device)
+    palm_normal_world = (R @ palm_normal_local).squeeze(-1)  # (B, 3)
+    # palm_normal_world[:, 2] is the Z component: +1 = facing up, -1 = facing down
+    E_orient = (1.0 - palm_normal_world[:, 2]) ** 2
+
     total = (E_fc + w_dis * E_dis + w_pen * E_pen + w_spen * E_spen
-             + w_joints * E_joints + w_pose * E_pose)
+             + w_joints * E_joints + w_pose * E_pose + w_orient * E_orient)
     return total, E_fc, E_dis, E_pen, E_spen, E_joints, E_pose
 
 
