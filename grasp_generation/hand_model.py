@@ -201,6 +201,7 @@ class DexGraspNetHandModel:
 
         # Precompute collision parameters (cached tensors on GPU)
         self._precompute_collision_params()
+        self._precompute_penetration_params()
 
         print(f"[HandModel] Shadow Hand: {self.n_dofs} DOFs, "
               f"{self.n_contact_candidates} contact candidates, "
@@ -287,16 +288,16 @@ class DexGraspNetHandModel:
             self.contact_points = self.contact_candidates[self.contact_point_indices]
             link_indices = self.global_index_to_link_index[self.contact_point_indices]
 
-            transforms = torch.zeros(
-                batch_size, n_contact, 4, 4,
-                dtype=torch.float, device=self.device,
-            )
-            for link_name in self.mesh:
-                mask = link_indices == self.link_name_to_link_index[link_name]
-                cur = self.current_status[link_name].get_matrix().unsqueeze(1).expand(
-                    batch_size, n_contact, 4, 4
-                )
-                transforms[mask] = cur[mask]
+            # Vectorized: gather transforms for each contact point via index
+            all_matrices = torch.stack([
+                self.current_status[name].get_matrix()
+                for name in self._all_link_names
+            ], dim=1)  # (B, num_all_links, 4, 4)
+
+            idx = link_indices.unsqueeze(-1).unsqueeze(-1).expand(
+                batch_size, n_contact, 4, 4
+            )  # (B, n_contact, 4, 4)
+            transforms = torch.gather(all_matrices, 1, idx)  # (B, n_contact, 4, 4)
 
             self.contact_points = torch.cat([
                 self.contact_points,
@@ -312,87 +313,147 @@ class DexGraspNetHandModel:
             )
 
     def _precompute_collision_params(self):
-        """Cache collision geometry tensors on GPU (called once at init)."""
-        self._collision_links = []
+        """
+        Cache collision geometry as batched tensors on GPU.
+
+        Instead of iterating 17 links in Python, we pack all parameters
+        into tensors of shape (L, ...) and compute all SDFs in one
+        vectorized operation. This maximizes GPU utilization.
+        """
+        self._col_link_names = []
+        capsule_heights = []
+        capsule_radii = []
+        box_half_extents = []
+        box_centers = []
+        is_capsule = []
+
         for link_name in self.mesh:
             if link_name in SKIP_LINKS:
                 continue
             geom = self.mesh[link_name]['geom_info']
+            self._col_link_names.append(link_name)
+
             if geom['geom_type'] == 'capsule':
-                self._collision_links.append({
-                    'name': link_name,
-                    'type': 'capsule',
-                    'height': geom['height'],
-                    'radius': geom['radius'],
-                })
+                is_capsule.append(True)
+                capsule_heights.append(geom['height'])
+                capsule_radii.append(geom['radius'])
+                box_half_extents.append([0.01, 0.01, 0.01])  # dummy
+                box_centers.append([0.0, 0.0, 0.0])
             elif geom['geom_type'] == 'box':
-                self._collision_links.append({
-                    'name': link_name,
-                    'type': 'box',
-                    'he': torch.tensor(geom['half_extents'], dtype=torch.float, device=self.device),
-                    'center': torch.tensor(geom.get('center', [0, 0, 0]), dtype=torch.float, device=self.device),
-                })
+                is_capsule.append(False)
+                capsule_heights.append(0.01)  # dummy
+                capsule_radii.append(0.01)
+                box_half_extents.append(geom['half_extents'].tolist())
+                box_centers.append(
+                    geom.get('center', np.zeros(3)).tolist()
+                    if isinstance(geom.get('center'), np.ndarray)
+                    else geom.get('center', [0, 0, 0])
+                )
+
+        L = len(self._col_link_names)
+        self._n_col_links = L
+        # (L,) bool mask: True=capsule, False=box
+        self._is_capsule = torch.tensor(is_capsule, dtype=torch.bool, device=self.device)
+        # Capsule params: (L,)
+        self._cap_heights = torch.tensor(capsule_heights, dtype=torch.float, device=self.device)
+        self._cap_radii = torch.tensor(capsule_radii, dtype=torch.float, device=self.device)
+        # Box params: (L, 3)
+        self._box_he = torch.tensor(box_half_extents, dtype=torch.float, device=self.device)
+        self._box_center = torch.tensor(box_centers, dtype=torch.float, device=self.device)
 
     def cal_distance(self, x):
         """
-        Signed distance from points to hand surface.
+        Signed distance from points to hand surface (vectorized, no Python loop).
         Positive = inside hand, negative = outside.
+
+        All L collision links are processed in a single batched operation.
+        Shape flow: x (B, N, 3) → x_all_local (B, L, N, 3) → dis (B, L, N) → max over L
         """
-        dis = []
+        B, N, _ = x.shape
+        L = self._n_col_links
+        device = self.device
+
+        # Transform to hand frame: (B, N, 3)
         x_hand = (x - self.global_translation.unsqueeze(1)) @ self.global_rotation
 
-        for col in self._collision_links:
-            matrix = self.current_status[col['name']].get_matrix()
-            x_local = (x_hand - matrix[:, :3, 3].unsqueeze(1)) @ matrix[:, :3, :3]
-            x_flat = x_local.reshape(-1, 3)
+        # Gather all link transforms: (B, L, 4, 4)
+        matrices = torch.stack([
+            self.current_status[name].get_matrix()
+            for name in self._col_link_names
+        ], dim=1)  # (B, L, 4, 4)
 
-            if col['type'] == 'capsule':
-                # Analytical capsule SDF (same as DexGraspNet original)
-                z_clamped = torch.clamp(x_flat[:, 2], 0, col['height'])
-                nearest = torch.zeros_like(x_flat)
-                nearest[:, 2] = z_clamped
-                dis_local = col['radius'] - (x_flat - nearest).norm(dim=1)
-            else:  # box
-                p = x_flat - col['center']
-                q = torch.abs(p) - col['he']
-                outside = torch.norm(torch.clamp(q, min=0.0), dim=-1)
-                inside = torch.clamp(q.max(dim=-1).values, max=0.0)
-                dis_local = -(outside + inside)
+        # Transform x to each link's local frame in one shot
+        # x_hand: (B, 1, N, 3), translations: (B, L, 1, 3), rotations: (B, L, 3, 3)
+        link_pos = matrices[:, :, :3, 3].unsqueeze(2)    # (B, L, 1, 3)
+        link_rot = matrices[:, :, :3, :3]                 # (B, L, 3, 3)
+        x_expanded = x_hand.unsqueeze(1).expand(B, L, N, 3)  # (B, L, N, 3)
+        x_local = (x_expanded - link_pos) @ link_rot      # (B, L, N, 3)
 
-            dis.append(dis_local.reshape(x.shape[0], x.shape[1]))
+        # Flatten for SDF computation: (B*L*N, 3)
+        x_flat = x_local.reshape(B * L * N, 3)
 
-        if not dis:
-            return torch.zeros(x.shape[0], x.shape[1], device=self.device)
-        return torch.max(torch.stack(dis, dim=0), dim=0)[0]
+        # Compute capsule SDF for ALL links (we'll mask later)
+        # capsule: nearest point on z-axis segment [0, height]
+        heights = self._cap_heights.view(1, L, 1).expand(B, L, N).reshape(B * L * N)
+        radii = self._cap_radii.view(1, L, 1).expand(B, L, N).reshape(B * L * N)
+        z_clamped = torch.clamp(x_flat[:, 2], min=0.0, max=heights)
+        dx = x_flat[:, 0]
+        dy = x_flat[:, 1]
+        dz = x_flat[:, 2] - z_clamped
+        dist_to_axis = torch.sqrt(dx * dx + dy * dy + dz * dz + 1e-12)
+        capsule_sdf = radii - dist_to_axis  # positive = inside
+
+        # Compute box SDF for ALL links
+        centers = self._box_center.view(1, L, 1, 3).expand(B, L, N, 3).reshape(B * L * N, 3)
+        half_exts = self._box_he.view(1, L, 1, 3).expand(B, L, N, 3).reshape(B * L * N, 3)
+        p = x_flat - centers
+        q = torch.abs(p) - half_exts
+        outside = torch.norm(torch.clamp(q, min=0.0), dim=-1)
+        inside = torch.clamp(q.max(dim=-1).values, max=0.0)
+        box_sdf = -(outside + inside)  # positive = inside
+
+        # Select capsule or box based on link type
+        is_cap = self._is_capsule.view(1, L, 1).expand(B, L, N).reshape(B * L * N)
+        dis_flat = torch.where(is_cap, capsule_sdf, box_sdf)
+
+        # Reshape and take max over links: (B, L, N) → (B, N)
+        dis = dis_flat.reshape(B, L, N)
+        return dis.max(dim=1).values
+
+    def _precompute_penetration_params(self):
+        """Precompute the link index → all-links-list index mapping for penetration."""
+        # Build a mapping: for each keypoint, which index in _all_link_names?
+        all_link_names = list(self.mesh.keys())
+        self._all_link_names = all_link_names
+        self._pen_link_indices = self.global_index_to_link_index_penetration  # (K,)
+        # Map link_name_to_link_index → index in all_link_names (for gathering)
+        self._pen_link_gather_idx = self._pen_link_indices  # already correct
 
     def self_penetration(self):
-        """Self-penetration energy via pairwise keypoint distances."""
+        """Self-penetration energy via pairwise keypoint distances (vectorized)."""
         batch_size = self.global_translation.shape[0]
-        points = self.penetration_keypoints.clone().repeat(batch_size, 1, 1)
-        link_indices = self.global_index_to_link_index_penetration.clone().repeat(batch_size, 1)
+        K = self.n_keypoints
 
-        transforms = torch.zeros(
-            batch_size, self.n_keypoints, 4, 4,
-            dtype=torch.float, device=self.device,
-        )
-        for link_name in self.mesh:
-            mask = link_indices == self.link_name_to_link_index[link_name]
-            cur = self.current_status[link_name].get_matrix().unsqueeze(1).expand(
-                batch_size, self.n_keypoints, 4, 4
-            )
-            transforms[mask] = cur[mask]
+        # Gather all link transforms: (B, num_all_links, 4, 4)
+        all_matrices = torch.stack([
+            self.current_status[name].get_matrix()
+            for name in self._all_link_names
+        ], dim=1)  # (B, num_all_links, 4, 4)
 
-        points = torch.cat([
+        # Select transform for each keypoint: (B, K, 4, 4)
+        idx = self._pen_link_gather_idx.view(1, K, 1, 1).expand(batch_size, K, 4, 4)
+        transforms = torch.gather(all_matrices, 1, idx)  # (B, K, 4, 4)
+
+        # Transform keypoints
+        points = self.penetration_keypoints.unsqueeze(0).expand(batch_size, K, 3)
+        points_h = torch.cat([
             points,
-            torch.ones(batch_size, self.n_keypoints, 1,
-                        dtype=torch.float, device=self.device),
-        ], dim=2)
-        points = (transforms @ points.unsqueeze(3))[:, :, :3, 0]
-        points = (
-            points @ self.global_rotation.transpose(1, 2)
-            + self.global_translation.unsqueeze(1)
-        )
+            torch.ones(batch_size, K, 1, dtype=torch.float, device=self.device),
+        ], dim=2)  # (B, K, 4)
+        points = (transforms @ points_h.unsqueeze(3))[:, :, :3, 0]  # (B, K, 3)
+        points = points @ self.global_rotation.transpose(1, 2) + self.global_translation.unsqueeze(1)
 
+        # Pairwise distance
         dis = (points.unsqueeze(1) - points.unsqueeze(2) + 1e-13).square().sum(3).sqrt()
         dis = torch.where(dis < 1e-6, 1e6 * torch.ones_like(dis), dis)
         dis = 0.02 - dis
