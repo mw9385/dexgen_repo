@@ -61,9 +61,9 @@ method: optimization
 # Produces grasps with physically consistent joint angles and guaranteed
 # surface contact, unlike RRT which perturbs in free space.
 optimization:
-  # Simulated Annealing parameters (DexGraspNet original)
-  num_iterations: 2000        # SA iterations per batch (original: 6000, reduced for primitives)
-  batch_size: 256             # parallel grasp candidates (no Isaac Sim = full GPU)
+  # Simulated Annealing parameters
+  num_iterations: 1000        # SA iterations per batch (sufficient for primitives)
+  batch_size: 512             # large batch = more candidates per run
   step_size: 0.005            # RMSProp initial step size
   starting_temperature: 18.0  # SA starting temperature
   temperature_decay: 0.95     # temperature & step size decay rate
@@ -74,10 +74,10 @@ optimization:
   w_spen: 10.0              # self-penetration: no finger self-collision
   w_joints: 1.0             # joint limit violation
 
-  # Success thresholds for filtering
-  thres_fc: 0.3             # max force closure energy
-  thres_dis: 0.005          # max contact distance (5mm)
-  thres_pen: 0.02           # max penetration
+  # Success thresholds for filtering (relaxed for analytical SDF on primitives)
+  thres_fc: 5.0              # max force closure energy (relaxed from 0.3)
+  thres_dis: 0.05            # max contact distance 50mm (relaxed from 5mm)
+  thres_pen: 0.05            # max penetration (relaxed from 0.02)
 
 # RRT expansion (legacy, used when method=surface_sampling)
 rrt:

@@ -385,7 +385,7 @@ class GraspOptimizer:
         """Run grasp optimization and return a GraspSet."""
         all_grasps = []
         # Oversample to account for filtering
-        num_batches = max(1, (num_grasps * 4) // self.batch_size + 1)
+        num_batches = max(1, (num_grasps * 2) // self.batch_size + 1)
 
         for batch_idx in range(num_batches):
             # Free GPU memory between batches
