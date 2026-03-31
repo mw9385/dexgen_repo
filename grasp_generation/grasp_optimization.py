@@ -501,23 +501,36 @@ class GraspOptimizer:
         'robot0:thdistal',
     ]
 
-    def _get_fingertip_positions(self, batch_idx: int) -> np.ndarray:
+    # MJCF 22-DOF indices for coupled DIP joints (J0).
+    # Isaac Sim does not have these joints, so we zero them before computing
+    # fingertip positions to ensure consistency with Isaac's FK.
+    #   FFJ0=3, MFJ0=7, RFJ0=11, LFJ0=16
+    _DIP_JOINT_INDICES = [3, 7, 11, 16]
+
+    def _get_fingertip_positions(self, batch_idx: int, fk_status=None) -> np.ndarray:
         """
         Extract FK fingertip positions for one grasp in the object frame.
 
-        Uses the hand model's current_status (FK results) to get distal
-        link body-frame origins and transforms them to the object frame
-        (object at origin in DexGraspNet).
+        Uses FK results to get distal link body-frame origins and transforms
+        them to the object frame (object at origin in DexGraspNet).
 
         NOTE: We use the body-frame ORIGIN (not the phalanx tip) because
         Isaac Sim's refinement measures `robot.data.body_pos_w` which
         returns the body-frame origin. Using the same reference point
         avoids a systematic ~26mm offset per fingertip.
 
+        Parameters
+        ----------
+        batch_idx : int
+            Index into the batch.
+        fk_status : optional
+            Pre-computed FK status (e.g. with DIP joints zeroed).
+            If None, uses hand_model.current_status.
+
         Returns: (num_fingers, 3) array in object frame.
         """
         hand_model = self.hand_model
-        status = hand_model.current_status
+        status = fk_status if fk_status is not None else hand_model.current_status
         B = hand_model.global_translation.shape[0]
 
         tips = []
@@ -552,6 +565,16 @@ class GraspOptimizer:
         grasps = []
         hand_pose = self.hand_model.hand_pose.detach()
 
+        # Recompute FK with DIP (J0) joints zeroed.
+        # MJCF has coupled DIP joints (FFJ0, MFJ0, RFJ0, LFJ0) that Isaac Sim
+        # does not model. The optimizer may bend these joints, shifting the
+        # distal link origins. Since Isaac can't reproduce this bending, we
+        # must compute fingertip positions as Isaac would see them (DIP=0).
+        joint_angles_no_dip = hand_pose[:, 9:].clone()
+        for dip_idx in self._DIP_JOINT_INDICES:
+            joint_angles_no_dip[:, dip_idx] = 0.0
+        fk_no_dip = self.hand_model.chain.forward_kinematics(joint_angles_no_dip)
+
         for i in range(hand_pose.shape[0]):
             if not success[i]:
                 continue
@@ -564,9 +587,9 @@ class GraspOptimizer:
             )[0].cpu().numpy()
             joint_angles = hand_pose[i, 9:].cpu().numpy()
 
-            # Get actual FK fingertip positions (in world/object frame)
+            # Get FK fingertip positions with DIP zeroed (in world/object frame).
             # Object is at origin in DexGraspNet, so world frame = object frame.
-            tips = self._get_fingertip_positions(i)  # (num_fingers, 3)
+            tips = self._get_fingertip_positions(i, fk_status=fk_no_dip)
 
             # Quality: inverse of E_fc (lower E_fc = better force closure)
             quality = float(max(0.0, self.thres_fc - E_fc[i].item()))
