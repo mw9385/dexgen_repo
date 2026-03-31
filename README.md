@@ -7,10 +7,11 @@ Paper: [arXiv](https://arxiv.org/abs/2404.08603) | Project: [zhaohengyin.github.
 ## Pipeline Overview
 
 ```
-Stage 0  Grasp Generation       →  data/grasp_graph.pkl
-Stage 1  RL Policy Training     →  logs/rl/shadow_anygrasp_v1/
-Stage 2  Dataset Collection     →  data/dataset.h5
-Stage 3  DexGen Controller      →  logs/dexgen/
+Stage 0  Grasp Generation (DexGraspNet SA)  →  data/grasp_graph.pkl
+  0.5    Isaac Refinement (optional)        →  data/grasp_graph.pkl (refined)
+Stage 1  RL Policy Training                 →  logs/rl/shadow_anygrasp_v1/
+Stage 2  Dataset Collection                 →  data/dataset.h5
+Stage 3  DexGen Controller                  →  logs/dexgen/
 ```
 
 ## Quick Start
@@ -20,22 +21,25 @@ Stage 3  DexGen Controller      →  logs/dexgen/
 ./setup_isaaclab.sh
 ./docker/run.sh up && ./docker/run.sh exec
 
-# 2. Generate refined grasps per object (Stage 0)
-/workspace/IsaacLab/isaaclab.sh -p scripts/run_grasp_generation.py \
-    --headless --shapes cube --num_sizes 1 --isaac_refine --output_dir data/cube_graph
-/workspace/IsaacLab/isaaclab.sh -p scripts/run_grasp_generation.py \
-    --headless --shapes sphere --num_sizes 1 --isaac_refine --output_dir data/sphere_graph
-/workspace/IsaacLab/isaaclab.sh -p scripts/run_grasp_generation.py \
-    --headless --shapes cylinder --num_sizes 1 --isaac_refine --output_dir data/cylinder_graph
-# 2.1 Check dataset quality (Stage 0.5)
-/workspace/IsaacLab/isaaclab.sh -p scripts/visualize_env.py --grasp_graph data/grasp_graph.pkl
+# 2. Install DexGraspNet dependencies (inside container)
+/isaac-sim/python.sh -m pip install transforms3d transformations lxml
+git submodule update --init third_party/DexGraspNet
 
-# 3. Train RL policy (Stage 1)
+# 3. Generate grasps (Stage 0 — no Isaac Sim, full GPU)
+/isaac-sim/python.sh scripts/run_grasp_generation.py \
+    --shapes cube --num_sizes 1 --size_min 0.06 --size_max 0.06
+
+# 4. (Optional) Refine grasps in Isaac Sim (Stage 0.5)
+/workspace/IsaacLab/isaaclab.sh -p scripts/refine_grasps.py \
+    --grasp_graph data/grasp_graph.pkl --headless
+
+# 5. Visualize grasps
+/workspace/IsaacLab/isaaclab.sh -p scripts/visualize_env.py \
+    --grasp_graph data/grasp_graph.pkl --action_mode hold
+
+# 6. Train RL policy (Stage 1)
 /workspace/IsaacLab/isaaclab.sh -p scripts/train_rl.py \
-    --grasp_graph data/cube_graph/grasp_graph.pkl \
-    --grasp_graph data/sphere_graph/grasp_graph.pkl \
-    --grasp_graph data/cylinder_graph/grasp_graph.pkl \
-    --num_envs 512 --headless
+    --grasp_graph data/grasp_graph.pkl --num_envs 512 --headless
 ```
 
 ## Requirements
@@ -67,141 +71,110 @@ docker login nvcr.io
 ./docker/run.sh exec
 ```
 
-## Stage 0: Grasp Generation
+## Stage 0: Grasp Generation (DexGraspNet-based)
 
-Generates a grasp graph by sampling force-closure grasps on primitive objects, then expanding with RRT.
+Generates grasp sets using DexGraspNet's Simulated Annealing optimization.
+Runs on **pure PyTorch** — no Isaac Sim required — so the full GPU is available.
 
 ```bash
-/workspace/IsaacLab/isaaclab.sh -p scripts/run_grasp_generation.py --headless
+# Single object (fast test)
+/isaac-sim/python.sh scripts/run_grasp_generation.py \
+    --shapes cube --num_sizes 1 --size_min 0.06 --size_max 0.06
+
+# All primitives (full pool)
+/isaac-sim/python.sh scripts/run_grasp_generation.py
+
+# Custom parameters
+/isaac-sim/python.sh scripts/run_grasp_generation.py \
+    --shapes cube sphere cylinder --num_grasps 300 \
+    --batch_size 512 --num_iterations 5000
 ```
 
-Two methods are available:
+### Algorithm
 
-| Method | Flag | Description |
-|--------|------|-------------|
-| Legacy | `--grasp_method legacy` (default) | Heuristic sampling + NFO filter + RRT expansion |
-| DexGraspNet | `--grasp_method dexgraspnet` | Differentiable optimization via simulated annealing |
+Uses DexGraspNet's exact energy formulation with Simulated Annealing + RMSProp:
 
-For training-quality graphs, Isaac refinement should be treated as the default path. Running without `--isaac_refine` is mainly useful for quick debug runs.
+| Energy | Description | Weight |
+|--------|-------------|--------|
+| E_fc | Force closure (wrench Jacobian stability) | 1.0 |
+| E_dis | Contact distance (fingertips to surface) | 500.0 |
+| E_pen | Reverse penetration (object into hand) | 100.0 |
+| E_spen | Self-penetration (finger collisions) | 10.0 |
+| E_joints | Joint limit violation | 1.0 |
+| E_pose | Natural pose deviation (prevents unnatural bends) | 10.0 |
 
-**Options:**
+The hand model uses **pytorch_kinematics** (MJCF-based FK from DexGraspNet's
+third_party) for accurate Shadow Hand forward kinematics. Object collision
+uses analytical SDFs (capsule + box) — no `torchsdf` or `pytorch3d` needed.
+
+### Options
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--shapes` | cube sphere cylinder | Object primitives |
-| `--size_min` / `--size_max` | 0.04 / 0.09 | Object size range (m) |
+| `--size_min` / `--size_max` | 0.05 / 0.08 | Object size range (m) |
 | `--num_sizes` | 3 | Sizes per shape |
-| `--num_seed_grasps` | 300 | Initial candidates |
-| `--num_grasps` | 300 | Target after RRT |
-| `--num_fingers` | from config | Generate one finger count (2 to 5) |
-| `--max_num_fingers` | unset | Generate all finger counts from 2..N |
-| `--finger_counts` | unset | Explicit list, e.g. `2,3,5` |
-| `--generation_preset` | default | `high_precision` enables larger candidate sets and Isaac refinement defaults |
-| `--fast_nfo` | off | Fast SVD approximation |
-**Output:** `data/grasp_graph.pkl` — each grasp stores `(joint_angles, object_pos_hand, object_quat_hand, fingertip_positions, quality)`.
+| `--num_grasps` | 300 | Target grasps per object |
+| `--batch_size` | 256 | Parallel grasp candidates |
+| `--num_iterations` | 5000 | SA iterations per batch |
+| `--n_contact` | 4 | Contact points per grasp |
+| `--device` | cuda | Compute device |
 
-**Debug run:**
+**Output:** `data/grasp_graph.pkl`
 
-```bash
-/workspace/IsaacLab/isaaclab.sh -p scripts/run_grasp_generation.py \
-    --headless --shapes cube --num_sizes 1 --num_seed_grasps 24 --num_grasps 12 --fast_nfo
+### Quality Tuning
+
+Key parameters in `configs/grasp_generation.yaml`:
+
+```yaml
+optimization:
+  w_dis: 500.0        # Higher = fingertips closer to surface
+  w_pose: 10.0        # Higher = more natural finger poses
+  thres_dis: 0.01     # Strict: only grasps within 10mm contact
+  num_iterations: 5000 # More iterations = better convergence
 ```
 
-**High-precision generation:**
+## Stage 0.5: Isaac Refinement (Optional)
+
+Corrects FK discrepancy between pytorch_kinematics and Isaac Sim by
+re-evaluating each grasp in simulation and overwriting stored poses.
 
 ```bash
-/workspace/IsaacLab/isaaclab.sh -p scripts/run_grasp_generation.py \
-    --headless --generation_preset high_precision
+/workspace/IsaacLab/isaaclab.sh -p scripts/refine_grasps.py \
+    --grasp_graph data/grasp_graph.pkl --headless
+
+# With filtering (keep only best grasps)
+/workspace/IsaacLab/isaaclab.sh -p scripts/refine_grasps.py \
+    --grasp_graph data/grasp_graph.pkl --keep_top_k 200 --headless
 ```
 
-`high_precision` preset values:
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--grasp_graph` | required | Path to grasp_graph.pkl |
+| `--batch_envs` | 16 | Isaac Sim parallel environments |
+| `--keep_top_k` | None | Keep only top-K lowest-error grasps |
 
-| Parameter | default | high_precision |
-|-----------|---------|----------------|
-| `num_seed_grasps` | 300 | 2000 |
-| `num_grasps` (RRT target) | 300 | 1000 |
-| `fast_nfo` | False | False |
-| `isaac_refine` | True | True (forced) |
-| `isaac_refine_batch_envs` | 16 | 32 |
-
-**Multi-finger generation:**
-
-`--max_num_fingers N`을 지정하면 2부터 N까지의 모든 손가락 개수에 대해 자동으로 grasp를 생성합니다.
-
-| Flag | 생성되는 finger count |
-|------|----------------------|
-| `--max_num_fingers 5` | 2, 3, 4, 5 |
-| `--num_fingers 4` | 4 (단일) |
-| `--finger_counts 2,3,5` | 2, 3, 5 (지정) |
-
-각 `(object × finger_count)` 조합마다 별도 GraspGraph가 생성되며, 이름은 `"cube_0.035_f2"`, `"cube_0.035_f3"` 등으로 태깅됩니다.
-
-**Multi-finger + High-precision (권장):**
+## Visualization
 
 ```bash
-/workspace/IsaacLab/isaaclab.sh -p scripts/run_grasp_generation.py \
-    --headless \
-    --max_num_fingers 5 \
-    --generation_preset high_precision
+# Hold mode (freeze at initial grasp pose) — recommended for checking quality
+/workspace/IsaacLab/isaaclab.sh -p scripts/visualize_env.py \
+    --grasp_graph data/grasp_graph.pkl --action_mode hold
+
+# Zero actions (hand drifts due to gravity)
+/workspace/IsaacLab/isaaclab.sh -p scripts/visualize_env.py \
+    --grasp_graph data/grasp_graph.pkl --action_mode zero
+
+# Random actions
+/workspace/IsaacLab/isaaclab.sh -p scripts/visualize_env.py \
+    --grasp_graph data/grasp_graph.pkl --action_mode random
 ```
 
-이 명령 하나로 모든 shape × size × finger_count 조합(예: 3 shape × 3 size × 4 finger = 36개 graph)을 고품질로 생성합니다. object별로 체크포인트가 저장되므로 중간에 중단돼도 결과가 보존됩니다.
-
-**Recommended training workflow:**
-
-- Treat `--isaac_refine` as the default for graphs that will be used for RL training.
-- For larger multi-object runs, Isaac refinement is more stable when each object is generated in a separate Stage-0 run.
-- In practice, run Stage 0 separately for `cube`, `sphere`, and `cylinder`, each with `--isaac_refine`, then train RL by passing multiple `--grasp_graph` files in a single training command.
-
-Example end-to-end workflow:
-
-```bash
-cd /workspace/dexgen
-
-# 1. Generate one refined graph per object
-/workspace/IsaacLab/isaaclab.sh -p scripts/run_grasp_generation.py \
-    --headless \
-    --shapes cube \
-    --size_min 0.06 --size_max 0.06 --num_sizes 1 \
-    --num_fingers 5 \
-    --num_seed_grasps 400 \
-    --num_grasps 80 \
-    --min_quality 0.005 \
-    --isaac_refine \
-    --output_dir data/cube_graph
-
-/workspace/IsaacLab/isaaclab.sh -p scripts/run_grasp_generation.py \
-    --headless \
-    --shapes sphere \
-    --size_min 0.06 --size_max 0.06 --num_sizes 1 \
-    --num_fingers 5 \
-    --num_seed_grasps 400 \
-    --num_grasps 80 \
-    --min_quality 0.005 \
-    --isaac_refine \
-    --output_dir data/sphere_graph
-
-/workspace/IsaacLab/isaaclab.sh -p scripts/run_grasp_generation.py \
-    --headless \
-    --shapes cylinder \
-    --size_min 0.06 --size_max 0.06 --num_sizes 1 \
-    --num_fingers 5 \
-    --num_seed_grasps 400 \
-    --num_grasps 80 \
-    --min_quality 0.005 \
-    --isaac_refine \
-    --output_dir data/cylinder_graph
-```
-
-Example training command with per-object refined graphs:
-
-```bash
-/workspace/IsaacLab/isaaclab.sh -p scripts/train_rl.py \
-    --grasp_graph data/cube_graph/grasp_graph.pkl \
-    --grasp_graph data/sphere_graph/grasp_graph.pkl \
-    --grasp_graph data/cylinder_graph/grasp_graph.pkl \
-    --num_envs 16 --headless
-```
+| Action Mode | Behavior |
+|-------------|----------|
+| `hold` | Maintains initial grasp joint positions (frozen pose) |
+| `zero` | Sends zero actions (joints drift toward default) |
+| `random` | Sends random `[-1, 1]` actions |
 
 ## Stage 1: RL Training
 
@@ -209,9 +182,7 @@ Trains an AnyGrasp-to-AnyGrasp transition policy using asymmetric actor-critic P
 
 ```bash
 /workspace/IsaacLab/isaaclab.sh -p scripts/train_rl.py \
-    --grasp_graph data/cube_graph/grasp_graph.pkl \
-    --grasp_graph data/sphere_graph/grasp_graph.pkl \
-    --grasp_graph data/cylinder_graph/grasp_graph.pkl \
+    --grasp_graph data/grasp_graph.pkl \
     --num_envs 512 --headless
 ```
 
@@ -230,97 +201,15 @@ Trains an AnyGrasp-to-AnyGrasp transition policy using asymmetric actor-critic P
 | Fingers | FF, MF, RF, LF, TH (5 fingers) |
 | DOF | 22 actuated (FF x4, MF x4, RF x4, LF x5, TH x5) |
 | Isaac Lab root | `robot0_forearm` (2 wrist joints: WRJ0, WRJ1) |
-| Fingertip links | `rh_fftip`, `rh_mftip`, `rh_rftip`, `rh_lftip`, `rh_thtip` |
-
-> **Frame convention note:** DexGraspNet stores grasps in the palm body frame (`robot0:palm`),
-> while Isaac Lab's articulation root is `robot0_forearm`. The reset logic resolves this mismatch
-> by always computing object placement from fingertip positions via SVD rigid alignment,
-> bypassing stored frame-dependent transforms entirely.
-
-### Architecture
-
-| | Input | Network | Output |
-|-|-------|---------|--------|
-| Actor | 107-dim policy obs | [512, 512, 256, 128] ELU | 24-dim actions |
-| Critic | 138-dim privileged obs | [512, 512, 256] ELU | value |
-
-**Policy observations (107):** joint pos (24) + joint vel (24) + fingertip pos (15) + target fingertip pos (15) + contact binary (5) + last action (24)
-
-**Critic adds (31):** object world pose (7) + object velocity (6) + fingertip forces (15) + DR params (3)
-
-### Key Hyperparameters
-
-See `configs/rl_training.yaml` for the full config.
-
-| Parameter | Value |
-|-----------|-------|
-| Learning rate | 5e-4 (adaptive) |
-| Gamma / Lambda | 0.99 / 0.95 |
-| Horizon | 16 steps |
-| Minibatch | 16384 |
-| Reward scale | 0.1 |
-| Episode length | 10 s |
-| Control freq | 30 Hz (120 Hz sim / 4) |
-
-### Reward Weights
-
-| Term | Weight | Type |
-|------|--------|------|
-| fingertip_tracking | 10.0 | dense exp(-20d) |
-| grasp_success | 50.0 | sparse (all tips < 1cm) |
-| fingertip_contact | 2.0 | maintain contact |
-| action_rate | -0.01 | jerk penalty |
-| object_velocity | -0.5 | anti-fling |
-| object_drop | -200.0 | drop penalty |
-| joint_limit | -0.1 | soft limit |
-| wrist_height | -1.0 | table collision |
-
-### Domain Randomization
-
-**Per episode reset:**
-- Object mass: U(0.03, 0.30) kg
-- Friction: U(0.30, 1.20)
-- Restitution: U(0.00, 0.40)
-- Joint damping: U(0.01, 0.30)
-- Joint armature: U(0.001, 0.03)
-- Action delay: 0-2 steps
-
-**Per step (obs noise):**
-- Joint position: N(0, 0.005) rad
-- Joint velocity: N(0, 0.04)
-- Fingertip position: N(0, 0.003) m
 
 ### Resume Training
 
 ```bash
 /workspace/IsaacLab/isaaclab.sh -p scripts/train_rl.py \
-    --resume logs/rl/allegro_anygrasp_v2/checkpoints/model_10000.pt \
-    --grasp_graph data/cube_graph/grasp_graph.pkl \
-    --grasp_graph data/sphere_graph/grasp_graph.pkl \
-    --grasp_graph data/cylinder_graph/grasp_graph.pkl \
+    --resume logs/rl/shadow_anygrasp_v1/checkpoints/model_10000.pt \
+    --grasp_graph data/grasp_graph.pkl \
     --num_envs 512 --headless
 ```
-
-### View A Saved Checkpoint
-
-First confirm that a checkpoint exists:
-
-```bash
-find logs/rl/allegro_anygrasp_v2 -type f | grep model_
-```
-
-Then load the saved policy in non-headless inference mode:
-
-```bash
-DISPLAY=:1 /workspace/IsaacLab/isaaclab.sh -p scripts/view_rl_checkpoint.py \
-    --checkpoint logs/rl/allegro_anygrasp_v2/checkpoints/model_1000.pt \
-    --grasp_graph data/cube_graph/grasp_graph.pkl \
-    --grasp_graph data/sphere_graph/grasp_graph.pkl \
-    --grasp_graph data/cylinder_graph/grasp_graph.pkl \
-    --num_envs 16
-```
-
-This viewer runs policy inference only. It does not resume training.
 
 ## Stage 2: Dataset Collection
 
@@ -330,120 +219,41 @@ This viewer runs policy inference only. It does not resume training.
     --num_episodes 50000
 ```
 
-Output: `data/dataset.h5`
-
 ## Stage 3: DexGen Controller
-
-Trains a keypoint diffusion model and inverse dynamics model on the collected dataset.
 
 ```bash
 /workspace/IsaacLab/isaaclab.sh -p scripts/train_dexgen.py --data data/dataset.h5
 ```
 
-| Component | Architecture | Input | Output |
-|-----------|-------------|-------|--------|
-| Keypoint Diffusion | DDPM (512-dim, 4 layers, 100 steps) | condition [k_start, k_goal] | T x 12-dim trajectory |
-| Inverse Dynamics | MLP (256-dim, 3 layers) | k_t + k_{t+1} + robot_state (56-dim) | 16-dim joint actions |
+## Dependencies
 
-Output: `logs/dexgen/`
-
-## Monitoring with TensorBoard
-
-The Docker container runs with `network_mode: host`, meaning container ports are directly accessible on the host machine without port mapping.
-
-**From host (outside the container):**
+DexGraspNet integration requires these additional packages (inside Docker):
 
 ```bash
-# Install tensorboard on host if not already installed
-pip install tensorboard
-
-# Point to the logs directory (bind-mounted from container)
-tensorboard --logdir=logs/rl/shadow_anygrasp_v1 --port=6006
+/isaac-sim/python.sh -m pip install transforms3d transformations lxml
+git submodule update --init third_party/DexGraspNet
 ```
 
-Since the repo is bind-mounted into the container at `/workspace/dexgen`, the `logs/` directory is shared between host and container. Running TensorBoard from the host avoids needing to install it inside the Isaac Sim container.
-
-**From inside the container** (if preferred):
-
-```bash
-pip install tensorboard
-tensorboard --logdir=/workspace/dexgen/logs/rl/shadow_anygrasp_v1 --port=6006 --bind_all
-```
-
-Access at: `http://localhost:6006`
-
-**Key metrics to watch:**
-- `solve_mean_err` -- object placement error at reset (should be < 0.01 m)
-- `rewards/fingertip_tracking` -- dense per-fingertip distance reward
-- `rewards/grasp_success` -- sparse success rate (all tips within 1 cm)
-
-## Repository Structure
-
-```
-dexgen_repo/
-├── configs/
-│   ├── shadow_hand.yaml              # Shadow Hand kinematics (5 fingers, 22 DOF)
-│   ├── grasp_generation.yaml         # Stage 0 settings
-│   ├── rl_training.yaml              # Stage 1 PPO + DR config
-│   └── dexgen.yaml                   # Stage 3 diffusion + inverse dynamics
-├── docker/
-│   ├── Dockerfile                    # Isaac Sim 5.1.0 + Lab v2.3.2
-│   ├── docker-compose.yml            # GPU passthrough, host network, bind mount
-│   └── run.sh                        # Container management CLI
-├── envs/
-│   ├── anygrasp_env.py               # ManagerBasedRLEnvCfg (scene, obs, actions, rewards)
-│   └── mdp/
-│       ├── observations.py        # Actor (107d) + Critic (138d) obs functions
-│       ├── rewards.py             # 8 reward terms
-│       ├── events.py              # Reset logic (grasp → NN goal), terminations
-│       └── domain_rand.py         # Physics/action/noise randomization
-├── grasp_generation/
-│   ├── grasp_sampler.py              # Heuristic grasp sampling on primitives
-│   ├── net_force_optimization.py     # NFO quality scoring (wrench space)
-│   ├── rrt_expansion.py              # RRT graph expansion + GraspGraph class
-│   ├── dexgraspnet_adapter.py        # DexGraspNet differentiable optimization adapter
-│   └── mesh_export.py                # Mesh I/O utilities
-├── models/
-│   ├── diffusion.py                  # Keypoint diffusion model (Stage 3)
-│   └── inverse_dynamics.py           # Inverse dynamics model (Stage 3)
-├── scripts/
-│   ├── run_grasp_generation.py    # Stage 0 entry point
-│   ├── train_rl.py                # Stage 1 entry point
-│   ├── view_rl_checkpoint.py      # Stage 1 checkpoint viewer
-│   ├── collect_data.py            # Stage 2 entry point
-│   └── train_dexgen.py            # Stage 3 entry point
-├── data/                          # Generated grasp graphs and datasets
-├── requirements.txt               # DexGen-specific Python deps
-└── setup_isaaclab.sh              # One-command Docker setup
-```
+`pytorch_kinematics` is bundled in `third_party/DexGraspNet/thirdparty/`.
+No `torchsdf` or `pytorch3d` needed.
 
 ## Container Management
 
 ```bash
-./docker/run.sh build    # Build image (~20 GB, takes 20-40 min)
-./docker/run.sh up       # Start container (detached)
-./docker/run.sh exec     # Open shell in container
-./docker/run.sh down     # Stop and remove
-./docker/run.sh logs     # View container logs
-./docker/run.sh status   # Check container state
+./docker/run.sh build    # Build image (~20 GB)
+./docker/run.sh up       # Start container
+./docker/run.sh exec     # Open shell
+./docker/run.sh down     # Stop container
 ```
-
-All pipeline commands run inside the container at `/workspace/dexgen`.
 
 ## Troubleshooting
 
-**`GraspGraph not found`** — Run Stage 0 first and pass the generated `grasp_graph.pkl` path(s) to Stage 1.
+**`DexGraspNet assets not found`** — Run `git submodule update --init third_party/DexGraspNet`
 
-**GUI not appearing** -- Check `echo $DISPLAY` and `echo $XAUTHORITY` on host, then `./docker/run.sh down && ./docker/run.sh up`.
+**`ModuleNotFoundError: transformations`** — Run `/isaac-sim/python.sh -m pip install transformations`
 
-**GPU OOM** -- Multiple Isaac processes may hold VRAM. Restart the container: `./docker/run.sh down && ./docker/run.sh up`.
+**GPU OOM during grasp generation** — Reduce `--batch_size` (e.g., 256 or 128)
 
-**Smoke test (headless):**
+**Object falls from hand in visualization** — Run Isaac refinement (`refine_grasps.py`) or increase `--num_iterations`
 
-```bash
-/workspace/IsaacLab/isaaclab.sh -p scripts/run_grasp_generation.py \
-    --headless --shapes cube --num_sizes 1 --num_grasps 12
-
-/workspace/IsaacLab/isaaclab.sh -p scripts/train_rl.py \
-    --grasp_graph data/grasp_graph.pkl --num_envs 1 --max_iterations 1 --headless
-```
+**Fingers in unnatural poses** — Increase `w_pose` in `configs/grasp_generation.yaml`

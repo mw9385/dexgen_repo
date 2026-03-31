@@ -39,12 +39,12 @@ from .hand_model import (
 
 def cal_energy(hand_model: DexGraspNetHandModel,
                object_model: PrimitiveObjectModel,
-               w_dis=100.0, w_pen=100.0, w_spen=10.0, w_joints=1.0):
+               w_dis=100.0, w_pen=100.0, w_spen=10.0, w_joints=1.0, w_pose=10.0):
     """
-    Compute composite grasp energy (exact DexGraspNet formulation).
+    Compute composite grasp energy (DexGraspNet formulation + E_pose).
 
     Returns:
-        total_energy, E_fc, E_dis, E_pen, E_spen, E_joints — all (B,)
+        total_energy, E_fc, E_dis, E_pen, E_spen, E_joints, E_pose — all (B,)
     """
     device = hand_model.device
     batch_size, n_contact, _ = hand_model.contact_points.shape
@@ -92,8 +92,19 @@ def cal_energy(hand_model: DexGraspNetHandModel,
     # E_spen: self-penetration
     E_spen = hand_model.self_penetration()
 
-    total = E_fc + w_dis * E_dis + w_pen * E_pen + w_spen * E_spen + w_joints * E_joints
-    return total, E_fc, E_dis, E_pen, E_spen, E_joints
+    # E_pose: penalize deviation from natural grasp pose
+    # DexGraspNet canonical hand articulation — a relaxed power grasp
+    joint_angles_mu = torch.tensor(
+        [0.1, 0, 0.6, 0, 0, 0, 0.6, 0, -0.1, 0, 0.6, 0,
+         0, -0.2, 0, 0.6, 0, 0, 1.2, 0, -0.2, 0],
+        dtype=torch.float, device=device,
+    )
+    joint_diff = hand_model.hand_pose[:, 9:] - joint_angles_mu.unsqueeze(0)
+    E_pose = (joint_diff ** 2).sum(dim=-1)
+
+    total = (E_fc + w_dis * E_dis + w_pen * E_pen + w_spen * E_spen
+             + w_joints * E_joints + w_pose * E_pose)
+    return total, E_fc, E_dis, E_pen, E_spen, E_joints, E_pose
 
 
 # ---------------------------------------------------------------------------
@@ -339,6 +350,7 @@ class GraspOptimizer:
         w_pen: float = 100.0,
         w_spen: float = 10.0,
         w_joints: float = 1.0,
+        w_pose: float = 10.0,
         # SA optimizer params
         n_iter: int = 2000,
         batch_size: int = 128,
@@ -363,6 +375,7 @@ class GraspOptimizer:
         self.w_pen = w_pen
         self.w_spen = w_spen
         self.w_joints = w_joints
+        self.w_pose = w_pose
         self.n_iter = n_iter
         self.batch_size = batch_size
         self.n_contact = n_contact
@@ -439,9 +452,9 @@ class GraspOptimizer:
         )
 
         # Compute initial energy
-        energy, E_fc, E_dis, E_pen, E_spen, E_joints = cal_energy(
+        energy, E_fc, E_dis, E_pen, E_spen, E_joints, E_pose = cal_energy(
             self.hand_model, self.object_model,
-            self.w_dis, self.w_pen, self.w_spen, self.w_joints,
+            self.w_dis, self.w_pen, self.w_spen, self.w_joints, self.w_pose,
         )
         energy.sum().backward()
 
@@ -450,9 +463,9 @@ class GraspOptimizer:
             optimizer.try_step()
             optimizer.zero_grad()
 
-            new_energy, new_fc, new_dis, new_pen, new_spen, new_joints = cal_energy(
+            new_energy, new_fc, new_dis, new_pen, new_spen, new_joints, new_pose = cal_energy(
                 self.hand_model, self.object_model,
-                self.w_dis, self.w_pen, self.w_spen, self.w_joints,
+                self.w_dis, self.w_pen, self.w_spen, self.w_joints, self.w_pose,
             )
             new_energy.sum().backward()
 
@@ -466,6 +479,7 @@ class GraspOptimizer:
                 E_pen[accept] = new_pen[accept].detach()
                 E_spen[accept] = new_spen[accept].detach()
                 E_joints[accept] = new_joints[accept].detach()
+                E_pose[accept] = new_pose[accept].detach()
 
             if step % 500 == 0 or step == 1:
                 n_good = int(((E_fc < self.thres_fc) & (E_dis < self.thres_dis)).sum())

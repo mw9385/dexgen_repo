@@ -134,6 +134,7 @@ def process_one_object(spec, args, num_fingers, num_dof, hand_name, device):
         w_pen=opt_cfg.get("w_pen", 100.0),
         w_spen=opt_cfg.get("w_spen", 10.0),
         w_joints=opt_cfg.get("w_joints", 1.0),
+        w_pose=opt_cfg.get("w_pose", 10.0),
         n_iter=args.num_iterations,
         batch_size=args.batch_size,
         n_contact=args.n_contact,

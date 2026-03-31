@@ -73,6 +73,7 @@ optimization:
   w_pen: 100.0              # reverse penetration
   w_spen: 10.0              # self-penetration
   w_joints: 1.0             # joint limit violation
+  w_pose: 10.0              # natural pose: penalize deviation from canonical grasp
 
   # Success thresholds — strict dis, relaxed fc
   thres_fc: 5.0              # force closure (relaxed)
