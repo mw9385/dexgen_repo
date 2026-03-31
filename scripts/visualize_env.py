@@ -135,25 +135,24 @@ def main():
           f"hold_steps={args.hold_steps}")
     print(f"[Viz] Press Ctrl+C or close the window to stop")
 
-    # For "hold" mode: capture initial joint positions as action targets
-    hold_actions = None
     if args.action_mode == "hold":
-        robot = env.unwrapped.scene["robot"]
-        # Read current joint positions and normalize to [-1, 1] action space
-        q = robot.data.joint_pos.clone()
-        q_low = robot.data.soft_joint_pos_limits[..., 0]
-        q_high = robot.data.soft_joint_pos_limits[..., 1]
-        # Normalize: map [q_low, q_high] -> [-1, 1]
-        hold_actions = 2.0 * (q - q_low) / (q_high - q_low + 1e-6) - 1.0
-        hold_actions = hold_actions[:, :action_dim].clamp(-1.0, 1.0)
-        print(f"[Viz] Hold mode: maintaining initial grasp joint positions")
+        # Disable episode timeout so the hand stays frozen at initial grasp
+        env.unwrapped.max_episode_length = 999999
+        print(f"[Viz] Hold mode: freezing at initial grasp (no resets)")
 
     steps = 0
     try:
         while sim_app.is_running():
             with torch.inference_mode():
                 if args.action_mode == "hold":
-                    actions = hold_actions
+                    # Every step: read CURRENT joint positions → send as targets
+                    # This keeps the hand perfectly frozen despite physics dynamics
+                    robot = env.unwrapped.scene["robot"]
+                    q = robot.data.joint_pos.clone()
+                    q_low = robot.data.soft_joint_pos_limits[..., 0]
+                    q_high = robot.data.soft_joint_pos_limits[..., 1]
+                    actions = 2.0 * (q - q_low) / (q_high - q_low + 1e-6) - 1.0
+                    actions = actions[:, :action_dim].clamp(-1.0, 1.0)
                 elif steps < args.hold_steps or args.action_mode == "zero":
                     actions = torch.zeros(args.num_envs, action_dim,
                                          device=env.unwrapped.device)
