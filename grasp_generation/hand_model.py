@@ -289,10 +289,14 @@ class DexGraspNetHandModel:
             link_indices = self.global_index_to_link_index[self.contact_point_indices]
 
             # Vectorized: gather transforms for each contact point via index
-            all_matrices = torch.stack([
-                self.current_status[name].get_matrix()
-                for name in self._all_link_names
-            ], dim=1)  # (B, num_all_links, 4, 4)
+            # Some links return (1,4,4) instead of (B,4,4), expand to match
+            _mats = []
+            for name in self._all_link_names:
+                m = self.current_status[name].get_matrix()
+                if m.shape[0] != batch_size:
+                    m = m.expand(batch_size, 4, 4)
+                _mats.append(m)
+            all_matrices = torch.stack(_mats, dim=1)  # (B, num_all_links, 4, 4)
 
             idx = link_indices.unsqueeze(-1).unsqueeze(-1).expand(
                 batch_size, n_contact, 4, 4
@@ -377,10 +381,13 @@ class DexGraspNetHandModel:
         x_hand = (x - self.global_translation.unsqueeze(1)) @ self.global_rotation
 
         # Gather all link transforms: (B, L, 4, 4)
-        matrices = torch.stack([
-            self.current_status[name].get_matrix()
-            for name in self._col_link_names
-        ], dim=1)  # (B, L, 4, 4)
+        _mats = []
+        for name in self._col_link_names:
+            m = self.current_status[name].get_matrix()
+            if m.shape[0] != B:
+                m = m.expand(B, 4, 4)
+            _mats.append(m)
+        matrices = torch.stack(_mats, dim=1)  # (B, L, 4, 4)
 
         # Transform x to each link's local frame in one shot
         # x_hand: (B, 1, N, 3), translations: (B, L, 1, 3), rotations: (B, L, 3, 3)
@@ -435,10 +442,13 @@ class DexGraspNetHandModel:
         K = self.n_keypoints
 
         # Gather all link transforms: (B, num_all_links, 4, 4)
-        all_matrices = torch.stack([
-            self.current_status[name].get_matrix()
-            for name in self._all_link_names
-        ], dim=1)  # (B, num_all_links, 4, 4)
+        _mats = []
+        for name in self._all_link_names:
+            m = self.current_status[name].get_matrix()
+            if m.shape[0] != batch_size:
+                m = m.expand(batch_size, 4, 4)
+            _mats.append(m)
+        all_matrices = torch.stack(_mats, dim=1)  # (B, num_all_links, 4, 4)
 
         # Select transform for each keypoint: (B, K, 4, 4)
         idx = self._pen_link_gather_idx.view(1, K, 1, 1).expand(batch_size, K, 4, 4)
