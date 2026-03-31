@@ -465,8 +465,7 @@ class GraspOptimizer:
 
             new_energy, new_fc, new_dis, new_pen, new_spen, new_joints, new_pose = cal_energy(
                 self.hand_model, self.object_model,
-                self.w_dis, self.w_pen, self.w_spen, self.w_joints,
-                self.w_pose, self.w_orient,
+                self.w_dis, self.w_pen, self.w_spen, self.w_joints, self.w_pose,
             )
             new_energy.sum().backward()
 
