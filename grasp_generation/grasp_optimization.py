@@ -501,19 +501,18 @@ class GraspOptimizer:
         'robot0:thdistal',
     ]
 
-    # Fingertip offset: distance from distal link origin to actual tip.
-    # From MJCF: site S_fftip pos="0 0 0.026", S_thtip pos="0 0 0.0275"
-    # Approximate with 0.026 for all fingers (close enough for IK targets).
-    _FINGERTIP_OFFSET = np.array([0.0, 0.0, 0.026], dtype=np.float32)
-    _FINGERTIP_OFFSET_TH = np.array([0.0, 0.0, 0.0275], dtype=np.float32)
-
     def _get_fingertip_positions(self, batch_idx: int) -> np.ndarray:
         """
         Extract FK fingertip positions for one grasp in the object frame.
 
         Uses the hand model's current_status (FK results) to get distal
-        link transforms, then applies the tip offset and transforms to
-        the object frame (object at origin in DexGraspNet).
+        link body-frame origins and transforms them to the object frame
+        (object at origin in DexGraspNet).
+
+        NOTE: We use the body-frame ORIGIN (not the phalanx tip) because
+        Isaac Sim's refinement measures `robot.data.body_pos_w` which
+        returns the body-frame origin. Using the same reference point
+        avoids a systematic ~26mm offset per fingertip.
 
         Returns: (num_fingers, 3) array in object frame.
         """
@@ -528,12 +527,9 @@ class GraspOptimizer:
             mat = status[link_name].get_matrix()  # (B, 4, 4) or (1, 4, 4)
             if mat.shape[0] != B:
                 mat = mat.expand(B, 4, 4)
-            # Local offset to fingertip
-            offset = self._FINGERTIP_OFFSET_TH if fi == 4 else self._FINGERTIP_OFFSET
-            offset_t = torch.tensor(offset, device=mat.device, dtype=mat.dtype)
-            # Transform offset by link rotation + translation (in hand local frame)
-            tip_local = (mat[batch_idx, :3, :3] @ offset_t) + mat[batch_idx, :3, 3]
-            # Transform to world frame
+            # Body-frame origin in hand local frame
+            tip_local = mat[batch_idx, :3, 3]
+            # Transform to world frame (= object frame, since object at origin)
             tip_world = (
                 hand_model.global_rotation[batch_idx] @ tip_local
                 + hand_model.global_translation[batch_idx]
