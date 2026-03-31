@@ -41,8 +41,8 @@ def parse_args():
     p.add_argument("--num_steps", type=int, default=0,
                    help="Max steps to run (0 = run until window closed)")
     p.add_argument("--action_mode", type=str, default="zero",
-                   choices=["zero", "random"],
-                   help="zero: all-zero actions | random: uniform [-1,1]")
+                   choices=["zero", "random", "hold"],
+                   help="zero: all-zero actions | random: uniform [-1,1] | hold: maintain initial grasp pose")
     p.add_argument("--hold_steps", type=int, default=0,
                    help="Send zero actions for this many steps before switching to action_mode")
     p.add_argument("--seed", type=int, default=42)
@@ -135,11 +135,26 @@ def main():
           f"hold_steps={args.hold_steps}")
     print(f"[Viz] Press Ctrl+C or close the window to stop")
 
+    # For "hold" mode: capture initial joint positions as action targets
+    hold_actions = None
+    if args.action_mode == "hold":
+        robot = env.unwrapped.scene["robot"]
+        # Read current joint positions and normalize to [-1, 1] action space
+        q = robot.data.joint_pos.clone()
+        q_low = robot.data.soft_joint_pos_limits[..., 0]
+        q_high = robot.data.soft_joint_pos_limits[..., 1]
+        # Normalize: map [q_low, q_high] -> [-1, 1]
+        hold_actions = 2.0 * (q - q_low) / (q_high - q_low + 1e-6) - 1.0
+        hold_actions = hold_actions[:, :action_dim].clamp(-1.0, 1.0)
+        print(f"[Viz] Hold mode: maintaining initial grasp joint positions")
+
     steps = 0
     try:
         while sim_app.is_running():
             with torch.inference_mode():
-                if steps < args.hold_steps or args.action_mode == "zero":
+                if args.action_mode == "hold":
+                    actions = hold_actions
+                elif steps < args.hold_steps or args.action_mode == "zero":
                     actions = torch.zeros(args.num_envs, action_dim,
                                          device=env.unwrapped.device)
                 else:
