@@ -27,6 +27,8 @@ Stage 3  DexGen Controller      →  logs/dexgen/
     --headless --shapes sphere --num_sizes 1 --isaac_refine --output_dir data/sphere_graph
 /workspace/IsaacLab/isaaclab.sh -p scripts/run_grasp_generation.py \
     --headless --shapes cylinder --num_sizes 1 --isaac_refine --output_dir data/cylinder_graph
+# 2.1 Check dataset quality (Stage 0.5)
+/workspace/IsaacLab/isaaclab.sh -p scripts/visualize_env.py --grasp_graph data/grasp_graph.pkl
 
 # 3. Train RL policy (Stage 1)
 /workspace/IsaacLab/isaaclab.sh -p scripts/train_rl.py \
