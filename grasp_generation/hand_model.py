@@ -199,10 +199,13 @@ class DexGraspNetHandModel:
         self.current_status = None
         self.contact_points = None
 
+        # Precompute collision parameters (cached tensors on GPU)
+        self._precompute_collision_params()
+
         print(f"[HandModel] Shadow Hand: {self.n_dofs} DOFs, "
               f"{self.n_contact_candidates} contact candidates, "
               f"{self.n_keypoints} penetration keypoints, "
-              f"{len(self.mesh)} collision links")
+              f"{len(self._collision_links)} collision links")
 
     def _build_mesh_recurse(self, body, contact_points, penetration_points):
         """Build collision geometry per link (no torchsdf needed)."""
@@ -308,48 +311,53 @@ class DexGraspNetHandModel:
                 + self.global_translation.unsqueeze(1)
             )
 
+    def _precompute_collision_params(self):
+        """Cache collision geometry tensors on GPU (called once at init)."""
+        self._collision_links = []
+        for link_name in self.mesh:
+            if link_name in SKIP_LINKS:
+                continue
+            geom = self.mesh[link_name]['geom_info']
+            if geom['geom_type'] == 'capsule':
+                self._collision_links.append({
+                    'name': link_name,
+                    'type': 'capsule',
+                    'height': geom['height'],
+                    'radius': geom['radius'],
+                })
+            elif geom['geom_type'] == 'box':
+                self._collision_links.append({
+                    'name': link_name,
+                    'type': 'box',
+                    'he': torch.tensor(geom['half_extents'], dtype=torch.float, device=self.device),
+                    'center': torch.tensor(geom.get('center', [0, 0, 0]), dtype=torch.float, device=self.device),
+                })
+
     def cal_distance(self, x):
         """
         Signed distance from points to hand surface.
         Positive = inside hand, negative = outside.
-
-        Uses analytical capsule SDF for finger links and box SDF for palm.
-        No torchsdf dependency.
         """
         dis = []
-        x = (x - self.global_translation.unsqueeze(1)) @ self.global_rotation
+        x_hand = (x - self.global_translation.unsqueeze(1)) @ self.global_rotation
 
-        for link_name in self.mesh:
-            if link_name in SKIP_LINKS:
-                continue
-
-            geom = self.mesh[link_name]['geom_info']
-            matrix = self.current_status[link_name].get_matrix()
-            x_local = (x - matrix[:, :3, 3].unsqueeze(1)) @ matrix[:, :3, :3]
+        for col in self._collision_links:
+            matrix = self.current_status[col['name']].get_matrix()
+            x_local = (x_hand - matrix[:, :3, 3].unsqueeze(1)) @ matrix[:, :3, :3]
             x_flat = x_local.reshape(-1, 3)
 
-            if geom['geom_type'] == 'capsule':
-                height = geom['height']
-                radius = geom['radius']
-                nearest = x_flat.detach().clone()
-                nearest[:, :2] = 0
-                nearest[:, 2] = torch.clamp(nearest[:, 2], 0, height)
-                dis_local = radius - (x_flat - nearest).norm(dim=1)
-            elif geom['geom_type'] == 'box':
-                he = torch.tensor(
-                    geom['half_extents'], dtype=torch.float, device=self.device
-                )
-                center = torch.tensor(
-                    geom.get('center', [0, 0, 0]),
-                    dtype=torch.float, device=self.device,
-                )
-                p = x_flat - center
-                q = torch.abs(p) - he
+            if col['type'] == 'capsule':
+                # Analytical capsule SDF (same as DexGraspNet original)
+                z_clamped = torch.clamp(x_flat[:, 2], 0, col['height'])
+                nearest = torch.zeros_like(x_flat)
+                nearest[:, 2] = z_clamped
+                dis_local = col['radius'] - (x_flat - nearest).norm(dim=1)
+            else:  # box
+                p = x_flat - col['center']
+                q = torch.abs(p) - col['he']
                 outside = torch.norm(torch.clamp(q, min=0.0), dim=-1)
                 inside = torch.clamp(q.max(dim=-1).values, max=0.0)
-                dis_local = -(outside + inside)  # positive = inside
-            else:
-                continue
+                dis_local = -(outside + inside)
 
             dis.append(dis_local.reshape(x.shape[0], x.shape[1]))
 

@@ -84,13 +84,10 @@ def cal_energy(hand_model: DexGraspNetHandModel,
     # E_pen: reverse penetration (object surface points → hand SDF)
     object_scale = object_model.object_scale_tensor.flatten().unsqueeze(1).unsqueeze(2)
     object_surface_points = object_model.surface_points_tensor * object_scale
-    # Expand surface points to batch size
     if object_surface_points.shape[0] == 1:
         object_surface_points = object_surface_points.expand(batch_size, -1, -1)
     distances = hand_model.cal_distance(object_surface_points)
-    distances = distances.clone()
-    distances[distances <= 0] = 0
-    E_pen = distances.sum(-1)
+    E_pen = torch.clamp(distances, min=0.0).sum(-1)
 
     # E_spen: self-penetration
     E_spen = hand_model.self_penetration()
