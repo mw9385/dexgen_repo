@@ -124,22 +124,40 @@ def generate_grasps(spec, args, num_fingers, num_dof, hand_name, device):
         g.object_name = spec.name
         g.object_scale = spec.size / 0.06
 
-    # 22 DOF → 24 DOF: remap DexGraspNet joints to Isaac Sim USD layout.
+    # 22 DOF → 24 DOF: remap DexGraspNet MJCF joints to Isaac Sim USD layout.
     #
-    # DexGraspNet MJCF (22 DOF):  FF[0:4] MF[4:8] RF[8:12] LF[12:17] TH[17:22]
-    #   Thumb = [THJ5, THJ4, THJ3, THJ2, THJ1]
+    # DexGraspNet MJCF (22 DOF, shadow_hand_wrist_free.xml):
+    #   [0-3]   FF: FFJ3, FFJ2, FFJ1, FFJ0(coupled DIP)
+    #   [4-7]   MF: MFJ3, MFJ2, MFJ1, MFJ0(coupled DIP)
+    #   [8-11]  RF: RFJ3, RFJ2, RFJ1, RFJ0(coupled DIP)
+    #   [12-16] LF: LFJ4, LFJ3, LFJ2, LFJ1, LFJ0(coupled DIP)
+    #   [17-21] TH: THJ4, THJ3, THJ2, THJ1, THJ0
     #
-    # Isaac Sim USD (24 DOF):  WR[0:2] FF[2:6] MF[6:10] RF[10:14] LF[14:19] TH[19:24]
-    #   Thumb = [THJ4, THJ3, THJ2, THJ1, THJ0]  (NO THJ5, has THJ0)
+    # Isaac Sim USD (24 DOF):
+    #   [0-1]   WR: WRJ1, WRJ0          (wrist, zeroed)
+    #   [2-5]   FF: FFJ4(passive), FFJ3, FFJ2, FFJ1
+    #   [6-9]   MF: MFJ4(passive), MFJ3, MFJ2, MFJ1
+    #   [10-13] RF: RFJ4(passive), RFJ3, RFJ2, RFJ1
+    #   [14-18] LF: LFJ5(passive), LFJ4, LFJ3, LFJ2, LFJ1
+    #   [19-23] TH: THJ4, THJ3, THJ2, THJ1, THJ0
     #
-    # THJ5 (DexGraspNet index 17) does not exist in Isaac Sim → skip.
-    # THJ0 (Isaac Sim index 23) does not exist in DexGraspNet → zero.
+    # Key differences:
+    #   - MJCF has J0 (coupled DIP, driven by tendon) → not in Isaac (skip)
+    #   - Isaac has J4/J5 (passive spread) → not in MJCF (zero)
+    #   - Thumb: identical 5 joints in both (THJ4-THJ0)
     for g in grasp_set.grasps:
         if g.joint_angles is not None and len(g.joint_angles) == 22:
             q24 = np.zeros(num_dof, dtype=np.float32)
-            q24[2:19] = g.joint_angles[:17]    # FF/MF/RF/LF (identical)
-            q24[19:23] = g.joint_angles[18:22]  # THJ4, THJ3, THJ2, THJ1
-            # q24[23] = 0  (THJ0, not in DexGraspNet)
+            # FF: MJCF[0:3]=(FFJ3,2,1) → Isaac[3:6], skip MJCF[3]=FFJ0
+            q24[3:6] = g.joint_angles[0:3]
+            # MF: MJCF[4:7]=(MFJ3,2,1) → Isaac[7:10], skip MJCF[7]=MFJ0
+            q24[7:10] = g.joint_angles[4:7]
+            # RF: MJCF[8:11]=(RFJ3,2,1) → Isaac[11:14], skip MJCF[11]=RFJ0
+            q24[11:14] = g.joint_angles[8:11]
+            # LF: MJCF[12:16]=(LFJ4,3,2,1) → Isaac[15:19], skip MJCF[16]=LFJ0
+            q24[15:19] = g.joint_angles[12:16]
+            # TH: MJCF[17:22]=(THJ4,3,2,1,0) → Isaac[19:24] (direct match)
+            q24[19:24] = g.joint_angles[17:22]
             g.joint_angles = q24
 
     # NFO post-filter

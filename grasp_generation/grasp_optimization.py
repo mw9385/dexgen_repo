@@ -491,6 +491,57 @@ class GraspOptimizer:
         # Extract successful grasps
         return self._extract_grasps(E_fc, E_dis, E_pen)
 
+    # MJCF distal link names for FK fingertip extraction.
+    # These correspond to Isaac Sim's robot0_ffdistal, robot0_mfdistal, etc.
+    _FINGERTIP_LINKS = [
+        'robot0:ffdistal',
+        'robot0:mfdistal',
+        'robot0:rfdistal',
+        'robot0:lfdistal',
+        'robot0:thdistal',
+    ]
+
+    # Fingertip offset: distance from distal link origin to actual tip.
+    # From MJCF: site S_fftip pos="0 0 0.026", S_thtip pos="0 0 0.0275"
+    # Approximate with 0.026 for all fingers (close enough for IK targets).
+    _FINGERTIP_OFFSET = np.array([0.0, 0.0, 0.026], dtype=np.float32)
+    _FINGERTIP_OFFSET_TH = np.array([0.0, 0.0, 0.0275], dtype=np.float32)
+
+    def _get_fingertip_positions(self, batch_idx: int) -> np.ndarray:
+        """
+        Extract FK fingertip positions for one grasp in the object frame.
+
+        Uses the hand model's current_status (FK results) to get distal
+        link transforms, then applies the tip offset and transforms to
+        the object frame (object at origin in DexGraspNet).
+
+        Returns: (num_fingers, 3) array in object frame.
+        """
+        hand_model = self.hand_model
+        status = hand_model.current_status
+        B = hand_model.global_translation.shape[0]
+
+        tips = []
+        for fi, link_name in enumerate(self._FINGERTIP_LINKS):
+            if link_name not in status:
+                continue
+            mat = status[link_name].get_matrix()  # (B, 4, 4) or (1, 4, 4)
+            if mat.shape[0] != B:
+                mat = mat.expand(B, 4, 4)
+            # Local offset to fingertip
+            offset = self._FINGERTIP_OFFSET_TH if fi == 4 else self._FINGERTIP_OFFSET
+            offset_t = torch.tensor(offset, device=mat.device, dtype=mat.dtype)
+            # Transform offset by link rotation + translation (in hand local frame)
+            tip_local = (mat[batch_idx, :3, :3] @ offset_t) + mat[batch_idx, :3, 3]
+            # Transform to world frame
+            tip_world = (
+                hand_model.global_rotation[batch_idx] @ tip_local
+                + hand_model.global_translation[batch_idx]
+            )
+            tips.append(tip_world.detach().cpu().numpy())
+
+        return np.stack(tips, axis=0).astype(np.float32)  # (num_fingers, 3)
+
     def _extract_grasps(self, E_fc, E_dis, E_pen) -> List[Grasp]:
         """Filter and convert optimized grasps to our Grasp format."""
         from scipy.spatial.transform import Rotation as R_scipy
@@ -504,7 +555,6 @@ class GraspOptimizer:
 
         grasps = []
         hand_pose = self.hand_model.hand_pose.detach()
-        contact_pts = self.hand_model.contact_points.detach()
 
         for i in range(hand_pose.shape[0]):
             if not success[i]:
@@ -517,12 +567,15 @@ class GraspOptimizer:
                 rot6d.unsqueeze(0)
             )[0].cpu().numpy()
             joint_angles = hand_pose[i, 9:].cpu().numpy()
-            tips = contact_pts[i].cpu().numpy()  # (n_contact, 3)
+
+            # Get actual FK fingertip positions (in world/object frame)
+            # Object is at origin in DexGraspNet, so world frame = object frame.
+            tips = self._get_fingertip_positions(i)  # (num_fingers, 3)
 
             # Quality: inverse of E_fc (lower E_fc = better force closure)
             quality = float(max(0.0, self.thres_fc - E_fc[i].item()))
 
-            # Surface normals at contact points
+            # Surface normals at fingertip positions
             _, _, face_idx = trimesh.proximity.closest_point(self.mesh, tips)
             normals = self.mesh.face_normals[face_idx].astype(np.float32)
 
@@ -535,7 +588,7 @@ class GraspOptimizer:
             ], dtype=np.float32)
 
             grasps.append(Grasp(
-                fingertip_positions=tips.astype(np.float32),
+                fingertip_positions=tips,
                 contact_normals=normals,
                 quality=quality,
                 joint_angles=joint_angles.astype(np.float32),
