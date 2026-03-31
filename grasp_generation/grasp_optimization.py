@@ -391,6 +391,9 @@ class GraspOptimizer:
         num_batches = max(1, (num_grasps * 4) // self.batch_size + 1)
 
         for batch_idx in range(num_batches):
+            # Free GPU memory between batches
+            torch.cuda.empty_cache()
+
             if verbose:
                 print(f"  [GraspOpt] Batch {batch_idx + 1}/{num_batches}, "
                       f"collected {len(all_grasps)} grasps")
@@ -401,6 +404,7 @@ class GraspOptimizer:
             except Exception as e:
                 print(f"  [GraspOpt] WARNING: batch {batch_idx+1} failed: {e}")
                 import traceback; traceback.print_exc()
+                torch.cuda.empty_cache()
                 continue
 
             if len(all_grasps) >= num_grasps:
@@ -442,7 +446,7 @@ class GraspOptimizer:
             self.hand_model, self.object_model,
             self.w_dis, self.w_pen, self.w_spen, self.w_joints,
         )
-        energy.sum().backward(retain_graph=True)
+        energy.sum().backward()
 
         # Main SA loop
         for step in range(1, self.n_iter + 1):
@@ -453,17 +457,18 @@ class GraspOptimizer:
                 self.hand_model, self.object_model,
                 self.w_dis, self.w_pen, self.w_spen, self.w_joints,
             )
-            new_energy.sum().backward(retain_graph=True)
+            new_energy.sum().backward()
 
             accept, temperature = optimizer.accept_step(energy, new_energy)
 
-            # Update accepted energies
-            energy[accept] = new_energy[accept]
-            E_fc[accept] = new_fc[accept]
-            E_dis[accept] = new_dis[accept]
-            E_pen[accept] = new_pen[accept]
-            E_spen[accept] = new_spen[accept]
-            E_joints[accept] = new_joints[accept]
+            # Update accepted energies (detach to free graph memory)
+            with torch.no_grad():
+                energy[accept] = new_energy[accept].detach()
+                E_fc[accept] = new_fc[accept].detach()
+                E_dis[accept] = new_dis[accept].detach()
+                E_pen[accept] = new_pen[accept].detach()
+                E_spen[accept] = new_spen[accept].detach()
+                E_joints[accept] = new_joints[accept].detach()
 
             if step % 500 == 0 or step == 1:
                 n_good = int(((E_fc < self.thres_fc) & (E_dis < self.thres_dis)).sum())

@@ -63,7 +63,7 @@ method: optimization
 optimization:
   # Simulated Annealing parameters (DexGraspNet original)
   num_iterations: 2000        # SA iterations per batch (original: 6000, reduced for primitives)
-  batch_size: 128             # parallel grasp candidates per batch
+  batch_size: 32              # parallel grasp candidates (reduced for Isaac Sim GPU sharing)
   step_size: 0.005            # RMSProp initial step size
   starting_temperature: 18.0  # SA starting temperature
   temperature_decay: 0.95     # temperature & step size decay rate

@@ -439,7 +439,7 @@ def _process_one_object_optimization(
 
     # Resolve optimization parameters
     opt_iterations = getattr(args, "opt_iterations", None) or 2000
-    opt_batch_size = getattr(args, "opt_batch_size", None) or 128
+    opt_batch_size = getattr(args, "opt_batch_size", None) or 32
 
     # Read energy weights from config
     opt_cfg = getattr(args, '_opt_cfg', {})

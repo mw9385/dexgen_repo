@@ -399,7 +399,7 @@ class DexGraspNetHandModel:
 class PrimitiveObjectModel:
     """Object model for cube/sphere/cylinder with analytical SDF."""
 
-    def __init__(self, mesh, shape_type, size, num_samples=2000, device='cuda'):
+    def __init__(self, mesh, shape_type, size, num_samples=500, device='cuda'):
         self.device = device
         self.shape_type = shape_type
         self.size = size
