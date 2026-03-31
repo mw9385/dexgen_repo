@@ -31,6 +31,7 @@ Usage:
 """
 
 import argparse
+import subprocess
 import sys
 from pathlib import Path
 
@@ -39,6 +40,24 @@ import torch
 import yaml
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
+
+# ---------------------------------------------------------------------------
+# Auto-initialize DexGraspNet submodule if missing
+# ---------------------------------------------------------------------------
+_DEXGRASPNET_DIR = Path(__file__).parent.parent / "third_party" / "DexGraspNet"
+_DEXGRASPNET_MJCF = _DEXGRASPNET_DIR / "grasp_generation" / "mjcf" / "shadow_hand_wrist_free.xml"
+
+if not _DEXGRASPNET_MJCF.exists():
+    print("[Stage 0] DexGraspNet submodule not initialized. Running git submodule update...")
+    try:
+        subprocess.check_call(
+            ["git", "submodule", "update", "--init", "third_party/DexGraspNet"],
+            cwd=str(Path(__file__).parent.parent),
+        )
+        print("[Stage 0] DexGraspNet submodule initialized successfully.")
+    except Exception as e:
+        print(f"[Stage 0] WARNING: Failed to initialize DexGraspNet submodule: {e}")
+        print("  Run manually: git submodule update --init third_party/DexGraspNet")
 
 from isaaclab.app import AppLauncher
 

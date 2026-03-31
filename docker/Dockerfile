@@ -49,7 +49,16 @@ RUN ${ISAACSIM_PYTHON_EXE} -m pip install --no-cache-dir -r requirements.txt
 
 # 소스 복사 및 환경 변수 설정
 COPY . .
-ENV PYTHONPATH="${DEXGEN_DIR}:${ISAACLAB_DIR}/source/isaaclab:${ISAACLAB_DIR}/source/isaaclab_assets:${PYTHONPATH}"
+
+# DexGraspNet 서브모듈 초기화 (grasp optimization에 필요)
+RUN if [ ! -f third_party/DexGraspNet/grasp_generation/mjcf/shadow_hand_wrist_free.xml ]; then \
+        git submodule update --init third_party/DexGraspNet || true; \
+    fi
+
+# DexGraspNet 의존성 (transforms3d, pytorch_kinematics는 third_party에 번들)
+RUN ${ISAACSIM_PYTHON_EXE} -m pip install --no-cache-dir transforms3d>=0.4.1
+
+ENV PYTHONPATH="${DEXGEN_DIR}:${DEXGEN_DIR}/third_party/DexGraspNet/thirdparty/pytorch_kinematics:${ISAACLAB_DIR}/source/isaaclab:${ISAACLAB_DIR}/source/isaaclab_assets:${PYTHONPATH}"
 
 # 편리성을 위한 Alias 설정
 RUN printf 'alias isaacpy="/isaac-sim/python.sh"\n' >> /root/.bashrc \
