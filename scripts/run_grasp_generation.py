@@ -91,6 +91,12 @@ def parse_args():
     p.add_argument("--finger_counts", type=str, default=None)
     p.add_argument("--max_num_fingers", type=int, default=None)
 
+    # Isaac refinement (runs automatically after generation)
+    p.add_argument("--no-isaac_refine", action="store_true", default=False,
+                   help="Skip Isaac Sim refinement (not recommended)")
+    p.add_argument("--refine_batch_envs", type=int, default=16,
+                   help="Batch size for Isaac refinement environments")
+
     p.add_argument("--output_dir", type=str, default=None)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--config", type=str,
@@ -350,15 +356,55 @@ def main():
     validate_graph(graph_path)
 
     print(f"\n{'='*55}")
-    print(f" Stage 0 Complete (no Isaac Sim)")
+    print(f" Stage 0 Grasp Generation Complete")
     print(f"{'='*55}")
     multi_graph.summary()
     print(f"\n  Saved: {graph_path}")
-    print(f"\nNext steps:")
-    print(f"  1. (Optional) Isaac refinement:")
-    print(f"     /workspace/IsaacLab/isaaclab.sh -p scripts/refine_grasps.py --grasp_graph {graph_path}")
-    print(f"  2. RL training:")
-    print(f"     /workspace/IsaacLab/isaaclab.sh -p scripts/train_rl.py --grasp_graph {graph_path} --num_envs 512 --headless")
+
+    # ── Isaac Refinement (default: ON) ──────────────────────────────────────
+    # Corrects FK mismatch between pytorch_kinematics and Isaac Sim.
+    # Without this, grasps may not align perfectly in simulation.
+    skip_refine = getattr(args, 'no_isaac_refine', False)
+    if not skip_refine:
+        print(f"\n{'='*55}")
+        print(f" Stage 0.5: Isaac Refinement")
+        print(f"{'='*55}")
+        refine_script = Path(__file__).parent / "refine_grasps.py"
+        isaaclab_sh = Path("/workspace/IsaacLab/isaaclab.sh")
+
+        # Determine python executable
+        if isaaclab_sh.exists():
+            cmd = [str(isaaclab_sh), "-p", str(refine_script),
+                   "--grasp_graph", str(graph_path),
+                   "--batch_envs", str(args.refine_batch_envs),
+                   "--headless"]
+        else:
+            cmd = [sys.executable, str(refine_script),
+                   "--grasp_graph", str(graph_path),
+                   "--batch_envs", str(args.refine_batch_envs),
+                   "--headless"]
+
+        print(f"  Running: {' '.join(cmd)}")
+        try:
+            subprocess.check_call(cmd)
+            print(f"\n  Isaac refinement completed successfully.")
+        except subprocess.CalledProcessError as e:
+            print(f"\n  WARNING: Isaac refinement failed (exit code {e.returncode}).")
+            print(f"  Grasps are saved without refinement. You can retry manually:")
+            print(f"  /workspace/IsaacLab/isaaclab.sh -p scripts/refine_grasps.py "
+                  f"--grasp_graph {graph_path} --headless")
+        except FileNotFoundError:
+            print(f"\n  WARNING: Isaac Sim not found. Skipping refinement.")
+            print(f"  Run manually when available:")
+            print(f"  /workspace/IsaacLab/isaaclab.sh -p scripts/refine_grasps.py "
+                  f"--grasp_graph {graph_path} --headless")
+    else:
+        print(f"\n  [INFO] Isaac refinement skipped (--no-isaac_refine).")
+        print(f"  Grasps use pytorch_kinematics FK — may differ slightly from Isaac Sim.")
+
+    print(f"\nNext step:")
+    print(f"  /workspace/IsaacLab/isaaclab.sh -p scripts/train_rl.py "
+          f"--grasp_graph {graph_path} --num_envs 512 --headless")
 
 
 if __name__ == "__main__":
