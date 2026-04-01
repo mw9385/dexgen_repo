@@ -368,28 +368,28 @@ if _ISAACLAB_AVAILABLE:
         # object pose is implicitly required.
         fingertip_tracking = RewTerm(
             func=mdp_rewards.fingertip_tracking_reward,
-            weight=5.0,
+            weight=10.0,
             params={"alpha": 5.0},
         )
 
         # ── r_style: fingertip velocity (func → [-1, 0]) ─────────────
         fingertip_velocity = RewTerm(
             func=mdp_rewards.fingertip_velocity_penalty,
-            weight=0.1,
+            weight=0.05,
         )
 
         # ── r_reg: action/torque/work (func → [-1, 0]) ───────────────
         action_scale = RewTerm(
             func=mdp_rewards.action_scale_penalty,
-            weight=0.005,
+            weight=0.0001,
         )
         torque = RewTerm(
             func=mdp_rewards.applied_torque_penalty,
-            weight=0.05,
+            weight=0.0001,
         )
         mechanical_work = RewTerm(
             func=mdp_rewards.mechanical_work_penalty,
-            weight=0.02,
+            weight=0.0001,
         )
 
 
