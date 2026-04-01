@@ -118,10 +118,18 @@ def grasp_success_reward(
     env,
     threshold: float = 0.02,
     min_fraction: float = 1.0,
+    obj_pos_threshold: float = 0.02,
+    obj_rot_threshold: float = 0.05,
 ) -> torch.Tensor:
     """
-    Soft grasp-success: fraction of fingertips within threshold.
-    Gated by min_fraction (1.0 = ALL fingertips must be within threshold).
+    Soft grasp-success: fraction of fingertips within threshold,
+    gated by object pose accuracy.
+
+    Success requires BOTH:
+      1. ALL fingertips within `threshold` of goal (object frame)
+      2. Object pose within `obj_pos_threshold` (pos) and
+         `obj_rot_threshold` (1 - |q·q*|) of target
+
     Returns: (N,) in [0, 1]
     """
     nf = _get_num_fingers(env)
@@ -131,9 +139,40 @@ def grasp_success_reward(
 
     in_threshold = (dist < threshold).float()
     fraction_in  = in_threshold.mean(dim=-1)
+    finger_gate = (fraction_in >= min_fraction).float()
 
-    gate = (fraction_in >= min_fraction).float()
-    return gate * fraction_in
+    # Object pose gate
+    obj_gate = torch.ones(env.num_envs, device=env.device)
+    goal_pos  = env.extras.get("target_object_pos_hand")
+    goal_quat = env.extras.get("target_object_quat_hand")
+    if goal_pos is not None:
+        robot = env.scene["robot"]
+        obj   = env.scene["object"]
+        rel_pos = obj.data.root_pos_w - robot.data.root_pos_w
+        cur_pos_hand = quat_apply_inverse(robot.data.root_quat_w, rel_pos)
+        d_pos = torch.norm(cur_pos_hand - goal_pos, dim=-1)
+        obj_gate = obj_gate * (d_pos < obj_pos_threshold).float()
+    if goal_quat is not None:
+        robot = env.scene["robot"]
+        obj   = env.scene["object"]
+        qw = robot.data.root_quat_w
+        qo = obj.data.root_quat_w
+        qw_inv = torch.cat([qw[:, :1], -qw[:, 1:]], dim=-1)
+        def _qmul(a, b):
+            aw, ax, ay, az = a[:, 0], a[:, 1], a[:, 2], a[:, 3]
+            bw, bx, by, bz = b[:, 0], b[:, 1], b[:, 2], b[:, 3]
+            return torch.stack([
+                aw*bw - ax*bx - ay*by - az*bz,
+                aw*bx + ax*bw + ay*bz - az*by,
+                aw*by - ax*bz + ay*bw + az*bx,
+                aw*bz + ax*by - ay*bx + az*bw,
+            ], dim=-1)
+        cur_quat_hand = _qmul(qw_inv, qo)
+        quat_dot = torch.sum(cur_quat_hand * goal_quat, dim=-1).abs().clamp(0.0, 1.0)
+        d_rot = 1.0 - quat_dot
+        obj_gate = obj_gate * (d_rot < obj_rot_threshold).float()
+
+    return finger_gate * obj_gate * fraction_in
 
 
 # ═══════════════════════════════════════════════════════════
