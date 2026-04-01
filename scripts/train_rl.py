@@ -516,6 +516,28 @@ class _IsaacLabVecEnv:
         self.env = env
         self.num_envs = num_envs
 
+        # Build batch-free spaces so rl_games sees (obs_dim,) not (num_envs, obs_dim)
+        import gymnasium
+        import gym as old_gym
+        import numpy as np
+
+        raw_obs_space = env.observation_space
+        if isinstance(raw_obs_space, (gymnasium.spaces.Dict, old_gym.spaces.Dict)):
+            obs_sp = raw_obs_space.spaces.get("policy", next(iter(raw_obs_space.spaces.values())))
+        else:
+            obs_sp = raw_obs_space
+        obs_shape = obs_sp.shape[1:] if len(obs_sp.shape) > 1 else obs_sp.shape
+
+        raw_act_space = env.action_space
+        act_shape = raw_act_space.shape[1:] if len(raw_act_space.shape) > 1 else raw_act_space.shape
+
+        self.observation_space = old_gym.spaces.Box(
+            low=-np.inf, high=np.inf, shape=obs_shape, dtype=np.float32
+        )
+        self.action_space = old_gym.spaces.Box(
+            low=-1.0, high=1.0, shape=act_shape, dtype=np.float32
+        )
+
     def step(self, actions):
         # [FIX] Update action buffers BEFORE stepping the env.
         # This ensures:
