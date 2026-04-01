@@ -470,7 +470,7 @@ def _sample_nearby_goal_index(
 # Rolling goal: update goal when current goal is achieved mid-episode
 # ---------------------------------------------------------------------------
 
-def update_rolling_goal(env, success_threshold: float = 0.015) -> int:
+def update_rolling_goal(env, success_threshold: float = 0.03) -> int:
     """
     Called every step. For each env where ALL fingertips are within
     *success_threshold* of the current goal, select a new nearby goal
@@ -482,7 +482,7 @@ def update_rolling_goal(env, success_threshold: float = 0.015) -> int:
 
     Args:
         success_threshold: distance (m) at which goal is considered reached.
-            1.5 cm — strict threshold for goal transition.
+            3 cm — achievable but not trivial (min_dist=8cm).
 
     Returns:
         Number of envs whose goal was updated this step.
