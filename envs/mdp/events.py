@@ -415,47 +415,54 @@ def _sample_start_and_nn_goal(
 
 
 def _sample_nearby_goal_index(
-    graph, start_idx: int, rng: np.random.Generator, top_k: int = 5
+    graph, start_idx: int, rng: np.random.Generator,
+    top_k: int = 5, min_dist: float = 0.06,
 ) -> int:
     """
     Sample a goal grasp index that is reachable from start_idx.
 
+    Args:
+        min_dist: minimum fingertip L2 distance between start and goal (m).
+            Goals closer than this are filtered out to prevent the policy
+            from starting already at the goal (spurious initial success).
+            Default 6 cm > grasp_success_reward threshold (5 cm).
+
     Strategy (in priority order):
       1. Use graph edges — if start_idx has edge-connected neighbours, sample
-         uniformly from them.  This guarantees the goal is within delta_max
-         fingertip distance, which is the criterion for graph connectivity.
-      2. Fall back to top-k kNN over fingertip positions only (raw L2).
-         Joint-angle distance is NOT used because the heuristic IK may be
-         inaccurate; using it as a filter adds noise and can exclude good goals.
-
-    Using graph neighbours fixes the original bug where kNN searched up to 512
-    random grasps, completely ignoring the graph structure and often selecting
-    goals far outside the local neighbourhood of start_idx.
+         from those beyond min_dist. Falls through if none qualify.
+      2. Fall back to top-k kNN over fingertip positions only (raw L2),
+         filtered by min_dist.
     """
     grasps = graph.grasp_set.grasps
     N = len(grasps)
     if N <= 1:
         return start_idx
 
-    # ── Strategy 1: graph edge neighbours ──────────────────────────────────
-    neighbours = graph.get_neighbors(start_idx)
-    if len(neighbours) > 0:
-        return int(rng.choice(neighbours))
-
-    # ── Strategy 2: kNN fallback (fingertip L2, no joint distance) ─────────
-    # Only reach here if the graph has no edges at all (degenerate case).
     all_fps = graph.grasp_set.as_array()   # (N, F*3)
     start_flat = all_fps[start_idx]
     fp_dists = np.linalg.norm(all_fps - start_flat, axis=-1)
     fp_dists[start_idx] = np.inf
 
-    finite_idx = np.where(np.isfinite(fp_dists))[0]
-    if len(finite_idx) == 0:
-        return start_idx
+    # ── Strategy 1: graph edge neighbours with min_dist filter ────────────
+    neighbours = graph.get_neighbors(start_idx)
+    if len(neighbours) > 0:
+        neighbour_dists = fp_dists[neighbours]
+        far_enough = neighbours[neighbour_dists >= min_dist]
+        if len(far_enough) > 0:
+            return int(rng.choice(far_enough))
+        # All neighbours too close — fall through to kNN
 
-    k = min(top_k, len(finite_idx))
-    top_k_local = np.argpartition(fp_dists[finite_idx], k - 1)[:k]
-    top_k_indices = finite_idx[top_k_local]
+    # ── Strategy 2: kNN fallback with min_dist filter ─────────────────────
+    valid_idx = np.where((np.isfinite(fp_dists)) & (fp_dists >= min_dist))[0]
+    if len(valid_idx) == 0:
+        # No grasp far enough — relax filter and pick any other grasp
+        valid_idx = np.where(np.isfinite(fp_dists))[0]
+        if len(valid_idx) == 0:
+            return start_idx
+
+    k = min(top_k, len(valid_idx))
+    top_k_local = np.argpartition(fp_dists[valid_idx], k - 1)[:k]
+    top_k_indices = valid_idx[top_k_local]
     return int(rng.choice(top_k_indices))
 
 
