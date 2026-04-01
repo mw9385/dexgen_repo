@@ -124,9 +124,8 @@ Symmetric actor-critic PPO with full observation (132 dims).
     --num_episodes 100
 
 # Visual evaluation (opens viewer)
-/workspace/IsaacLab/isaaclab.sh -p scripts/evaluate_policy.py \
-    --checkpoint logs/rl/shadow_anygrasp_v1/checkpoints/model_30000.pt \
-    --num_episodes 20 --no-headless
+/workspace/IsaacLab/isaaclab.sh -p scripts/view_rl_checkpoint.py \
+    --checkpoint logs/rl/shadow_anygrasp_v1/checkpoints/model_30000.pt
 
 # View policy playback (no metrics, just visual)
 /workspace/IsaacLab/isaaclab.sh -p scripts/view_rl_checkpoint.py \

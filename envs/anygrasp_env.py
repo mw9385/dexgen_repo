@@ -106,7 +106,7 @@ try:
             spawn=SHADOW_HAND_CFG.spawn.replace(
                 usd_path=(
                     f"{_S3_ROOT}/Isaac/Robots/ShadowRobot/ShadowHand/"
-                    "shadow_hand_instanceable.usd"
+                    "shadow_hand.usd"
                 )
             )
         )
@@ -180,8 +180,8 @@ if _ISAACLAB_AVAILABLE:
         robot: ArticulationCfg = SHADOW_HAND_CFG.replace(
             prim_path="{ENV_REGEX_NS}/ShadowHand",
             init_state=ArticulationCfg.InitialStateCfg(
-                pos=(0.0, 0.0, 0.35),     # below object — palm faces up
-                rot=(0.0, 1.0, 0.0, 0.0), # 180° X-rotation → palm UP
+                pos=(0.0, 0.0, 0.35),     # wrist height
+                rot=(1.0, 0.0, 0.0, 0.0), # identity — palm faces DOWN
                 joint_pos={
                     "robot0_THJ4": 0.5,   # thumb rotation: natural resting pose
                     "robot0_THJ3": 0.3,

@@ -1,25 +1,32 @@
 """
 Evaluate a trained RL policy checkpoint.
 
-Runs the policy in the AnyGrasp environment and reports quantitative metrics:
-  - Per-episode success rate (fingertip proximity to goal)
-  - Mean fingertip tracking error
-  - Rolling goal update count
+Loads the policy MLP directly from an rl_games checkpoint (bypassing
+Runner/Player) and runs inference in the AnyGrasp environment.
+
+Two modes:
+  --headless   Metrics only (fast, no GUI)
+  (default)    Visual inspection + metrics (opens Isaac Sim viewer)
+
+Reported metrics (printed to stdout, no tensorboard):
+  - Success rate, fingertip tracking error (mm)
+  - Rolling goal updates / episode
   - Object drop / left-hand termination rates
 
-Bypasses rl_games Runner/Player entirely — loads MLP weights directly
-from checkpoint. No tensorboard logging, results printed to stdout.
-
 Usage:
-    # Headless evaluation (fast, metrics only)
+    # Visual inspection (default, opens viewer)
     /isaac-sim/python.sh scripts/evaluate_policy.py \
-        --checkpoint logs/rl/.../model_30000.pt \
-        --num_episodes 100
+        --checkpoint runs/.../model_30000.pth
 
-    # Visual inspection (opens viewer window)
+    # Headless metrics only
     /isaac-sim/python.sh scripts/evaluate_policy.py \
-        --checkpoint logs/rl/.../model_30000.pt \
-        --num_episodes 20 --no-headless
+        --checkpoint runs/.../model_30000.pth \
+        --headless --num_episodes 100
+
+    # Limit steps in viewer mode
+    /isaac-sim/python.sh scripts/evaluate_policy.py \
+        --checkpoint runs/.../model_30000.pth \
+        --num_steps 500
 """
 
 from __future__ import annotations
@@ -31,6 +38,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import torch.nn as nn
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -38,7 +46,7 @@ from isaaclab.app import AppLauncher
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Evaluate a trained Stage 1 RL checkpoint")
+    p = argparse.ArgumentParser(description="Evaluate / visualize a trained RL checkpoint")
     p.add_argument(
         "--checkpoint", type=str, required=True,
         help="Path to rl_games checkpoint (.pt / .pth)",
@@ -47,28 +55,83 @@ def parse_args():
         "--grasp_graph", action="append", default=None,
         help="Path to GraspGraph PKL. Repeat for multiple.",
     )
-    p.add_argument("--num_envs", type=int, default=64)
-    p.add_argument("--num_episodes", type=int, default=100)
+    p.add_argument("--num_envs", type=int, default=16)
+    p.add_argument("--num_episodes", type=int, default=0,
+                   help="Stop after N episodes (0 = unlimited, run until window closed or --num_steps)")
+    p.add_argument("--num_steps", type=int, default=0,
+                   help="Stop after N sim steps (0 = unlimited)")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument(
         "--config", type=str,
         default=str(Path(__file__).parent.parent / "configs" / "rl_training.yaml"),
     )
     AppLauncher.add_app_launcher_args(p)
-
-    # Default to headless
-    raw_args = sys.argv[1:]
-    if "--headless" not in raw_args and "--no-headless" not in raw_args:
-        raw_args.append("--headless")
-
-    args = p.parse_args(raw_args)
+    args = p.parse_args()
     if args.grasp_graph is None:
         args.grasp_graph = ["data/grasp_graph.pkl"]
     return args
 
 
+class PolicyMLP(nn.Module):
+    """Reconstruct the actor MLP from rl_games checkpoint weights."""
+
+    def __init__(self, checkpoint: dict):
+        super().__init__()
+        model_sd = checkpoint["model"]
+
+        # Detect MLP layers: a2c_network.actor_mlp.0.weight, .2.weight, ...
+        actor_keys = sorted(
+            [k for k in model_sd if k.startswith("a2c_network.actor_mlp.") and k.endswith(".weight")],
+            key=lambda k: int(k.split(".")[2]),
+        )
+
+        layers = []
+        for wk in actor_keys:
+            bk = wk.replace(".weight", ".bias")
+            w = model_sd[wk]
+            b = model_sd[bk]
+            linear = nn.Linear(w.shape[1], w.shape[0])
+            linear.weight.data.copy_(w)
+            linear.bias.data.copy_(b)
+            layers.append(linear)
+            layers.append(nn.ELU())
+
+        # Output head (mu): a2c_network.mu.weight / .bias
+        mu_w = model_sd["a2c_network.mu.weight"]
+        mu_b = model_sd["a2c_network.mu.bias"]
+        mu = nn.Linear(mu_w.shape[1], mu_w.shape[0])
+        mu.weight.data.copy_(mu_w)
+        mu.bias.data.copy_(mu_b)
+        layers.append(mu)
+
+        self.net = nn.Sequential(*layers)
+
+        # Running mean/std for input normalization
+        self.running_mean = checkpoint.get("running_mean_std", {}).get("running_mean", None)
+        self.running_var = checkpoint.get("running_mean_std", {}).get("running_var", None)
+        if self.running_mean is not None:
+            self.running_mean = self.running_mean.float()
+            self.running_var = self.running_var.float()
+
+    def forward(self, obs: torch.Tensor) -> torch.Tensor:
+        x = obs.float()
+        if self.running_mean is not None:
+            self.running_mean = self.running_mean.to(x.device)
+            self.running_var = self.running_var.to(x.device)
+            x = (x - self.running_mean) / torch.sqrt(self.running_var + 1e-5)
+        return self.net(x)
+
+
+def _to_policy_obs(obs):
+    """Extract policy observation tensor from Isaac Lab obs dict."""
+    if isinstance(obs, dict):
+        return obs.get("policy", next(iter(obs.values())))
+    return obs
+
+
 def main():
     args = parse_args()
+    is_headless = getattr(args, "headless", False)
 
     app_launcher = AppLauncher(args)
     sim_app = app_launcher.app
@@ -93,7 +156,6 @@ def main():
         apply_env_config,
         apply_dr_config,
     )
-    from scripts.view_rl_checkpoint import PolicyMLP, _to_policy_obs
     from envs.mdp import events as mdp_events
     from envs.mdp import rewards as mdp_rewards
     from grasp_generation.graph_io import load_merged_graph
@@ -116,11 +178,11 @@ def main():
     cfg_file = load_config(args.config)
     merged_graph = load_merged_graph(grasp_graph_paths)
 
-    # ── Environment setup ──
+    # ── Build environment ──
     env_cfg = AnyGraspEnvCfg()
     env_cfg.scene.num_envs = args.num_envs
     env_cfg.grasp_graph_path = grasp_graph_paths
-    if getattr(args, "headless", False):
+    if is_headless:
         env_cfg.viewer = None
 
     try:
@@ -132,6 +194,7 @@ def main():
             env_cfg.scene.object = env_cfg.scene.object.replace(
                 spawn=_build_object_spawner(specs)
             )
+            print(f"[Eval] Loaded {len(specs)} object spec(s) from grasp graph.")
 
         graph_num_fingers = getattr(merged_graph, "num_fingers", None)
         if graph_num_fingers is None and isinstance(merged_graph, MultiObjectGraspGraph) and merged_graph.graphs:
@@ -189,20 +252,28 @@ def main():
     fingertip_errors = []
     step_count = 0
 
+    mode_str = "headless" if is_headless else "viewer"
     print(f"\n{'='*60}")
-    print(f"  Policy Evaluation")
+    print(f"  Policy Evaluation ({mode_str})")
     print(f"{'='*60}")
     print(f"  Checkpoint:     {checkpoint_path}")
     print(f"  Grasp graph(s): {', '.join(grasp_graph_paths)}")
     print(f"  Num envs:       {args.num_envs}")
-    print(f"  Target episodes:{args.num_episodes}")
+    print(f"  Num episodes:   {args.num_episodes or 'unlimited'}")
+    print(f"  Num steps:      {args.num_steps or 'unlimited'}")
     print(f"  Policy params:  {sum(p.numel() for p in policy.parameters())}")
     print(f"  DR:             disabled (clean eval)")
     print(f"{'='*60}\n")
 
     t_start = time.time()
 
-    while total_episodes < args.num_episodes and sim_app.is_running():
+    while sim_app.is_running():
+        # Stop conditions
+        if args.num_episodes > 0 and total_episodes >= args.num_episodes:
+            break
+        if args.num_steps > 0 and step_count >= args.num_steps:
+            break
+
         with torch.inference_mode():
             obs_tensor = _to_policy_obs(obs)
             actions = policy(obs_tensor).clamp(-1.0, 1.0)
@@ -226,7 +297,6 @@ def main():
             sr = float(mdp_rewards.grasp_success_reward(env).mean().item())
             total_success += sr * n_done
 
-            # Termination stats
             term_manager = getattr(env, "termination_manager", None)
             if term_manager is not None:
                 active = set(getattr(term_manager, "active_terms", []))
@@ -242,11 +312,11 @@ def main():
             err = (target_fp - current_fp).norm(dim=-1).mean().item()
             fingertip_errors.append(err)
 
-        # Progress
+        # Progress (every ~5 batches of episodes)
         if total_episodes > 0 and total_episodes % (args.num_envs * 5) < args.num_envs:
             elapsed = time.time() - t_start
             sr = total_success / max(total_episodes, 1)
-            print(f"  [{total_episodes:>5d}/{args.num_episodes}]  "
+            print(f"  [{total_episodes:>5d} eps, {step_count} steps]  "
                   f"success={sr:.1%}  "
                   f"goal_updates={total_goal_updates}  "
                   f"drops={total_drops:.0f}  "
@@ -267,7 +337,8 @@ def main():
     print(f"  Episodes evaluated:      {total_episodes}")
     print(f"  Total sim steps:         {step_count}")
     print(f"  Wall time:               {elapsed:.1f}s")
-    print(f"  Steps/sec:               {step_count * args.num_envs / elapsed:.0f}")
+    if elapsed > 0:
+        print(f"  Steps/sec:               {step_count * args.num_envs / elapsed:.0f}")
     print(f"{'─'*60}")
     print(f"  Success rate:            {success_rate:.1%}")
     print(f"  Mean fingertip error:    {mean_fp_err * 1000:.1f} mm")
