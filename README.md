@@ -124,15 +124,11 @@ Symmetric actor-critic PPO with full observation (132 dims).
     --num_episodes 100
 
 # Visual evaluation (opens viewer)
-/workspace/IsaacLab/isaaclab.sh -p scripts/view_rl_checkpoint.py \
-    --checkpoint logs/rl/shadow_anygrasp_v1/checkpoints/model_30000.pt
-
-# View policy playback (no metrics, just visual)
-/workspace/IsaacLab/isaaclab.sh -p scripts/view_rl_checkpoint.py \
+/workspace/IsaacLab/isaaclab.sh -p scripts/evaluate_policy.py \
     --checkpoint logs/rl/shadow_anygrasp_v1/checkpoints/model_30000.pt
 ```
 
-`evaluate_policy.py` reports: success rate, fingertip tracking error (mm), rolling goal updates/episode, drop rate, left-hand rate. DR is disabled for clean measurement.
+`evaluate_policy.py` reports: success rate, fingertip tracking error (mm), rolling goal updates/episode, drop rate, left-hand rate. Default opens viewer; add `--headless` for metrics only.
 
 ## Visualization
 
