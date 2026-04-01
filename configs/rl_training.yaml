@@ -80,13 +80,11 @@ ppo:
   gamma: 0.99
   tau: 0.95                      # GAE lambda
   e_clip: 0.2
-  # entropy_coef=0.0 causes policy to collapse to near-deterministic after a
-  # few updates — especially problematic in 24-DOF continuous action space.
-  # 0.005 provides enough exploration pressure without destabilising training.
-  entropy_coef: 0.005
-  # bounds_loss_coef: penalise actions outside [-1,1]. Was 0.0001 → too small,
-  # bounds_loss exploded to 70+ causing policy to push joints to limits.
-  bounds_loss_coef: 0.005
+  # entropy_coef=0.0: standard for dexterous manipulation (IsaacGymEnvs ShadowHand).
+  # Nonzero values can cause entropy to rise continuously when reward signal is weak.
+  entropy_coef: 0.0
+  # bounds_loss_coef=0.0001: standard IsaacGymEnvs value.
+  bounds_loss_coef: 0.0001
   critic_coef: 4.0
   grad_norm: 1.0
   # [FIX] normalize_input/value: true — critical for stable learning
