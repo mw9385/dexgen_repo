@@ -356,58 +356,32 @@ if _ISAACLAB_AVAILABLE:
     @configclass
     class AnyGraspRewardsCfg:
         # ══════════════════════════════════════════════════════════════
-        # All reward functions output values in [-1, 1].
-        # Weights are always POSITIVE — the sign comes from the function.
-        #   Goal rewards:    func ∈ [0, 1]   →  weight * func  ≥ 0
-        #   Penalties:       func ∈ [-1, 0]  →  weight * func  ≤ 0
-        #   Contact reward:  func ∈ [0, 1]   →  weight * func  ≥ 0
+        # DexterityGen reward structure (arXiv:2502.04307 §3.2):
+        #   r = r_goal + r_style + r_reg
+        #
+        # All functions output [-1, 1]. Weights are positive.
+        # Drop/escape handled by termination (no explicit penalty).
         # ══════════════════════════════════════════════════════════════
 
-        # ── Goal-related rewards (func → [0, 1]) ─────────────────────
-        object_pose = RewTerm(
-            func=mdp_rewards.object_pose_goal_reward,
-            weight=5.0,
-            params={"alpha_pos": 5.0, "alpha_orn": 2.0},
-        )
-        finger_joint_goal = RewTerm(
-            func=mdp_rewards.finger_joint_goal_reward,
-            weight=8.0,
-            params={"alpha_hand": 2.0},
-        )
+        # ── r_goal: fingertip tracking (func → [0, 1]) ───────────────
+        # Primary dense signal. Fingertips in object frame, so correct
+        # object pose is implicitly required.
         fingertip_tracking = RewTerm(
             func=mdp_rewards.fingertip_tracking_reward,
-            weight=8.0,
+            weight=5.0,
             params={"alpha": 5.0},
         )
-        # Soft grasp success: fraction of tips within threshold ∈ [0, 1].
-        # Requires ALL fingertips within 2cm AND object pose within threshold.
-        grasp_success = RewTerm(
-            func=mdp_rewards.grasp_success_reward,
-            weight=50.0,
-            params={
-                "threshold": 0.02,
-                "min_fraction": 1.0,
-                "obj_pos_threshold": 0.02,
-                "obj_rot_threshold": 0.05,
-            },
-        )
 
-        # ── Contact reward (func → [0, 1]) ───────────────────────────
-        fingertip_contact = RewTerm(
-            func=mdp_rewards.fingertip_contact_reward,
-            weight=0.5,
-        )
-
-        # ── Style penalty (func → [-1, 0]) ───────────────────────────
+        # ── r_style: fingertip velocity (func → [-1, 0]) ─────────────
         fingertip_velocity = RewTerm(
             func=mdp_rewards.fingertip_velocity_penalty,
             weight=0.1,
         )
 
-        # ── Regularization (func → [-1, 0]) ──────────────────────────
+        # ── r_reg: action/torque/work (func → [-1, 0]) ───────────────
         action_scale = RewTerm(
             func=mdp_rewards.action_scale_penalty,
-            weight=0.001,
+            weight=0.005,
         )
         torque = RewTerm(
             func=mdp_rewards.applied_torque_penalty,
@@ -416,32 +390,6 @@ if _ISAACLAB_AVAILABLE:
         mechanical_work = RewTerm(
             func=mdp_rewards.mechanical_work_penalty,
             weight=0.02,
-        )
-        action_rate = RewTerm(
-            func=mdp_rewards.action_rate_penalty,
-            weight=0.01,
-        )
-
-        # ── Safety penalties (func → [-1, 0] or {-1, 0}) ─────────────
-        object_velocity = RewTerm(
-            func=mdp_rewards.object_velocity_penalty,
-            weight=0.1,
-        )
-        # Drop/escape: binary {-1, 0}. weight=20/10 → significant but
-        # no longer dwarfs dense goal rewards (~5-8 per step).
-        object_drop = RewTerm(
-            func=mdp_rewards.object_drop_penalty,
-            weight=20.0,
-            params={"min_height": 0.2},
-        )
-        object_left_hand = RewTerm(
-            func=mdp_rewards.object_left_hand_penalty,
-            weight=10.0,
-            params={"max_dist": 0.20},
-        )
-        joint_limit = RewTerm(
-            func=mdp_rewards.joint_limit_penalty,
-            weight=0.1,
         )
 
 

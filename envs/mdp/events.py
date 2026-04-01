@@ -425,7 +425,7 @@ def _sample_nearby_goal_index(
         min_dist: minimum fingertip L2 distance between start and goal (m).
             Goals closer than this are filtered out to prevent the policy
             from starting already at the goal (spurious initial success).
-            Default 8 cm >> grasp_success_reward threshold (2 cm).
+            Default 8 cm >> rolling goal success_threshold (1.5 cm).
 
     Strategy (in priority order):
       1. Use graph edges — if start_idx has edge-connected neighbours, sample
@@ -482,8 +482,7 @@ def update_rolling_goal(env, success_threshold: float = 0.015) -> int:
 
     Args:
         success_threshold: distance (m) at which goal is considered reached.
-            5 cm (was 2 cm) — matches grasp_success_reward threshold so the
-            rolling goal triggers as soon as the bonus fires.
+            1.5 cm — strict threshold for goal transition.
 
     Returns:
         Number of envs whose goal was updated this step.
@@ -504,31 +503,10 @@ def update_rolling_goal(env, success_threshold: float = 0.015) -> int:
     cur_fps = fingertip_positions_in_object_frame(env)        # (N, F*3)
     dist = (cur_fps - goal_fps_flat).reshape(env.num_envs, nf, 3)
     per_tip_dist = torch.norm(dist, dim=-1)                   # (N, F)
-    finger_ok = (per_tip_dist < success_threshold).all(dim=-1)  # (N,)
-
-    # Object pose check: position < 2cm AND rotation error < 0.05
-    obj_ok = torch.ones(env.num_envs, device=env.device, dtype=torch.bool)
-    goal_pos  = env.extras.get("target_object_pos_hand")
-    goal_quat = env.extras.get("target_object_quat_hand")
-    if goal_pos is not None:
-        robot = env.scene["robot"]
-        obj   = env.scene["object"]
-        rel_pos = obj.data.root_pos_w - robot.data.root_pos_w
-        cur_pos_hand = quat_apply_inverse(robot.data.root_quat_w, rel_pos)
-        d_pos = torch.norm(cur_pos_hand - goal_pos, dim=-1)
-        obj_ok = obj_ok & (d_pos < 0.02)
-    if goal_quat is not None:
-        robot = env.scene["robot"]
-        obj   = env.scene["object"]
-        qw = robot.data.root_quat_w
-        qo = obj.data.root_quat_w
-        qw_inv = torch.cat([qw[:, :1], -qw[:, 1:]], dim=-1)
-        cur_quat_hand = _quat_multiply(qw_inv, qo)
-        quat_dot = torch.sum(cur_quat_hand * goal_quat, dim=-1).abs().clamp(0.0, 1.0)
-        d_rot = 1.0 - quat_dot
-        obj_ok = obj_ok & (d_rot < 0.05)
-
-    success_mask = finger_ok & obj_ok  # (N,)
+    # Fingertip-only check (DexterityGen §3.2): since fingertips are
+    # in object frame, reaching goal fingertip positions implicitly
+    # requires correct object pose.
+    success_mask = (per_tip_dist < success_threshold).all(dim=-1)  # (N,)
 
     success_ids = success_mask.nonzero(as_tuple=False).squeeze(-1)
     if success_ids.numel() == 0:

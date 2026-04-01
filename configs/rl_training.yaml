@@ -13,27 +13,18 @@ env:
   decimation: 4                  # control at 30 Hz (120 Hz sim / 4)
 
   rewards:
-    # All reward functions output [-1, 1]. Weights are positive;
-    # the sign of the contribution comes from the function itself.
+    # DexterityGen reward structure (arXiv:2502.04307 §3.2):
+    #   r = r_goal + r_style + r_reg
+    # All functions output [-1, 1]. Drop/escape → termination (no penalty).
     #
-    # Goal rewards (func → [0, 1])
-    object_pose:        5.0     # exp(-alpha * pose_err)
-    finger_joint_goal:  8.0     # exp(-alpha * joint_err)
-    fingertip_tracking: 8.0     # exp(-5 * tip_dist), alpha=5 for wider basin
-    grasp_success:      50.0    # fraction of tips within 5 cm (gated by 60%)
-    fingertip_contact:  0.5     # fraction of tips in contact
-    # Style penalty (func → [-1, 0])
+    # r_goal (func → [0, 1])
+    fingertip_tracking: 5.0     # exp(-5 * tip_dist) in object frame
+    # r_style (func → [-1, 0])
     fingertip_velocity: 0.1
-    # Regularization (func → [-1, 0])
-    action_scale:       0.001
+    # r_reg (func → [-1, 0])
+    action_scale:       0.005
     torque:             0.05
     mechanical_work:    0.02
-    action_rate:        0.01
-    # Safety penalties (func → [-1, 0] or {-1, 0})
-    object_velocity:    0.1
-    object_drop:        20.0    # binary {-1, 0}
-    object_left_hand:   10.0    # binary {-1, 0}
-    joint_limit:        0.1
 
 # ==============================================================================
 # Asymmetric Actor-Critic PPO (rl_games)

@@ -358,7 +358,7 @@ def main():
                 policy._h[:, done_ids, :] = 0.0
                 policy._c[:, done_ids, :] = 0.0
 
-            sr = float(mdp_rewards.grasp_success_reward(env).mean().item())
+            sr = float(mdp_rewards.fingertip_tracking_reward(env).mean().item())
             total_success += sr * n_done
 
             term_manager = getattr(env, "termination_manager", None)
