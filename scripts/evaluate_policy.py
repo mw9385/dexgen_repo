@@ -72,8 +72,8 @@ def parse_args():
     return args
 
 
-class PolicyMLP(nn.Module):
-    """Reconstruct the actor MLP from rl_games checkpoint weights."""
+class PolicyNetwork(nn.Module):
+    """Reconstruct actor network from rl_games checkpoint (MLP or MLP+LSTM)."""
 
     def __init__(self, checkpoint: dict):
         super().__init__()
@@ -85,7 +85,7 @@ class PolicyMLP(nn.Module):
             key=lambda k: int(k.split(".")[2]),
         )
 
-        layers = []
+        mlp_layers = []
         for wk in actor_keys:
             bk = wk.replace(".weight", ".bias")
             w = model_sd[wk]
@@ -93,8 +93,41 @@ class PolicyMLP(nn.Module):
             linear = nn.Linear(w.shape[1], w.shape[0])
             linear.weight.data.copy_(w)
             linear.bias.data.copy_(b)
-            layers.append(linear)
-            layers.append(nn.ELU())
+            mlp_layers.append(linear)
+            mlp_layers.append(nn.ELU())
+
+        self.mlp = nn.Sequential(*mlp_layers)
+
+        # Detect LSTM: a2c_network.rnn.weight_ih_l0 etc.
+        rnn_keys = [k for k in model_sd if "a2c_network.rnn." in k or "a2c_network._rnn." in k]
+        self.has_rnn = len(rnn_keys) > 0
+        self.rnn = None
+        self.rnn_hidden_size = 0
+        self.rnn_num_layers = 0
+
+        if self.has_rnn:
+            # Infer LSTM size from weight shape
+            rnn_prefix = "a2c_network.rnn." if any("a2c_network.rnn." in k for k in rnn_keys) else "a2c_network._rnn."
+            ih_key = rnn_prefix + "weight_ih_l0"
+            hh_key = rnn_prefix + "weight_hh_l0"
+            # LSTM weight_ih shape: (4*hidden_size, input_size)
+            hidden_size = model_sd[ih_key].shape[0] // 4
+            input_size = model_sd[ih_key].shape[1]
+            # Count layers
+            num_layers = 0
+            while f"{rnn_prefix}weight_ih_l{num_layers}" in model_sd:
+                num_layers += 1
+
+            self.rnn_hidden_size = hidden_size
+            self.rnn_num_layers = num_layers
+            self.rnn = nn.LSTM(input_size, hidden_size, num_layers, batch_first=False)
+
+            # Load LSTM weights
+            rnn_sd = {}
+            for k in rnn_keys:
+                param_name = k.replace(rnn_prefix, "")
+                rnn_sd[param_name] = model_sd[k]
+            self.rnn.load_state_dict(rnn_sd)
 
         # Output head (mu): a2c_network.mu.weight / .bias
         mu_w = model_sd["a2c_network.mu.weight"]
@@ -102,9 +135,7 @@ class PolicyMLP(nn.Module):
         mu = nn.Linear(mu_w.shape[1], mu_w.shape[0])
         mu.weight.data.copy_(mu_w)
         mu.bias.data.copy_(mu_b)
-        layers.append(mu)
-
-        self.net = nn.Sequential(*layers)
+        self.mu = mu
 
         # Running mean/std for input normalization
         self.running_mean = checkpoint.get("running_mean_std", {}).get("running_mean", None)
@@ -113,13 +144,38 @@ class PolicyMLP(nn.Module):
             self.running_mean = self.running_mean.float()
             self.running_var = self.running_var.float()
 
+        # Hidden state for LSTM inference
+        self._h = None
+        self._c = None
+
+    def reset_hidden(self, num_envs: int, device: torch.device):
+        """Reset LSTM hidden state (call at episode reset)."""
+        if self.has_rnn:
+            self._h = torch.zeros(self.rnn_num_layers, num_envs, self.rnn_hidden_size, device=device)
+            self._c = torch.zeros(self.rnn_num_layers, num_envs, self.rnn_hidden_size, device=device)
+
     def forward(self, obs: torch.Tensor) -> torch.Tensor:
         x = obs.float()
         if self.running_mean is not None:
             self.running_mean = self.running_mean.to(x.device)
             self.running_var = self.running_var.to(x.device)
             x = (x - self.running_mean) / torch.sqrt(self.running_var + 1e-5)
-        return self.net(x)
+
+        mlp_out = self.mlp(x)
+
+        if self.has_rnn and self.rnn is not None:
+            # LSTM expects (seq_len, batch, features) — single step: seq_len=1
+            rnn_in = mlp_out.unsqueeze(0)  # (1, batch, features)
+            if self._h is None:
+                self.reset_hidden(x.shape[0], x.device)
+            rnn_out, (self._h, self._c) = self.rnn(rnn_in, (self._h, self._c))
+            mlp_out = rnn_out.squeeze(0)  # (batch, hidden_size)
+
+        return self.mu(mlp_out)
+
+
+# Backward compatibility alias
+PolicyMLP = PolicyNetwork
 
 
 def _to_policy_obs(obs):
@@ -235,7 +291,9 @@ def main():
     # ── Load policy directly from checkpoint ──
     device = env.device
     ckpt = torch.load(str(checkpoint_path), map_location=device, weights_only=False)
-    policy = PolicyMLP(ckpt).to(device).eval()
+    policy = PolicyNetwork(ckpt).to(device).eval()
+    if policy.has_rnn:
+        policy.reset_hidden(args.num_envs, device)
 
     # ── Init ──
     obs, _ = env.reset()
@@ -261,6 +319,8 @@ def main():
     print(f"  Num envs:       {args.num_envs}")
     print(f"  Num episodes:   {args.num_episodes or 'unlimited'}")
     print(f"  Num steps:      {args.num_steps or 'unlimited'}")
+    net_type = "MLP+LSTM" if policy.has_rnn else "MLP"
+    print(f"  Policy type:    {net_type}")
     print(f"  Policy params:  {sum(p.numel() for p in policy.parameters())}")
     print(f"  DR:             disabled (clean eval)")
     print(f"{'='*60}\n")
@@ -289,10 +349,14 @@ def main():
 
         step_count += 1
 
-        # Count done episodes
+        # Count done episodes and reset LSTM hidden state for done envs
         n_done = int(done.sum().item())
         if n_done > 0:
             total_episodes += n_done
+            if policy.has_rnn and policy._h is not None:
+                done_ids = done.nonzero(as_tuple=False).squeeze(-1)
+                policy._h[:, done_ids, :] = 0.0
+                policy._c[:, done_ids, :] = 0.0
 
             sr = float(mdp_rewards.grasp_success_reward(env).mean().item())
             total_success += sr * n_done

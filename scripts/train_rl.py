@@ -193,6 +193,43 @@ def _resolve_ppo_sizes(args, cfg_file: dict) -> tuple[int, int, int]:
     return horizon_length, seq_length, minibatch_size
 
 
+def _build_network_config(ppo_cfg: dict) -> dict:
+    """Build rl_games network config, optionally with LSTM."""
+    net = {
+        "name": "actor_critic",
+        "separate": False,
+        "space": {
+            "continuous": {
+                "mu_activation": "None",
+                "sigma_activation": "None",
+                "mu_init": {"name": "default"},
+                "sigma_init": {"name": "const_initializer", "val": -1.0},
+                "fixed_sigma": True,
+            }
+        },
+        "mlp": {
+            "units": ppo_cfg.get("units", [1024, 512, 512, 256, 256]),
+            "activation": ppo_cfg.get("activation", "elu"),
+            "d2rl": False,
+            "initializer": {"name": "default"},
+            "regularizer": {"name": "None"},
+        },
+    }
+
+    # Add LSTM if enabled
+    if bool(ppo_cfg.get("use_rnn", False)):
+        rnn_cfg = ppo_cfg.get("rnn", {})
+        net["rnn"] = {
+            "name": rnn_cfg.get("name", "lstm"),
+            "units": int(rnn_cfg.get("units", 256)),
+            "layers": int(rnn_cfg.get("layers", 1)),
+            "before_mlp": bool(rnn_cfg.get("before_mlp", False)),
+            "concat_input": bool(rnn_cfg.get("concat_input", True)),
+        }
+
+    return net
+
+
 def build_rl_games_config(args, cfg_file: dict) -> dict:
     """
     Build rl_games PPO config.
@@ -224,29 +261,7 @@ def build_rl_games_config(args, cfg_file: dict) -> dict:
             "model": {
                 "name": "continuous_a2c_logstd",
             },
-            "network": {
-                "name": "actor_critic",
-                "separate": False,
-                "space": {
-                    "continuous": {
-                        "mu_activation": "None",
-                        "sigma_activation": "None",
-                        "mu_init": {"name": "default"},
-                        "sigma_init": {"name": "const_initializer", "val": -1.0},
-                        "fixed_sigma": True,
-                    }
-                },
-                # Paper (arXiv:2502.04307): [1024, 512, 512, 256, 256] for both
-                # actor and critic.  Shadow Hand has more DOF than the original
-                # LEAP Hand so matching the paper size is important.
-                "mlp": {
-                    "units": ppo_cfg.get("units", [1024, 512, 512, 256, 256]),
-                    "activation": ppo_cfg.get("activation", "elu"),
-                    "d2rl": False,
-                    "initializer": {"name": "default"},
-                    "regularizer": {"name": "None"},
-                },
-            },
+            "network": _build_network_config(ppo_cfg),
             "load_checkpoint": args.resume is not None,
             "load_path": args.resume or "",
             "config": {

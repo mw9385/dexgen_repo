@@ -62,6 +62,17 @@ ppo:
   fixed_sigma: true
   sigma_init: -1.0
 
+  # RNN (LSTM) — set use_rnn: true to enable.
+  # MLP acts as feature extractor, then LSTM processes the sequence.
+  # seq_length controls BPTT length; horizon_length must be divisible by it.
+  use_rnn: false
+  rnn:
+    name: lstm
+    units: 256
+    layers: 1
+    before_mlp: false       # MLP → LSTM → mu
+    concat_input: true      # concat raw input with MLP output for LSTM input
+
   # Core PPO hyperparameters
   learning_rate: 5.0e-4
   lr_schedule: adaptive
@@ -89,6 +100,7 @@ ppo:
   # Rollout
   # Paper (arXiv:2502.04307) batch_size=8192: num_envs(512) × horizon(16) = 8192.
   horizon_length: 16
+  seq_length: 8              # BPTT length for LSTM (ignored for MLP)
   num_steps_per_env: 16
   mini_epochs: 5
   # minibatch_size=4096 → 2 minibatches/epoch.
