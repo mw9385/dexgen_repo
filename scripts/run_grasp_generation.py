@@ -1,14 +1,13 @@
 """
-Stage 0 – Grasp Generation + Isaac Refinement
-===============================================
-Generates grasp sets via DexGraspNet SA optimization, then refines
-them in Isaac Sim so all stored data (joint_angles, object_pos_hand,
-object_quat_hand) is consistent with Isaac Sim's FK.
+Stage 0 – Grasp Generation
+============================
+Generates grasp sets via DexGraspNet SA optimization.
 
 Pipeline:
   1. DexGraspNet optimization (pure PyTorch, full GPU)
-  2. Isaac Sim refinement (differential IK, overwrites grasp data)
-  3. Output: data/grasp_graph.pkl (ready for RL training)
+  2. NFO quality filtering
+  3. Graph construction (kNN edges)
+  4. Output: data/grasp_graph.pkl (ready for RL training)
 
 Usage:
     /isaac-sim/python.sh scripts/run_grasp_generation.py
@@ -70,9 +69,6 @@ def parse_args():
 
     # Finger config
     p.add_argument("--num_fingers", type=int, default=None)
-
-    # Refinement
-    p.add_argument("--refine_batch_envs", type=int, default=16)
 
     p.add_argument("--output_dir", type=str, default=None)
     p.add_argument("--seed", type=int, default=42)
@@ -178,33 +174,6 @@ def generate_grasps(spec, args, num_fingers, num_dof, hand_name, device):
     }
 
 
-def run_refinement(input_path, output_path, batch_envs):
-    """Run Isaac Sim refinement as subprocess."""
-    print(f"\n{'='*55}")
-    print(f" Isaac Refinement")
-    print(f"{'='*55}")
-
-    refine_script = Path(__file__).parent / "refine_grasps.py"
-    isaaclab_sh = Path("/workspace/IsaacLab/isaaclab.sh")
-
-    if isaaclab_sh.exists():
-        cmd = [str(isaaclab_sh), "-p", str(refine_script),
-               "--grasp_graph", str(input_path),
-               "--output", str(output_path),
-               "--batch_envs", str(batch_envs), "--headless"]
-    else:
-        cmd = [sys.executable, str(refine_script),
-               "--grasp_graph", str(input_path),
-               "--output", str(output_path),
-               "--batch_envs", str(batch_envs), "--headless"]
-
-    print(f"  {' '.join(cmd)}")
-    subprocess.check_call(cmd)
-    print(f"  Refinement complete.")
-    print(f"    Input (raw):  {input_path}")
-    print(f"    Output:       {output_path}")
-
-
 def main():
     args = parse_args()
 
@@ -281,29 +250,16 @@ def main():
         print("\nERROR: No valid grasps generated.")
         sys.exit(1)
 
-    raw_path = output_dir / "grasp_graph_raw.pkl"
-    refined_path = output_dir / "grasp_graph.pkl"
-    multi_graph.save(raw_path)
+    output_path = output_dir / "grasp_graph.pkl"
+    multi_graph.save(output_path)
     multi_graph.summary()
-    print(f"\n  Raw grasps saved: {raw_path}")
-
-    # ── Step 2: Isaac Sim refinement (saves to separate file) ──
-    try:
-        run_refinement(raw_path, refined_path, args.refine_batch_envs)
-    except Exception as e:
-        print(f"\n  WARNING: Refinement failed: {e}")
-        print(f"  Raw grasps preserved: {raw_path}")
-        print(f"  Retry refinement only:")
-        print(f"    /workspace/IsaacLab/isaaclab.sh -p scripts/refine_grasps.py "
-              f"--grasp_graph {raw_path} --output {refined_path} --headless")
 
     print(f"\n{'='*55}")
     print(f" Complete")
-    print(f"   Raw:     {raw_path}")
-    print(f"   Refined: {refined_path}")
+    print(f"   Output: {output_path}")
     print(f"{'='*55}")
     print(f"\nNext: /workspace/IsaacLab/isaaclab.sh -p scripts/train_rl.py "
-          f"--grasp_graph {refined_path} --num_envs 512 --headless")
+          f"--grasp_graph {output_path} --num_envs 512 --headless")
 
 
 if __name__ == "__main__":
