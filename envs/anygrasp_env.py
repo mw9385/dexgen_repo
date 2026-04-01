@@ -179,8 +179,8 @@ if _ISAACLAB_AVAILABLE:
         robot: ArticulationCfg = SHADOW_HAND_CFG.replace(
             prim_path="{ENV_REGEX_NS}/ShadowHand",
             init_state=ArticulationCfg.InitialStateCfg(
-                pos=(0.0, 0.0, 0.35),     # wrist height
-                rot=(1.0, 0.0, 0.0, 0.0), # identity — palm faces DOWN
+                pos=(0.0, 0.0, 0.45),     # wrist above object
+                rot=(1.0, 0.0, 0.0, 0.0), # aligned by _align_wrist_palm_down at reset
                 joint_pos={
                     "robot0_THJ4": 0.5,   # thumb rotation: natural resting pose
                     "robot0_THJ3": 0.3,
@@ -206,7 +206,7 @@ if _ISAACLAB_AVAILABLE:
                 visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.8, 0.2, 0.2)),
             ),
             init_state=RigidObjectCfg.InitialStateCfg(
-                pos=(0.0, 0.0, 0.4), rot=(1.0, 0.0, 0.0, 0.0),
+                pos=(0.0, 0.0, 0.035), rot=(1.0, 0.0, 0.0, 0.0),
             ),
         )
 
