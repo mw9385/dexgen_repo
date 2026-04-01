@@ -239,19 +239,19 @@ def reset_to_random_grasp(
             )
 
     # ------------------------------------------------------------------
-    # 2. Set object / robot initial state using DexGraspNet values directly.
+    # 2. Set object / robot initial state.
     #
-    #    DexGraspNet provides:
-    #      - joint_angles: finger configuration for the grasp
-    #      - object_pos_hand / object_quat_hand: object pose in wrist root frame
-    #      - fingertip_positions: fingertip targets in object frame
+    #    Always use fingertip-driven placement (_place_object_in_hand):
+    #    1. Place wrist at nominal position above object (canonical offset)
+    #    2. Set joints to stored grasp configuration
+    #    3. Place object at fingertip centroid → object enclosed by fingers
+    #    4. Refine joints to better match fingertip targets
+    #    5. Re-place object at refined fingertip centroid
     #
-    #    Reset strategy:
-    #      1. Place object at canonical position (small jitter)
-    #      2. Compute wrist world pose from DexGraspNet object_pos/quat_hand
-    #         (inverts the stored hand→object transform)
-    #      3. Set joints to DexGraspNet joint_angles directly
-    #      No IK refinement, no centroid-based placement.
+    #    This avoids the "object at wrist" artifact that occurs when
+    #    object_pos_hand (stored relative to wrist root) is near-zero because
+    #    the Shadow Hand palm faces sideways in the default orientation and
+    #    the fingertip centroid ends up near the wrist root during refinement.
     # ------------------------------------------------------------------
     has_exact_pose = any(
         pos is not None and quat is not None
@@ -259,75 +259,51 @@ def reset_to_random_grasp(
     )
     has_joints = any(j is not None for j in start_joints_list)
 
-    # Step 1: Place object at canonical pose with small jitter
+    # Always: object at canonical pose, wrist at nominal position above object
     _randomise_object_pose(env, env_ids)
+    _randomise_wrist_pose(env, env_ids)
 
-    # Step 2: Compute wrist pose from DexGraspNet grasp data
-    if has_exact_pose:
-        # Use DexGraspNet's object_pos_hand/object_quat_hand to derive
-        # the wrist world pose. object_pose_frame="root" means the stored
-        # pose is relative to the wrist root link.
-        _set_robot_root_pose_from_root_frame_grasp_pose(
-            env, env_ids,
-            start_object_pos_hand_list,
-            start_object_quat_hand_list,
-        )
-        # Apply small wrist jitter for training exploration
-        cfg = getattr(env.cfg, "reset_randomization", {}) or {}
-        pos_jitter_std = float(cfg.get("wrist_pos_jitter_std", 0.005))
-        rot_jitter_deg = float(cfg.get("wrist_rot_std_deg", 5.0))
-        if pos_jitter_std > 0.0 or rot_jitter_deg > 0.0:
-            robot = env.scene["robot"]
-            wrist_pos = robot.data.root_pos_w[env_ids].clone()
-            wrist_quat = robot.data.root_quat_w[env_ids].clone()
-            if pos_jitter_std > 0.0:
-                wrist_pos += torch.randn(len(env_ids), 3, device=env.device) * pos_jitter_std
-            if rot_jitter_deg > 0.0:
-                wrist_quat = _add_rotation_noise(
-                    wrist_quat, math.radians(rot_jitter_deg), env.device, len(env_ids)
-                )
-            _set_robot_root_pose(env, env_ids, wrist_pos, wrist_quat)
-    else:
-        # Fallback when grasp graph has no object pose data
-        _randomise_wrist_pose(env, env_ids)
-
-    # Step 3: Set joints from DexGraspNet joint_angles
     if has_joints:
         _set_robot_joints_direct(env, env_ids, start_joints_list)
     else:
         _set_robot_to_fingertip_config(env, env_ids, start_fps)
 
-    # Update transforms after writing root + joints
+    # ------------------------------------------------------------------
+    # 3. Place object at fingertip centroid (object inside the hand).
+    #    After writing root + joints we must update body transforms first.
+    # ------------------------------------------------------------------
     robot = env.scene["robot"]
     robot.update(0.0)
 
-    # Measure initial grasp error for diagnostics (no correction applied)
+    placement_debug = None
+    solve_mean_err, solve_max_err, placement_debug = _place_object_in_hand(env, env_ids, start_fps)
+    # Refine joints to better match the sampled grasp fingertip targets,
+    # then re-place the object at the improved fingertip centroid.
+    _refine_hand_to_start_grasp(env, env_ids, start_fps)
+    robot.update(0.0)
+    solve_mean_err, solve_max_err, placement_debug = _place_object_in_hand(env, env_ids, start_fps)
     solve_mean_err, solve_max_err = _measure_grasp_contact_error(env, env_ids, start_fps)
-    if not getattr(env, "_reset_err_logged", False):
-        env._reset_err_logged = True
-        print(f"[DIAG] ── Initial grasp placement error (DexGraspNet direct) ──────")
-        print(f"[DIAG]   Mean fingertip error: {solve_mean_err.mean().item()*1000:.1f} mm")
-        print(f"[DIAG]   Max fingertip error:  {solve_max_err.mean().item()*1000:.1f} mm")
-        print(f"[DIAG]   Used grasp pose:      {has_exact_pose}")
-        print(f"[DIAG]   Used joint angles:    {has_joints}")
-        print(f"[DIAG] ────────────────────────────────────────────────────────────")
 
     # ------------------------------------------------------------------
-    # 4. Fill in target_object_pos/quat_hand for envs that had no stored
+    # 7. Fill in target_object_pos/quat_hand for envs that had no stored
     #    goal object pose in the grasp graph (goal_object_pos_hand is None).
-    #    For envs WITH a stored goal pose it was already written above and
-    #    must NOT be overwritten with the start sim state.
+    #    For envs WITH a stored goal pose it was already written above at
+    #    lines ~200-208 and must NOT be overwritten with the start sim state.
+    #    Overwriting the goal with the start pose would make the reward always
+    #    fire at maximum from step 0, providing no learning signal.
     # ------------------------------------------------------------------
-    obj_for_goal = env.scene["object"]
+    robot_for_goal = env.scene["robot"]
+    obj_for_goal   = env.scene["object"]
     obj_for_goal.update(0.0)
     for i in range(n):
+        # Only fall back to start sim state when the grasp graph had no goal pose
         if goal_object_pos_hand_list[i] is not None:
             continue
-        rp_w = robot.data.root_pos_w[env_ids[i]]
-        rq_w = robot.data.root_quat_w[env_ids[i]]
-        op_w = obj_for_goal.data.root_pos_w[env_ids[i]]
-        oq_w = obj_for_goal.data.root_quat_w[env_ids[i]]
-        rel = op_w - rp_w
+        rp_w = robot_for_goal.data.root_pos_w[env_ids[i]]   # (3,)
+        rq_w = robot_for_goal.data.root_quat_w[env_ids[i]]  # (4,)
+        op_w = obj_for_goal.data.root_pos_w[env_ids[i]]     # (3,)
+        oq_w = obj_for_goal.data.root_quat_w[env_ids[i]]    # (4,)
+        rel  = op_w - rp_w
         cur_obj_pos_hand = quat_apply_inverse(rq_w.unsqueeze(0), rel.unsqueeze(0))[0]
         env.extras["target_object_pos_hand"][env_ids[i]] = cur_obj_pos_hand.clone()
         if goal_object_quat_hand_list[i] is None:
