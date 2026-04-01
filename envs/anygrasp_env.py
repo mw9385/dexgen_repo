@@ -384,7 +384,7 @@ if _ISAACLAB_AVAILABLE:
         grasp_success = RewTerm(
             func=mdp_rewards.grasp_success_reward,
             weight=50.0,
-            params={"threshold": 0.05, "min_fraction": 0.6},
+            params={"threshold": 0.02, "min_fraction": 1.0},
         )
 
         # ── Contact reward (func → [0, 1]) ───────────────────────────
