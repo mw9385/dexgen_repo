@@ -7,8 +7,8 @@ Paper: [arXiv](https://arxiv.org/abs/2404.08603) | Project: [zhaohengyin.github.
 ## Pipeline
 
 ```
-Stage 0    Grasp Generation + Isaac Refinement  →  data/grasp_graph.pkl
-Stage 1    RL Policy Training                   →  logs/rl/shadow_anygrasp_v1/
+Stage 0    Grasp Generation (DexGraspNet SA)    →  data/grasp_graph.pkl
+Stage 1    RL Policy Training (PPO)             →  logs/rl/shadow_anygrasp_v1/
 Stage 2    Dataset Collection                   →  data/dataset.h5
 Stage 3    DexGen Controller                    →  logs/dexgen/
 ```
@@ -24,7 +24,7 @@ Stage 3    DexGen Controller                    →  logs/dexgen/
 /isaac-sim/python.sh -m pip install transforms3d transformations lxml
 git submodule update --init third_party/DexGraspNet
 
-# Stage 0: Generate grasps + refine in Isaac Sim
+# Stage 0: Generate grasps
 /isaac-sim/python.sh scripts/run_grasp_generation.py \
     --shapes cube --num_sizes 1 --size_min 0.06 --size_max 0.06
 
@@ -39,11 +39,9 @@ git submodule update --init third_party/DexGraspNet
 
 ## Stage 0: Grasp Generation
 
-Two-step process:
-1. **DexGraspNet optimization** (pure PyTorch, full GPU) — generates grasp candidates
-2. **Isaac Sim refinement** (automatic) — corrects FK mismatch, overwrites grasp data
+DexGraspNet simulated annealing optimization (pure PyTorch, full GPU). Generates grasp candidates, filters by force closure quality (NFO), and builds a kNN graph for RL training.
 
-After refinement, all stored data (`joint_angles`, `object_pos_hand`, `object_quat_hand`) is consistent with Isaac Sim's FK, ensuring reward functions get coherent targets during RL training.
+DIP (J0) joints are zeroed during fingertip extraction to match Isaac Sim's joint layout (22 MJCF DOF → 24 USD DOF mapping).
 
 ```bash
 # Full pool (9 objects)
@@ -117,6 +115,26 @@ Symmetric actor-critic PPO with full observation (132 dims).
     --grasp_graph data/grasp_graph.pkl --num_envs 512 --headless
 ```
 
+### Evaluate Trained Policy
+
+```bash
+# Headless evaluation (metrics only, fast)
+/workspace/IsaacLab/isaaclab.sh -p scripts/evaluate_policy.py \
+    --checkpoint logs/rl/shadow_anygrasp_v1/checkpoints/model_30000.pt \
+    --num_episodes 100
+
+# Visual evaluation (opens viewer)
+/workspace/IsaacLab/isaaclab.sh -p scripts/evaluate_policy.py \
+    --checkpoint logs/rl/shadow_anygrasp_v1/checkpoints/model_30000.pt \
+    --num_episodes 20 --no-headless
+
+# View policy playback (no metrics, just visual)
+/workspace/IsaacLab/isaaclab.sh -p scripts/view_rl_checkpoint.py \
+    --checkpoint logs/rl/shadow_anygrasp_v1/checkpoints/model_30000.pt
+```
+
+`evaluate_policy.py` reports: success rate, fingertip tracking error (mm), rolling goal updates/episode, drop rate, left-hand rate. DR is disabled for clean measurement.
+
 ## Visualization
 
 ```bash
@@ -154,4 +172,4 @@ git submodule update --init third_party/DexGraspNet
 | `DexGraspNet assets not found` | `git submodule update --init third_party/DexGraspNet` |
 | `ModuleNotFoundError: transformations` | `/isaac-sim/python.sh -m pip install transformations` |
 | GPU OOM during generation | Reduce `--batch_size` |
-| Object falls in visualization | Run refinement or increase `--num_iterations` |
+| Object falls in visualization | Increase `--num_iterations` or `--num_grasps` |
