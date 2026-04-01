@@ -519,7 +519,6 @@ class _IsaacLabVecEnv:
         # Build batch-free spaces so rl_games sees (obs_dim,) not (num_envs, obs_dim).
         # rl_games reads both env.observation_space AND get_env_info() —
         # everything must be a simple gym.spaces.Box with shape (dim,).
-        import gymnasium
         import gym as old_gym
         import numpy as np
 
@@ -528,7 +527,9 @@ class _IsaacLabVecEnv:
 
         raw_obs_space = env.observation_space
         self._state_space = None
-        if isinstance(raw_obs_space, (gymnasium.spaces.Dict, old_gym.spaces.Dict)):
+        # Use duck typing — Isaac Lab may use gymnasium.spaces.Dict or a subclass
+        # that doesn't match isinstance checks against gym/gymnasium.
+        if hasattr(raw_obs_space, "spaces"):
             obs_sp = raw_obs_space.spaces.get("policy", next(iter(raw_obs_space.spaces.values())))
             critic_sp = raw_obs_space.spaces.get("critic", None)
             if critic_sp is not None:
