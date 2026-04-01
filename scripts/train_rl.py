@@ -594,10 +594,10 @@ class _IsaacLabVecEnv:
         # rather than idling until reset.  Uses threshold=2 cm (looser than
         # the 1 cm sparse-reward threshold) so the new goal is set just
         # before the sparse bonus fires.
-        n_updated = mdp_events.update_rolling_goal(self.env, success_threshold=0.02)
+        n_updated = mdp_events.update_rolling_goal(self.env)
 
         info = dict(info) if isinstance(info, dict) else {}
-        info["success_ratio"] = float(mdp_rewards.grasp_success_reward(self.env).mean().item())
+        info["success_ratio"] = float(mdp_rewards.fingertip_tracking_reward(self.env).mean().item())
 
         # Isaac Lab resets done envs inside env.step() before returning obs/info.
         # Read termination terms from the manager's cached per-step masks so these

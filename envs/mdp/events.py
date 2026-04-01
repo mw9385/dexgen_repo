@@ -425,7 +425,7 @@ def _sample_nearby_goal_index(
         min_dist: minimum fingertip L2 distance between start and goal (m).
             Goals closer than this are filtered out to prevent the policy
             from starting already at the goal (spurious initial success).
-            Default 8 cm >> grasp_success_reward threshold (2 cm).
+            Default 8 cm >> rolling goal success_threshold (1.5 cm).
 
     Strategy (in priority order):
       1. Use graph edges — if start_idx has edge-connected neighbours, sample
@@ -482,8 +482,7 @@ def update_rolling_goal(env, success_threshold: float = 0.015) -> int:
 
     Args:
         success_threshold: distance (m) at which goal is considered reached.
-            5 cm (was 2 cm) — matches grasp_success_reward threshold so the
-            rolling goal triggers as soon as the bonus fires.
+            1.5 cm — strict threshold for goal transition.
 
     Returns:
         Number of envs whose goal was updated this step.
@@ -504,6 +503,9 @@ def update_rolling_goal(env, success_threshold: float = 0.015) -> int:
     cur_fps = fingertip_positions_in_object_frame(env)        # (N, F*3)
     dist = (cur_fps - goal_fps_flat).reshape(env.num_envs, nf, 3)
     per_tip_dist = torch.norm(dist, dim=-1)                   # (N, F)
+    # Fingertip-only check (DexterityGen §3.2): since fingertips are
+    # in object frame, reaching goal fingertip positions implicitly
+    # requires correct object pose.
     success_mask = (per_tip_dist < success_threshold).all(dim=-1)  # (N,)
 
     success_ids = success_mask.nonzero(as_tuple=False).squeeze(-1)
