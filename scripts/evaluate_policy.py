@@ -75,6 +75,10 @@ def parse_args():
     args = p.parse_args(raw_args)
     if args.grasp_graph is None:
         args.grasp_graph = ["data/grasp_graph.pkl"]
+    # Attributes expected by build_rl_games_config but not needed here
+    args.resume = None
+    args.log_dir = "logs/rl/_eval"
+    args.max_iterations = 1
     return args
 
 
@@ -205,6 +209,11 @@ def main():
     cfg["params"]["load_checkpoint"] = True
     cfg["params"]["load_path"] = str(checkpoint_path)
     cfg["params"]["config"]["num_actors"] = args.num_envs
+    # Disable tensorboard logging — eval results are printed to stdout
+    cfg["params"]["config"]["print_stats"] = False
+    cfg["params"]["config"]["log_dir"] = ""
+    cfg["params"]["config"].pop("save_frequency", None)
+    cfg["params"]["config"].pop("save_best_after", None)
 
     # ── Load policy ──
     runner = Runner(IsaacAlgoObserver())
