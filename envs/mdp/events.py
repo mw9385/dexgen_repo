@@ -241,17 +241,10 @@ def reset_to_random_grasp(
     # ------------------------------------------------------------------
     # 2. Set object / robot initial state.
     #
-    #    Always use fingertip-driven placement (_place_object_in_hand):
-    #    1. Place wrist at nominal position above object (canonical offset)
-    #    2. Set joints to stored grasp configuration
-    #    3. Place object at fingertip centroid → object enclosed by fingers
-    #    4. Refine joints to better match fingertip targets
-    #    5. Re-place object at refined fingertip centroid
-    #
-    #    This avoids the "object at wrist" artifact that occurs when
-    #    object_pos_hand (stored relative to wrist root) is near-zero because
-    #    the Shadow Hand palm faces sideways in the default orientation and
-    #    the fingertip centroid ends up near the wrist root during refinement.
+    #    1. Place object at canonical position (small jitter)
+    #    2. Place wrist at nominal offset, orientation from DexGraspNet
+    #    3. Set joints to DexGraspNet joint_angles
+    #    4. Place object at fingertip centroid (rigid alignment)
     # ------------------------------------------------------------------
     has_exact_pose = any(
         pos is not None and quat is not None
@@ -259,9 +252,9 @@ def reset_to_random_grasp(
     )
     has_joints = any(j is not None for j in start_joints_list)
 
-    # Always: object at canonical pose, wrist at nominal position above object
+    # Object at canonical pose, wrist orientation from DexGraspNet grasp data
     _randomise_object_pose(env, env_ids)
-    _randomise_wrist_pose(env, env_ids)
+    _randomise_wrist_pose(env, env_ids, object_quat_hand_list=start_object_quat_hand_list)
 
     if has_joints:
         _set_robot_joints_direct(env, env_ids, start_joints_list)
@@ -889,14 +882,18 @@ def _expand_grasp_joint_vector(
 # Wrist randomization
 # ---------------------------------------------------------------------------
 
-def _randomise_wrist_pose(env, env_ids: torch.Tensor):
+def _randomise_wrist_pose(
+    env,
+    env_ids: torch.Tensor,
+    object_quat_hand_list: Optional[list] = None,
+):
     """
     Place the wrist near a nominal grasping pose with only small jitter.
 
-    The previous reset sampled the wrist on a wide hemisphere around the
-    object. That made the reset largely unrelated to the sampled grasp graph
-    node and frequently placed the hand too far away to learn a meaningful
-    start grasp.
+    When object_quat_hand_list is provided (from DexGraspNet), derive the
+    wrist orientation from the stored hand→object quaternion so the hand
+    approaches the object from the direction DexGraspNet optimised for.
+    Falls back to palm-down alignment when no grasp orientation is available.
     """
     robot = env.scene["robot"]
     obj = env.scene["object"]
@@ -914,14 +911,32 @@ def _randomise_wrist_pose(env, env_ids: torch.Tensor):
     if pos_jitter_std > 0.0:
         wrist_pos += torch.randn(n, 3, device=env.device) * pos_jitter_std
 
-    wrist_quat = default_robot_root[:, 3:7]
-    # Choose palm alignment mode from config
-    if bool(cfg.get("align_palm_toward_object", False)):
-        # Refinement mode: palm faces toward object for wrapping grasps
-        wrist_quat = _align_palm_toward_object(env, env_ids, wrist_quat, wrist_pos)
+    # --- Wrist orientation ---
+    # Try to use DexGraspNet's object_quat_hand to derive wrist orientation.
+    # wrist_quat = obj_quat_world * inv(object_quat_hand)
+    has_grasp_quat = (
+        object_quat_hand_list is not None
+        and any(q is not None for q in object_quat_hand_list)
+    )
+    if has_grasp_quat:
+        obj.update(0.0)
+        obj_quat_w = obj.data.root_quat_w[env_ids].clone()
+        wrist_quat = default_robot_root[:, 3:7].clone()
+        for i, oq in enumerate(object_quat_hand_list):
+            if oq is None:
+                # Fallback: palm-down for envs without grasp data
+                wrist_quat[i:i+1] = _align_wrist_palm_down(env, env_ids[i:i+1], wrist_quat[i:i+1])
+                continue
+            oq_t = torch.tensor(oq, device=env.device, dtype=torch.float32).unsqueeze(0)
+            wrist_quat[i:i+1] = _quat_multiply(obj_quat_w[i:i+1], _quat_conjugate(oq_t))
+            wrist_quat[i:i+1] = wrist_quat[i:i+1] / (torch.norm(wrist_quat[i:i+1], dim=-1, keepdim=True) + 1e-8)
     else:
-        # Training/viz mode: palm faces DOWN — hand grasps from above
-        wrist_quat = _align_wrist_palm_down(env, env_ids, wrist_quat)
+        wrist_quat = default_robot_root[:, 3:7]
+        if bool(cfg.get("align_palm_toward_object", False)):
+            wrist_quat = _align_palm_toward_object(env, env_ids, wrist_quat, wrist_pos)
+        else:
+            wrist_quat = _align_wrist_palm_down(env, env_ids, wrist_quat)
+
     rot_std = math.radians(float(cfg.get("wrist_rot_std_deg", 5.0)))
     if rot_std > 0.0:
         wrist_quat = _add_rotation_noise(wrist_quat, rot_std, env.device, n)
