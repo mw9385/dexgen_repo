@@ -94,27 +94,20 @@ try:
     except ImportError:
         from isaaclab_assets import SHADOW_HAND_CFG
 
-    # Force full-visual-mesh USD for proper rendering with skin.
-    _original_usd = str(SHADOW_HAND_CFG.spawn.usd_path)
-    print(f"[ShadowHand] Original USD path: {_original_usd}")
-    # Replace instanceable with full-mesh version
-    if "instanceable" in _original_usd:
-        _new_usd = _original_usd.replace("shadow_hand_instanceable.usd", "shadow_hand.usd")
-    elif _original_usd.startswith("None"):
+    # Resolve Shadow Hand USD path.
+    # Use non-instanceable shadow_hand.usd for proper visual mesh rendering.
+    _shadow_usd = str(SHADOW_HAND_CFG.spawn.usd_path)
+    if _shadow_usd.startswith("None"):
         _S3_ROOT = (
             "https://omniverse-content-production.s3-us-west-2.amazonaws.com"
             "/Assets/Isaac/5.0"
         )
-        _new_usd = f"{_S3_ROOT}/Isaac/Robots/ShadowRobot/ShadowHand/shadow_hand.usd"
-    else:
-        _new_usd = _original_usd
-    if _new_usd != _original_usd:
-        print(f"[ShadowHand] Replaced with: {_new_usd}")
-        SHADOW_HAND_CFG = SHADOW_HAND_CFG.replace(
-            spawn=SHADOW_HAND_CFG.spawn.replace(usd_path=_new_usd)
-        )
-    else:
-        print(f"[ShadowHand] Using default USD (no instanceable detected)")
+        _shadow_usd = f"{_S3_ROOT}/Isaac/Robots/ShadowRobot/ShadowHand/shadow_hand.usd"
+    elif "instanceable" in _shadow_usd:
+        _shadow_usd = _shadow_usd.replace("shadow_hand_instanceable.usd", "shadow_hand.usd")
+    SHADOW_HAND_CFG = SHADOW_HAND_CFG.replace(
+        spawn=SHADOW_HAND_CFG.spawn.replace(usd_path=_shadow_usd)
+    )
 
     _ISAACLAB_AVAILABLE = True
 
