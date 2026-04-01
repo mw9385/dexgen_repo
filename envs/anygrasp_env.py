@@ -108,8 +108,6 @@ try:
     SHADOW_HAND_CFG = SHADOW_HAND_CFG.replace(
         spawn=SHADOW_HAND_CFG.spawn.replace(usd_path=_shadow_usd)
     )
-    print(f"[ShadowHand] Final USD: {SHADOW_HAND_CFG.spawn.usd_path}")
-
     _ISAACLAB_AVAILABLE = True
 
 except ImportError:
@@ -193,7 +191,6 @@ if _ISAACLAB_AVAILABLE:
                 activate_contact_sensors=True,
             ),
         )
-        print(f"[ShadowHand] Scene robot spawn USD: {robot.spawn.usd_path}")
 
         object: RigidObjectCfg = RigidObjectCfg(
             prim_path="{ENV_REGEX_NS}/Object",
