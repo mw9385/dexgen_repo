@@ -19,7 +19,7 @@ env:
     # Goal rewards (func → [0, 1])
     object_pose:        5.0     # exp(-alpha * pose_err)
     finger_joint_goal:  8.0     # exp(-alpha * joint_err)
-    fingertip_tracking: 8.0     # exp(-alpha * tip_dist)
+    fingertip_tracking: 8.0     # exp(-5 * tip_dist), alpha=5 for wider basin
     grasp_success:      50.0    # fraction of tips within 5 cm (gated by 60%)
     fingertip_contact:  0.5     # fraction of tips in contact
     # Style penalty (func → [-1, 0])
