@@ -516,26 +516,38 @@ class _IsaacLabVecEnv:
         self.env = env
         self.num_envs = num_envs
 
-        # Build batch-free spaces so rl_games sees (obs_dim,) not (num_envs, obs_dim)
+        # Build batch-free spaces so rl_games sees (obs_dim,) not (num_envs, obs_dim).
+        # rl_games reads both env.observation_space AND get_env_info() —
+        # everything must be a simple gym.spaces.Box with shape (dim,).
         import gymnasium
         import gym as old_gym
         import numpy as np
 
+        def _strip_batch(shape):
+            return shape[1:] if len(shape) > 1 else shape
+
         raw_obs_space = env.observation_space
+        self._state_space = None
         if isinstance(raw_obs_space, (gymnasium.spaces.Dict, old_gym.spaces.Dict)):
             obs_sp = raw_obs_space.spaces.get("policy", next(iter(raw_obs_space.spaces.values())))
+            critic_sp = raw_obs_space.spaces.get("critic", None)
+            if critic_sp is not None:
+                self._state_space = old_gym.spaces.Box(
+                    low=-np.inf, high=np.inf,
+                    shape=_strip_batch(critic_sp.shape), dtype=np.float32,
+                )
         else:
             obs_sp = raw_obs_space
-        obs_shape = obs_sp.shape[1:] if len(obs_sp.shape) > 1 else obs_sp.shape
 
         raw_act_space = env.action_space
-        act_shape = raw_act_space.shape[1:] if len(raw_act_space.shape) > 1 else raw_act_space.shape
 
         self.observation_space = old_gym.spaces.Box(
-            low=-np.inf, high=np.inf, shape=obs_shape, dtype=np.float32
+            low=-np.inf, high=np.inf,
+            shape=_strip_batch(obs_sp.shape), dtype=np.float32,
         )
         self.action_space = old_gym.spaces.Box(
-            low=-1.0, high=1.0, shape=act_shape, dtype=np.float32
+            low=-1.0, high=1.0,
+            shape=_strip_batch(raw_act_space.shape), dtype=np.float32,
         )
 
     def step(self, actions):
@@ -622,50 +634,12 @@ class _IsaacLabVecEnv:
         pass
 
     def get_env_info(self):
-        import gymnasium
-        import gym as old_gym
-        import numpy as np
-
-        raw_obs_space = self.env.observation_space
-        if isinstance(raw_obs_space, (gymnasium.spaces.Dict, old_gym.spaces.Dict)):
-            obs_space = raw_obs_space.spaces.get(
-                "policy",
-                next(iter(raw_obs_space.spaces.values())),
-            )
-            state_space = raw_obs_space.spaces.get("critic", None)
-        else:
-            obs_space = raw_obs_space
-            state_space = None
-
-        obs_shape = obs_space.shape
-        if len(obs_shape) > 1:
-            obs_shape = obs_shape[1:]
-
-        raw_act_space = self.env.action_space
-        act_shape = raw_act_space.shape
-        if len(act_shape) > 1:
-            act_shape = act_shape[1:]
-
-        obs_space_old = old_gym.spaces.Box(
-            low=-np.inf, high=np.inf, shape=obs_shape, dtype=np.float32
-        )
-        action_space_old = old_gym.spaces.Box(
-            low=-1.0, high=1.0, shape=act_shape, dtype=np.float32
-        )
-
         info = {
-            "action_space": action_space_old,
-            "observation_space": obs_space_old,
+            "action_space": self.action_space,
+            "observation_space": self.observation_space,
         }
-
-        if state_space is not None:
-            state_shape = state_space.shape
-            if len(state_shape) > 1:
-                state_shape = state_shape[1:]
-            info["state_space"] = old_gym.spaces.Box(
-                low=-np.inf, high=np.inf, shape=state_shape, dtype=np.float32
-            )
-
+        if self._state_space is not None:
+            info["state_space"] = self._state_space
         return info
 
 
