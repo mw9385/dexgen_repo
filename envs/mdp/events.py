@@ -444,7 +444,7 @@ def _sample_nearby_goal_index(
     fp_dists[start_idx] = np.inf
 
     # ── Strategy 1: graph edge neighbours with min_dist filter ────────────
-    neighbours = graph.get_neighbors(start_idx)
+    neighbours = np.asarray(graph.get_neighbors(start_idx))
     if len(neighbours) > 0:
         neighbour_dists = fp_dists[neighbours]
         far_enough = neighbours[neighbour_dists >= min_dist]
