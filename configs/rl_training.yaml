@@ -18,7 +18,7 @@ env:
     # All functions output [-1, 1]. Drop/escape → termination (no penalty).
     #
     # r_goal (func → [0, 1])
-    fingertip_tracking: 10.0    # exp(-5 * tip_dist) in object frame
+    fingertip_tracking: 1.0     # exp(-5 * tip_dist) in object frame
     # r_style (func → [-1, 0])
     fingertip_velocity: 0.05
     # r_reg (func → [-1, 0]) — minimal, just smoothing

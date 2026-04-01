@@ -368,7 +368,7 @@ if _ISAACLAB_AVAILABLE:
         # object pose is implicitly required.
         fingertip_tracking = RewTerm(
             func=mdp_rewards.fingertip_tracking_reward,
-            weight=10.0,
+            weight=1.0,
             params={"alpha": 5.0},
         )
 
