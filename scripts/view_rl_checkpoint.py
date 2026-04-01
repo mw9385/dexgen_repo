@@ -45,6 +45,10 @@ def parse_args():
     args = p.parse_args()
     if args.grasp_graph is None:
         args.grasp_graph = ["data/grasp_graph.pkl"]
+    # Attributes expected by build_rl_games_config but not needed here
+    args.resume = None
+    args.log_dir = "logs/rl/_viewer"
+    args.max_iterations = 1
     return args
 
 
