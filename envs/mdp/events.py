@@ -241,10 +241,10 @@ def reset_to_random_grasp(
     # ------------------------------------------------------------------
     # 2. Set object / robot initial state.
     #
-    #    1. Place object at canonical position (small jitter)
-    #    2. Place wrist at nominal offset, orientation from DexGraspNet
-    #    3. Set joints to DexGraspNet joint_angles
-    #    4. Place object at fingertip centroid (rigid alignment)
+    #    1. Place wrist at nominal offset, orientation from DexGraspNet
+    #    2. Set joints to DexGraspNet joint_angles
+    #    3. Place object using DexGraspNet object_pos/quat_hand
+    #       (relative to wrist root), fallback to centroid alignment
     # ------------------------------------------------------------------
     has_exact_pose = any(
         pos is not None and quat is not None
@@ -252,29 +252,39 @@ def reset_to_random_grasp(
     )
     has_joints = any(j is not None for j in start_joints_list)
 
-    # Object at canonical pose, wrist orientation from DexGraspNet grasp data
+    # Wrist: nominal position + DexGraspNet orientation
     _randomise_object_pose(env, env_ids)
     _randomise_wrist_pose(env, env_ids, object_quat_hand_list=start_object_quat_hand_list)
 
+    # Joints from DexGraspNet
     if has_joints:
         _set_robot_joints_direct(env, env_ids, start_joints_list)
     else:
         _set_robot_to_fingertip_config(env, env_ids, start_fps)
 
-    # ------------------------------------------------------------------
-    # 3. Place object at fingertip centroid (object inside the hand).
-    #    After writing root + joints we must update body transforms first.
-    # ------------------------------------------------------------------
+    # Flush wrist + joints so robot.data.root_pos_w is up to date
     robot = env.scene["robot"]
     robot.update(0.0)
 
-    placement_debug = None
-    solve_mean_err, solve_max_err, placement_debug = _place_object_in_hand(env, env_ids, start_fps)
-    # Refine joints to better match the sampled grasp fingertip targets,
-    # then re-place the object at the improved fingertip centroid.
+    # ------------------------------------------------------------------
+    # 3. Place object using DexGraspNet's stored object_pos/quat_hand.
+    #    This places the object at the exact position relative to the wrist
+    #    that DexGraspNet computed, rather than estimating from FK centroid.
+    #    Fall back to centroid alignment for envs without stored pose data.
+    # ------------------------------------------------------------------
+    if has_exact_pose:
+        _set_object_pose_from_grasp(
+            env, env_ids,
+            start_object_pos_hand_list,
+            start_object_quat_hand_list,
+        )
+    else:
+        _place_object_in_hand(env, env_ids, start_fps)
+
+    # IK refinement (currently disabled via config)
     _refine_hand_to_start_grasp(env, env_ids, start_fps)
     robot.update(0.0)
-    solve_mean_err, solve_max_err, placement_debug = _place_object_in_hand(env, env_ids, start_fps)
+
     solve_mean_err, solve_max_err = _measure_grasp_contact_error(env, env_ids, start_fps)
 
     # ------------------------------------------------------------------
