@@ -209,6 +209,11 @@ def main():
     cfg["params"]["load_checkpoint"] = True
     cfg["params"]["load_path"] = str(checkpoint_path)
     cfg["params"]["config"]["num_actors"] = args.num_envs
+    # Disable tensorboard logging — eval results are printed to stdout
+    cfg["params"]["config"]["print_stats"] = False
+    cfg["params"]["config"]["log_dir"] = ""
+    cfg["params"]["config"].pop("save_frequency", None)
+    cfg["params"]["config"].pop("save_best_after", None)
 
     # ── Load policy ──
     runner = Runner(IsaacAlgoObserver())
