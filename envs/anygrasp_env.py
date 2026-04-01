@@ -94,22 +94,20 @@ try:
     except ImportError:
         from isaaclab_assets import SHADOW_HAND_CFG
 
-    # Always use the full-visual-mesh USD (not instanceable which has no skin).
-    _shadow_usd = SHADOW_HAND_CFG.spawn.usd_path
-    _S3_ROOT = (
-        "https://omniverse-content-production.s3-us-west-2.amazonaws.com"
-        "/Assets/Isaac/5.0"
-    )
-    if str(_shadow_usd).startswith("None") or "instanceable" in str(_shadow_usd):
-        SHADOW_HAND_CFG = SHADOW_HAND_CFG.replace(
-            spawn=SHADOW_HAND_CFG.spawn.replace(
-                usd_path=(
-                    f"{_S3_ROOT}/Isaac/Robots/ShadowRobot/ShadowHand/"
-                    "shadow_hand.usd"
-                )
-            )
+    # Resolve Shadow Hand USD path.
+    # Use non-instanceable shadow_hand.usd for proper visual mesh rendering.
+    _shadow_usd = str(SHADOW_HAND_CFG.spawn.usd_path)
+    if _shadow_usd.startswith("None"):
+        _S3_ROOT = (
+            "https://omniverse-content-production.s3-us-west-2.amazonaws.com"
+            "/Assets/Isaac/5.0"
         )
-
+        _shadow_usd = f"{_S3_ROOT}/Isaac/Robots/ShadowRobot/ShadowHand/shadow_hand.usd"
+    elif "instanceable" in _shadow_usd:
+        _shadow_usd = _shadow_usd.replace("shadow_hand_instanceable.usd", "shadow_hand.usd")
+    SHADOW_HAND_CFG = SHADOW_HAND_CFG.replace(
+        spawn=SHADOW_HAND_CFG.spawn.replace(usd_path=_shadow_usd)
+    )
     _ISAACLAB_AVAILABLE = True
 
 except ImportError:
@@ -561,12 +559,7 @@ if _ISAACLAB_AVAILABLE:
 
             if self.reset_refinement is None:
                 self.reset_refinement = {
-                    "enabled": True,
-                    "iterations": 10,   # 3 → 10: more IK steps for tighter contact
-                    "step_gain": 0.6,
-                    "damping": 0.05,
-                    "max_delta": 0.2,
-                    "pos_threshold": 0.003,
+                    "enabled": False,
                 }
 
             # Finger link subsets — Shadow Hand Isaac Lab link names.
