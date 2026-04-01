@@ -243,13 +243,8 @@ def reset_to_random_grasp(
     #
     #    1. Place wrist at nominal offset, orientation from DexGraspNet
     #    2. Set joints to DexGraspNet joint_angles
-    #    3. Place object using DexGraspNet object_pos/quat_hand
-    #       (relative to wrist root), fallback to centroid alignment
+    #    3. Place object at fingertip centroid (rigid alignment)
     # ------------------------------------------------------------------
-    has_exact_pose = any(
-        pos is not None and quat is not None
-        for pos, quat in zip(start_object_pos_hand_list, start_object_quat_hand_list)
-    )
     has_joints = any(j is not None for j in start_joints_list)
 
     # Wrist: nominal position + DexGraspNet orientation
@@ -262,29 +257,15 @@ def reset_to_random_grasp(
     else:
         _set_robot_to_fingertip_config(env, env_ids, start_fps)
 
-    # Flush wrist + joints so robot.data.root_pos_w is up to date
+    # Flush wrist + joints, then place object at fingertip centroid
     robot = env.scene["robot"]
     robot.update(0.0)
 
-    # ------------------------------------------------------------------
-    # 3. Place object using DexGraspNet's stored object_pos/quat_hand.
-    #    This places the object at the exact position relative to the wrist
-    #    that DexGraspNet computed, rather than estimating from FK centroid.
-    #    Fall back to centroid alignment for envs without stored pose data.
-    # ------------------------------------------------------------------
-    if has_exact_pose:
-        _set_object_pose_from_grasp(
-            env, env_ids,
-            start_object_pos_hand_list,
-            start_object_quat_hand_list,
-        )
-    else:
-        _place_object_in_hand(env, env_ids, start_fps)
-
+    _place_object_in_hand(env, env_ids, start_fps)
     # IK refinement (currently disabled via config)
     _refine_hand_to_start_grasp(env, env_ids, start_fps)
     robot.update(0.0)
-
+    _place_object_in_hand(env, env_ids, start_fps)
     solve_mean_err, solve_max_err = _measure_grasp_contact_error(env, env_ids, start_fps)
 
     # ------------------------------------------------------------------
