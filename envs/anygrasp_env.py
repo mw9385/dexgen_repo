@@ -94,14 +94,13 @@ try:
     except ImportError:
         from isaaclab_assets import SHADOW_HAND_CFG
 
-    # Patch USD path if the nucleus asset root resolved to None.
-    # This happens in headless containers without a running Nucleus server.
+    # Always use the full-visual-mesh USD (not instanceable which has no skin).
     _shadow_usd = SHADOW_HAND_CFG.spawn.usd_path
-    if str(_shadow_usd).startswith("None"):
-        _S3_ROOT = (
-            "https://omniverse-content-production.s3-us-west-2.amazonaws.com"
-            "/Assets/Isaac/5.0"
-        )
+    _S3_ROOT = (
+        "https://omniverse-content-production.s3-us-west-2.amazonaws.com"
+        "/Assets/Isaac/5.0"
+    )
+    if str(_shadow_usd).startswith("None") or "instanceable" in str(_shadow_usd):
         SHADOW_HAND_CFG = SHADOW_HAND_CFG.replace(
             spawn=SHADOW_HAND_CFG.spawn.replace(
                 usd_path=(
@@ -180,8 +179,8 @@ if _ISAACLAB_AVAILABLE:
         robot: ArticulationCfg = SHADOW_HAND_CFG.replace(
             prim_path="{ENV_REGEX_NS}/ShadowHand",
             init_state=ArticulationCfg.InitialStateCfg(
-                pos=(0.0, 0.0, 0.35),     # wrist height
-                rot=(1.0, 0.0, 0.0, 0.0), # identity — palm faces DOWN
+                pos=(0.0, 0.0, 0.45),     # wrist above object
+                rot=(1.0, 0.0, 0.0, 0.0), # aligned by _align_wrist_palm_down at reset
                 joint_pos={
                     "robot0_THJ4": 0.5,   # thumb rotation: natural resting pose
                     "robot0_THJ3": 0.3,
@@ -207,7 +206,7 @@ if _ISAACLAB_AVAILABLE:
                 visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.8, 0.2, 0.2)),
             ),
             init_state=RigidObjectCfg.InitialStateCfg(
-                pos=(0.0, 0.0, 0.4), rot=(1.0, 0.0, 0.0, 0.0),
+                pos=(0.0, 0.0, 0.035), rot=(1.0, 0.0, 0.0, 0.0),
             ),
         )
 

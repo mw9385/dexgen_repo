@@ -920,8 +920,8 @@ def _randomise_wrist_pose(env, env_ids: torch.Tensor):
         # Refinement mode: palm faces toward object for wrapping grasps
         wrist_quat = _align_palm_toward_object(env, env_ids, wrist_quat, wrist_pos)
     else:
-        # Training/viz mode: palm faces UP so hand supports object from below
-        wrist_quat = _align_wrist_palm_up(env, env_ids, wrist_quat)
+        # Training/viz mode: palm faces DOWN — hand grasps from above
+        wrist_quat = _align_wrist_palm_down(env, env_ids, wrist_quat)
     rot_std = math.radians(float(cfg.get("wrist_rot_std_deg", 5.0)))
     if rot_std > 0.0:
         wrist_quat = _add_rotation_noise(wrist_quat, rot_std, env.device, n)
@@ -948,7 +948,7 @@ def _sample_wrist_pose_world(
         wrist_pos = wrist_pos + torch.randn(n, 3, device=env.device) * pos_jitter_std
 
     if apply_noise and bool(cfg.get("align_palm_up", False)):
-        wrist_quat = _align_wrist_palm_up(env, env_ids, wrist_quat)
+        wrist_quat = _align_wrist_palm_down(env, env_ids, wrist_quat)
 
     rot_std = math.radians(float(cfg.get("wrist_rot_std_deg", 5.0)))
     if apply_noise and rot_std > 0.0:
@@ -1106,13 +1106,13 @@ def _set_robot_root_pose_from_root_frame_grasp_pose(
     _set_robot_root_pose(env, env_ids, target_root_pos_w, target_root_quat_w)
 
 
-def _align_wrist_palm_up(env, env_ids: torch.Tensor, wrist_quat: torch.Tensor) -> torch.Tensor:
-    """Legacy: align palm normal to world +Z (upward). Causes object to rest on palm."""
+def _align_wrist_palm_down(env, env_ids: torch.Tensor, wrist_quat: torch.Tensor) -> torch.Tensor:
+    """Align palm normal to world -Z (downward). Hand grasps from above."""
     robot = env.scene["robot"]
     palm_normal_local = _get_local_palm_normal(robot, env).unsqueeze(0).expand(len(env_ids), 3)
     palm_normal_world = quat_apply(wrist_quat, palm_normal_local)
-    target_up = torch.tensor([0.0, 0.0, 1.0], device=env.device).expand_as(palm_normal_world)
-    correction = _quat_from_two_vectors(palm_normal_world, target_up)
+    target_down = torch.tensor([0.0, 0.0, -1.0], device=env.device).expand_as(palm_normal_world)
+    correction = _quat_from_two_vectors(palm_normal_world, target_down)
     return _quat_multiply(correction, wrist_quat)
 
 
