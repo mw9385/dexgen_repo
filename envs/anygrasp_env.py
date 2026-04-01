@@ -99,7 +99,7 @@ try:
     print(f"[ShadowHand] Original USD path: {_original_usd}")
     # Replace instanceable with full-mesh version
     if "instanceable" in _original_usd:
-        _new_usd = _original_usd.replace("shadow_hand_instanceable.usd", "shadow_hand.usd")
+        _new_usd = _original_usd.replace("shadow_hand_instanceable.usd", "shadow_hand_visual.usd")
     elif _original_usd.startswith("None"):
         _S3_ROOT = (
             "https://omniverse-content-production.s3-us-west-2.amazonaws.com"
