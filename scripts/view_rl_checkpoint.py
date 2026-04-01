@@ -34,7 +34,6 @@ def parse_args():
     )
     p.add_argument("--num_envs", type=int, default=16, help="Number of environments to simulate")
     p.add_argument("--num_steps", type=int, default=0, help="Optional max number of sim steps (0 = run until window closed)")
-    p.add_argument("--device", type=str, default="cuda:0")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument(
         "--config",

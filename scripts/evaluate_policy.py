@@ -60,7 +60,6 @@ def parse_args():
     p.add_argument("--deterministic", action="store_true", default=True,
                    help="Use deterministic actions (default: True)")
     p.add_argument("--no-deterministic", dest="deterministic", action="store_false")
-    p.add_argument("--device", type=str, default="cuda:0")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument(
         "--config", type=str,
