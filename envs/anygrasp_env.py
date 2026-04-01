@@ -514,6 +514,8 @@ if _ISAACLAB_AVAILABLE:
             super().__post_init__()
             self.sim.dt = 1.0 / 120.0
             self.sim.render_interval = self.decimation
+            # Increase PhysX GPU buffers for large num_envs (prevents patch buffer overflow)
+            self.sim.physx.gpu_max_rigid_patch_count = 4 * self.scene.num_envs * 1024
 
             # Build multi-object spawner.
             # Priority: explicit object_pool_specs > default diverse pool.
