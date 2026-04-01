@@ -355,103 +355,89 @@ if _ISAACLAB_AVAILABLE:
 if _ISAACLAB_AVAILABLE:
     @configclass
     class AnyGraspRewardsCfg:
-        # ── Goal-related rewards ──────────────────────────────────────
-        # Object pose: exp(-5*d_pos - 2*d_rot) ∈ (0,1]
-        #   weight=5.0.  In AnyGrasp-to-AnyGrasp the object pose changes
-        #   somewhat but joint config changes more → keep weight moderate.
+        # ══════════════════════════════════════════════════════════════
+        # All reward functions output values in [-1, 1].
+        # Weights are always POSITIVE — the sign comes from the function.
+        #   Goal rewards:    func ∈ [0, 1]   →  weight * func  ≥ 0
+        #   Penalties:       func ∈ [-1, 0]  →  weight * func  ≤ 0
+        #   Contact reward:  func ∈ [0, 1]   →  weight * func  ≥ 0
+        # ══════════════════════════════════════════════════════════════
+
+        # ── Goal-related rewards (func → [0, 1]) ─────────────────────
         object_pose = RewTerm(
             func=mdp_rewards.object_pose_goal_reward,
             weight=5.0,
             params={"alpha_pos": 5.0, "alpha_orn": 2.0},
         )
-        # Joint-space goal: exp(-2*||dq||/sqrt(24)) ∈ (0,1]
-        #   weight=8.0 — main dense signal for finger repositioning.
-        #   Positive exponential: moving toward goal is always profitable.
-        #   At start (||dq||~2rad): ~0.55 → at goal: 1.0 (Δ=+0.45 per step)
         finger_joint_goal = RewTerm(
             func=mdp_rewards.finger_joint_goal_reward,
             weight=8.0,
             params={"alpha_hand": 2.0},
         )
-        # Fingertip tracking: exp(-alpha*dist) ∈ (0,1], averaged over fingertips.
-        #   alpha=10 (was 20): wider basin so reward is meaningful at 5-10 cm away.
-        #   At 5cm: exp(-0.5)=0.61 (was exp(-1.0)=0.37) → stronger early gradient.
-        #   weight=8.0 — same weight as joint goal, complementary signal.
         fingertip_tracking = RewTerm(
             func=mdp_rewards.fingertip_tracking_reward,
             weight=8.0,
             params={"alpha": 10.0},
         )
-        # Soft grasp success: fraction_in + all_in_bonus ∈ [0, 2].
-        #   threshold=5cm (was 3cm): easier to trigger, especially for 5-finger hands.
-        #   min_fraction=0.6: at least 3/5 fingers must be in range.
-        #   reward fires as soon as 3/5 fingertips reach threshold, max at 5/5.
-        #   weight=125 (was 250): output range is now [0,2] instead of [0,1],
-        #   so effective max reward is 125*2=250 — same nominal peak value.
+        # Soft grasp success: fraction of tips within threshold ∈ [0, 1].
+        # weight=50 → peak reward when all 5 tips within 5 cm.
         grasp_success = RewTerm(
             func=mdp_rewards.grasp_success_reward,
-            weight=125.0,
+            weight=50.0,
             params={"threshold": 0.05, "min_fraction": 0.6},
         )
-        # --- Style reward (DexGen paper: fingertip velocity) ---
-        # weight -0.5→-0.1: now uses mean-over-fingers (not sum), so
-        # lowering the weight prevents over-penalising necessary motion.
-        fingertip_velocity = RewTerm(
-            func=mdp_rewards.fingertip_velocity_penalty,
-            weight=-0.1,
-        )
-        # --- Contact reward ---
+
+        # ── Contact reward (func → [0, 1]) ───────────────────────────
         fingertip_contact = RewTerm(
             func=mdp_rewards.fingertip_contact_reward,
-            weight=2.0,
+            weight=0.5,
         )
-        # --- Regularization ---
+
+        # ── Style penalty (func → [-1, 0]) ───────────────────────────
+        fingertip_velocity = RewTerm(
+            func=mdp_rewards.fingertip_velocity_penalty,
+            weight=0.1,
+        )
+
+        # ── Regularization (func → [-1, 0]) ──────────────────────────
         action_scale = RewTerm(
             func=mdp_rewards.action_scale_penalty,
-            weight=-0.001,
+            weight=0.001,
         )
-        # torque/work now use mean-over-joints (not sum), so weights are
-        # re-calibrated to produce comparable per-step magnitudes:
-        #   old: -0.002 * sum(tau^2, 24dof) ~= -0.002 * 24 * mean(tau^2)
-        #   new: -0.05  * mean(tau^2)        (same effective scale)
         torque = RewTerm(
             func=mdp_rewards.applied_torque_penalty,
-            weight=-0.05,
+            weight=0.05,
         )
         mechanical_work = RewTerm(
             func=mdp_rewards.mechanical_work_penalty,
-            weight=-0.02,
+            weight=0.02,
         )
         action_rate = RewTerm(
             func=mdp_rewards.action_rate_penalty,
-            weight=-0.01,
+            weight=0.01,
         )
-        # --- Stability / safety ---
-        # Softened: object_velocity was -4.4/step after zero-action → swamped goal reward.
-        # -0.1 weight + wider thresholds (lin=0.2m/s, ang=2.0rad/s) keeps safety signal
-        # without dominating goal-related positives.
+
+        # ── Safety penalties (func → [-1, 0] or {-1, 0}) ─────────────
         object_velocity = RewTerm(
             func=mdp_rewards.object_velocity_penalty,
-            weight=-0.1,
-            params={"lin_thresh": 0.2, "ang_thresh": 2.0},
+            weight=0.1,
         )
+        # Drop/escape: binary {-1, 0}. weight=20/10 → significant but
+        # no longer dwarfs dense goal rewards (~5-8 per step).
         object_drop = RewTerm(
             func=mdp_rewards.object_drop_penalty,
-            weight=-100.0,
+            weight=20.0,
             params={"min_height": 0.2},
         )
         object_left_hand = RewTerm(
             func=mdp_rewards.object_left_hand_penalty,
-            weight=-50.0,
+            weight=10.0,
             params={"max_dist": 0.20},
         )
         joint_limit = RewTerm(
             func=mdp_rewards.joint_limit_penalty,
-            weight=-0.1,
+            weight=0.1,
         )
-        # wrist_height removed: min_height=0.1 is never triggered when the
-        # hand spawns at z=0.6; wrist escape is already handled by the
-        # termination the user added for wrist going too high.
 
 
 # ---------------------------------------------------------------------------
