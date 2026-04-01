@@ -377,14 +377,14 @@ if _ISAACLAB_AVAILABLE:
         fingertip_tracking = RewTerm(
             func=mdp_rewards.fingertip_tracking_reward,
             weight=8.0,
-            params={"alpha": 10.0},
+            params={"alpha": 5.0},
         )
         # Soft grasp success: fraction of tips within threshold ∈ [0, 1].
         # weight=50 → peak reward when all 5 tips within 5 cm.
         grasp_success = RewTerm(
             func=mdp_rewards.grasp_success_reward,
             weight=50.0,
-            params={"threshold": 0.05, "min_fraction": 0.6},
+            params={"threshold": 0.02, "min_fraction": 1.0},
         )
 
         # ── Contact reward (func → [0, 1]) ───────────────────────────

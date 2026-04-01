@@ -416,7 +416,7 @@ def _sample_start_and_nn_goal(
 
 def _sample_nearby_goal_index(
     graph, start_idx: int, rng: np.random.Generator,
-    top_k: int = 5, min_dist: float = 0.06,
+    top_k: int = 5, min_dist: float = 0.08,
 ) -> int:
     """
     Sample a goal grasp index that is reachable from start_idx.
@@ -425,7 +425,7 @@ def _sample_nearby_goal_index(
         min_dist: minimum fingertip L2 distance between start and goal (m).
             Goals closer than this are filtered out to prevent the policy
             from starting already at the goal (spurious initial success).
-            Default 6 cm > grasp_success_reward threshold (5 cm).
+            Default 8 cm >> grasp_success_reward threshold (2 cm).
 
     Strategy (in priority order):
       1. Use graph edges — if start_idx has edge-connected neighbours, sample
@@ -470,7 +470,7 @@ def _sample_nearby_goal_index(
 # Rolling goal: update goal when current goal is achieved mid-episode
 # ---------------------------------------------------------------------------
 
-def update_rolling_goal(env, success_threshold: float = 0.05) -> int:
+def update_rolling_goal(env, success_threshold: float = 0.015) -> int:
     """
     Called every step. For each env where ALL fingertips are within
     *success_threshold* of the current goal, select a new nearby goal

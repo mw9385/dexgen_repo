@@ -116,12 +116,12 @@ def fingertip_tracking_reward(env, alpha: float = 20.0) -> torch.Tensor:
 
 def grasp_success_reward(
     env,
-    threshold: float = 0.05,
-    min_fraction: float = 0.6,
+    threshold: float = 0.02,
+    min_fraction: float = 1.0,
 ) -> torch.Tensor:
     """
     Soft grasp-success: fraction of fingertips within threshold.
-    Gated by min_fraction to suppress noise.
+    Gated by min_fraction (1.0 = ALL fingertips must be within threshold).
     Returns: (N,) in [0, 1]
     """
     nf = _get_num_fingers(env)
