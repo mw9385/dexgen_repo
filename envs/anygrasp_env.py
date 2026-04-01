@@ -94,14 +94,13 @@ try:
     except ImportError:
         from isaaclab_assets import SHADOW_HAND_CFG
 
-    # Patch USD path if the nucleus asset root resolved to None.
-    # This happens in headless containers without a running Nucleus server.
+    # Always use the full-visual-mesh USD (not instanceable which has no skin).
     _shadow_usd = SHADOW_HAND_CFG.spawn.usd_path
-    if str(_shadow_usd).startswith("None"):
-        _S3_ROOT = (
-            "https://omniverse-content-production.s3-us-west-2.amazonaws.com"
-            "/Assets/Isaac/5.0"
-        )
+    _S3_ROOT = (
+        "https://omniverse-content-production.s3-us-west-2.amazonaws.com"
+        "/Assets/Isaac/5.0"
+    )
+    if str(_shadow_usd).startswith("None") or "instanceable" in str(_shadow_usd):
         SHADOW_HAND_CFG = SHADOW_HAND_CFG.replace(
             spawn=SHADOW_HAND_CFG.spawn.replace(
                 usd_path=(
