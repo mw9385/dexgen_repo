@@ -56,9 +56,9 @@ def parse_args():
     )
     AppLauncher.add_app_launcher_args(p)
 
-    # Default to headless
+    # Default to headless unless user explicitly passes --headless (which is a flag, not negatable)
     raw_args = sys.argv[1:]
-    if "--headless" not in raw_args and "--no-headless" not in raw_args:
+    if "--headless" not in raw_args:
         raw_args.append("--headless")
 
     args = p.parse_args(raw_args)
