@@ -597,7 +597,7 @@ class _IsaacLabVecEnv:
         n_updated = mdp_events.update_rolling_goal(self.env)
 
         info = dict(info) if isinstance(info, dict) else {}
-        info["success_ratio"] = float(mdp_rewards.fingertip_tracking_reward(self.env).mean().item())
+        info["success_ratio"] = n_updated / self.env.num_envs
 
         # Isaac Lab resets done envs inside env.step() before returning obs/info.
         # Read termination terms from the manager's cached per-step masks so these
