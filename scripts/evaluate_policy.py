@@ -5,10 +5,10 @@ Runs the policy in the AnyGrasp environment and reports quantitative metrics:
   - Per-episode success rate (fingertip proximity to goal)
   - Mean fingertip tracking error
   - Rolling goal update count
-  - Reward breakdown by term
   - Object drop / left-hand termination rates
 
-Can run headless (default) for fast evaluation, or with viewer for visual inspection.
+Bypasses rl_games Runner/Player entirely — loads MLP weights directly
+from checkpoint. No tensorboard logging, results printed to stdout.
 
 Usage:
     # Headless evaluation (fast, metrics only)
@@ -20,12 +20,6 @@ Usage:
     /isaac-sim/python.sh scripts/evaluate_policy.py \
         --checkpoint logs/rl/.../model_30000.pt \
         --num_episodes 20 --no-headless
-
-    # Custom grasp graph
-    /isaac-sim/python.sh scripts/evaluate_policy.py \
-        --checkpoint logs/rl/.../model_30000.pt \
-        --grasp_graph data/grasp_graph.pkl \
-        --num_episodes 50
 """
 
 from __future__ import annotations
@@ -47,19 +41,14 @@ def parse_args():
     p = argparse.ArgumentParser(description="Evaluate a trained Stage 1 RL checkpoint")
     p.add_argument(
         "--checkpoint", type=str, required=True,
-        help="Path to rl_games checkpoint (model_*.pt)",
+        help="Path to rl_games checkpoint (.pt / .pth)",
     )
     p.add_argument(
         "--grasp_graph", action="append", default=None,
         help="Path to GraspGraph PKL. Repeat for multiple.",
     )
-    p.add_argument("--num_envs", type=int, default=64,
-                   help="Parallel environments")
-    p.add_argument("--num_episodes", type=int, default=100,
-                   help="Total episodes to evaluate")
-    p.add_argument("--deterministic", action="store_true", default=True,
-                   help="Use deterministic actions (default: True)")
-    p.add_argument("--no-deterministic", dest="deterministic", action="store_false")
+    p.add_argument("--num_envs", type=int, default=64)
+    p.add_argument("--num_episodes", type=int, default=100)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument(
         "--config", type=str,
@@ -75,10 +64,6 @@ def parse_args():
     args = p.parse_args(raw_args)
     if args.grasp_graph is None:
         args.grasp_graph = ["data/grasp_graph.pkl"]
-    # Attributes expected by build_rl_games_config but not needed here
-    args.resume = None
-    args.log_dir = "logs/rl/_eval"
-    args.max_iterations = 1
     return args
 
 
@@ -100,26 +85,17 @@ def main():
     except Exception:
         pass
 
-    try:
-        from isaaclab.envs import ManagerBasedRLEnv
-        from rl_games.common import env_configurations, vecenv
-        from rl_games.common.algo_observer import IsaacAlgoObserver
-        from rl_games.common.player import BasePlayer
-        from rl_games.torch_runner import Runner
-    except ImportError as exc:
-        print(f"ERROR: missing dependency: {exc}")
-        sim_app.close()
-        sys.exit(1)
-
+    from isaaclab.envs import ManagerBasedRLEnv
     from envs import AnyGraspEnvCfg, register_anygrasp_env
     from scripts.train_rl import (
-        _IsaacLabVecEnv,
         _resolve_grasp_graph_arg,
-        build_rl_games_config,
         load_config,
         apply_env_config,
         apply_dr_config,
     )
+    from scripts.view_rl_checkpoint import PolicyMLP, _to_policy_obs
+    from envs.mdp import events as mdp_events
+    from envs.mdp import rewards as mdp_rewards
     from grasp_generation.graph_io import load_merged_graph
 
     checkpoint_path = Path(args.checkpoint)
@@ -191,44 +167,18 @@ def main():
     apply_env_config(env_cfg, cfg_file.get("env", {}))
     apply_dr_config(env_cfg, env_dr_clean)
 
-    def create_env(**kwargs):
-        return ManagerBasedRLEnv(env_cfg)
+    env = ManagerBasedRLEnv(env_cfg)
 
-    env_configurations.register(
-        "rlgpu",
-        {"vecenv_type": "RLGPU", "env_creator": create_env},
-    )
-    vecenv.register(
-        "RLGPU",
-        lambda config_name, num_actors, **kwargs: _IsaacLabVecEnv(
-            create_env(), num_actors
-        ),
-    )
+    # ── Load policy directly from checkpoint ──
+    device = env.device
+    ckpt = torch.load(str(checkpoint_path), map_location=device, weights_only=False)
+    policy = PolicyMLP(ckpt).to(device).eval()
 
-    cfg = build_rl_games_config(args, cfg_file)
-    cfg["params"]["load_checkpoint"] = True
-    cfg["params"]["load_path"] = str(checkpoint_path)
-    cfg["params"]["config"]["num_actors"] = args.num_envs
-    # Disable tensorboard logging — eval results are printed to stdout
-    cfg["params"]["config"]["print_stats"] = False
-    cfg["params"]["config"]["log_dir"] = ""
-    cfg["params"]["config"].pop("save_frequency", None)
-    cfg["params"]["config"].pop("save_best_after", None)
-
-    # ── Load policy ──
-    runner = Runner(IsaacAlgoObserver())
-    runner.load(cfg)
-    runner.reset()
-
-    agent: BasePlayer = runner.create_player()
-    agent.restore(str(checkpoint_path))
-    agent.reset()
-
-    env = agent.env
-    obs = env.reset()
-    if agent.is_rnn:
-        agent.init_rnn()
-    _ = agent.get_batch_size(obs["obs"] if isinstance(obs, dict) else obs, 1)
+    # ── Init ──
+    obs, _ = env.reset()
+    num_dof = env.action_manager.action.shape[-1]
+    env.extras["last_action"] = torch.zeros(args.num_envs, num_dof, device=device)
+    env.extras["current_action"] = torch.zeros(args.num_envs, num_dof, device=device)
 
     # ── Metric accumulators ──
     total_episodes = 0
@@ -237,7 +187,6 @@ def main():
     total_drops = 0
     total_left_hand = 0
     fingertip_errors = []
-    episode_rewards = []
     step_count = 0
 
     print(f"\n{'='*60}")
@@ -247,7 +196,7 @@ def main():
     print(f"  Grasp graph(s): {', '.join(grasp_graph_paths)}")
     print(f"  Num envs:       {args.num_envs}")
     print(f"  Target episodes:{args.num_episodes}")
-    print(f"  Deterministic:  {args.deterministic}")
+    print(f"  Policy params:  {sum(p.numel() for p in policy.parameters())}")
     print(f"  DR:             disabled (clean eval)")
     print(f"{'='*60}\n")
 
@@ -255,49 +204,45 @@ def main():
 
     while total_episodes < args.num_episodes and sim_app.is_running():
         with torch.inference_mode():
-            obs_t = agent.obs_to_torch(obs)
-            actions = agent.get_action(obs_t, is_deterministic=args.deterministic)
-            obs, rew, dones, info = env.step(actions)
+            obs_tensor = _to_policy_obs(obs)
+            actions = policy(obs_tensor).clamp(-1.0, 1.0)
 
-            if agent.is_rnn and agent.states is not None and len(dones) > 0:
-                done_mask = dones.bool() if isinstance(dones, torch.Tensor) else torch.as_tensor(dones, dtype=torch.bool)
-                for state in agent.states:
-                    state[:, done_mask, :] = 0.0
+            env.extras["last_action"] = env.extras["current_action"].clone()
+            env.extras["current_action"] = actions.clone()
+
+            obs, rew, terminated, truncated, info = env.step(actions)
+            done = terminated | truncated
+
+            n_updated = mdp_events.update_rolling_goal(env, success_threshold=0.02)
+            total_goal_updates += n_updated
 
         step_count += 1
 
-        # Track per-step info
-        if isinstance(info, dict):
-            total_goal_updates += info.get("rolling_goal_updates", 0)
+        # Count done episodes
+        n_done = int(done.sum().item())
+        if n_done > 0:
+            total_episodes += n_done
 
-            # Count completed episodes from done signals
-            if isinstance(dones, torch.Tensor):
-                n_done = int(dones.sum().item())
-            else:
-                n_done = int(np.sum(dones))
+            sr = float(mdp_rewards.grasp_success_reward(env).mean().item())
+            total_success += sr * n_done
 
-            if n_done > 0:
-                total_episodes += n_done
+            # Termination stats
+            term_manager = getattr(env, "termination_manager", None)
+            if term_manager is not None:
+                active = set(getattr(term_manager, "active_terms", []))
+                if "object_drop" in active:
+                    total_drops += float(term_manager.get_term("object_drop").float().mean().item()) * n_done
+                if "object_left_hand" in active:
+                    total_left_hand += float(term_manager.get_term("object_left_hand").float().mean().item()) * n_done
 
-                sr = info.get("success_ratio", 0.0)
-                total_success += sr * n_done
+        # Track fingertip error
+        target_fp = env.extras.get("target_fingertip_pos")
+        current_fp = env.extras.get("current_fingertip_pos")
+        if target_fp is not None and current_fp is not None:
+            err = (target_fp - current_fp).norm(dim=-1).mean().item()
+            fingertip_errors.append(err)
 
-                dr = info.get("drop_ratio", 0.0)
-                total_drops += dr * n_done
-
-                lr = info.get("left_hand_ratio", 0.0)
-                total_left_hand += lr * n_done
-
-            # Track fingertip error from observations
-            inner_env = env.env if hasattr(env, "env") else env
-            if hasattr(inner_env, "extras"):
-                target_fp = inner_env.extras.get("target_fingertip_pos")
-                current_fp = inner_env.extras.get("current_fingertip_pos")
-                if target_fp is not None and current_fp is not None:
-                    err = (target_fp - current_fp).norm(dim=-1).mean().item()
-                    fingertip_errors.append(err)
-
-        # Progress print
+        # Progress
         if total_episodes > 0 and total_episodes % (args.num_envs * 5) < args.num_envs:
             elapsed = time.time() - t_start
             sr = total_success / max(total_episodes, 1)
@@ -331,10 +276,7 @@ def main():
     print(f"  Left-hand rate:          {left_hand_rate:.1%}")
     print(f"{'='*60}\n")
 
-    try:
-        env.env.close()
-    except Exception:
-        pass
+    env.close()
     sim_app.close()
 
 
