@@ -95,20 +95,19 @@ def generate_grasps(spec, args, num_fingers, num_dof, hand_name, device):
         mesh=spec.mesh,
         shape_type=spec.shape_type,
         size=spec.size,
-        w_dis=opt_cfg.get("w_dis", 500.0),
+        w_dis=opt_cfg.get("w_dis", 100.0),
         w_pen=opt_cfg.get("w_pen", 100.0),
         w_spen=opt_cfg.get("w_spen", 10.0),
         w_joints=opt_cfg.get("w_joints", 1.0),
-        w_pose=opt_cfg.get("w_pose", 10.0),
         n_iter=args.num_iterations,
         batch_size=args.batch_size,
         n_contact=args.n_contact,
         step_size=opt_cfg.get("step_size", 0.005),
         starting_temperature=opt_cfg.get("starting_temperature", 18.0),
         temperature_decay=opt_cfg.get("temperature_decay", 0.95),
-        thres_fc=opt_cfg.get("thres_fc", 3.0),
+        thres_fc=opt_cfg.get("thres_fc", 0.3),
         thres_dis=opt_cfg.get("thres_dis", 0.005),
-        thres_pen=opt_cfg.get("thres_pen", 0.03),
+        thres_pen=opt_cfg.get("thres_pen", 0.001),
         device=device,
     )
 
@@ -198,8 +197,8 @@ def main():
     args.num_grasps = int(args.num_grasps or cfg_file.get("rrt", {}).get("target_size", 300))
     args.min_quality = float(args.min_quality or nfo_cfg.get("min_quality", 0.005))
     args.mu = float(args.mu or nfo_cfg.get("mu", 0.5))
-    args.num_iterations = int(args.num_iterations or opt_cfg.get("num_iterations", 5000))
-    args.batch_size = int(args.batch_size or opt_cfg.get("batch_size", 512))
+    args.num_iterations = int(args.num_iterations or opt_cfg.get("num_iterations", 6000))
+    args.batch_size = int(args.batch_size or opt_cfg.get("batch_size", 500))
     args.n_contact = int(args.n_contact or opt_cfg.get("n_contact", 4))
     args.output_dir = args.output_dir or cfg_file.get("output_dir", "data")
 
