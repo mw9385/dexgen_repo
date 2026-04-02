@@ -369,7 +369,7 @@ if _ISAACLAB_AVAILABLE:
         fingertip_tracking = RewTerm(
             func=mdp_rewards.fingertip_tracking_reward,
             weight=1.0,
-            params={"alpha": 20.0},
+            params={"alpha": 10.0},
         )
 
         # ── r_style: fingertip velocity — DISABLED for Stage 1 ──────────
