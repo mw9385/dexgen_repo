@@ -136,21 +136,14 @@ def apply_env_config(env_cfg, env_cfg_dict: dict):
     rewards_cfg = env_cfg_dict.get("rewards", {})
     if rewards_cfg:
         reward_terms = {
-            "object_pose": "object_pose",
-            "finger_joint_goal": "finger_joint_goal",
-            "fingertip_tracking": "fingertip_tracking",
-            "grasp_success": "grasp_success",
+            "object_position": "object_position",
+            "object_orientation": "object_orientation",
+            "joint_tracking": "joint_tracking",
+            "goal_bonus": "goal_bonus",
             "fingertip_velocity": "fingertip_velocity",
-            "fingertip_contact": "fingertip_contact",
-            "action_scale": "action_scale",
+            "work": "work",
+            "action": "action",
             "torque": "torque",
-            "mechanical_work": "mechanical_work",
-            "action_rate": "action_rate",
-            "object_velocity": "object_velocity",
-            "object_drop": "object_drop",
-            "object_left_hand": "object_left_hand",
-            "joint_limit": "joint_limit",
-            "wrist_height": "wrist_height",
         }
         for cfg_name, term_name in reward_terms.items():
             if cfg_name in rewards_cfg and hasattr(env_cfg.rewards, term_name):
@@ -458,15 +451,52 @@ def main():
             "env_creator": create_env,
         },
     )
+    _action_mode = cfg_file.get("env", {}).get("action_mode", "absolute")
+    _delta_scale = float(cfg_file.get("env", {}).get("delta_scale", 0.67))
+    _actions_ma = float(cfg_file.get("env", {}).get("actions_moving_average", 1.0))
+    if _action_mode == "delta":
+        print(f"[Stage 1] Action mode: delta (scale={_delta_scale}, moving_avg={_actions_ma})")
     vecenv.register(
         "RLGPU",
         lambda config_name, num_actors, **kwargs: _IsaacLabVecEnv(
-            create_env(), num_actors
+            create_env(), num_actors,
+            action_mode=_action_mode, delta_scale=_delta_scale,
+            actions_moving_average=_actions_ma,
         ),
     )
 
+    _max_iters = args.max_iterations
+
+    class _FilteredWriter:
+        """Wraps a SummaryWriter to drop redundant rl_games metrics."""
+        _KEEP_PREFIXES = ("Performance/", "Episode/", "losses/", "info/", "rewards/")
+
+        def __init__(self, writer):
+            self._writer = writer
+
+        def add_scalar(self, tag, value, step, *args, **kwargs):
+            if tag.startswith(self._KEEP_PREFIXES):
+                self._writer.add_scalar(tag, value, step, *args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(self._writer, name)
+
     class _CompactIsaacAlgoObserver(IsaacAlgoObserver):
+        _writer_wrapped = False
+
         def after_print_stats(self, frame, epoch_num, total_time):
+            # Wrap the writer once on first callback to filter redundant metrics
+            if not self._writer_wrapped and hasattr(self, "writer"):
+                self.writer = _FilteredWriter(self.writer)
+                if hasattr(self.algo, "writer"):
+                    self.algo.writer = _FilteredWriter(self.algo.writer)
+                self._writer_wrapped = True
+
+            from envs.mdp import events as mdp_events
+            # Update curriculum (min_dist: 3cm → 8cm over first 30%)
+            mdp_events.update_curriculum(
+                self.algo.vec_env.env, epoch_num, _max_iters,
+            )
             if self.ep_infos:
                 for key in self.ep_infos[0]:
                     info_tensor = torch.tensor([], device=self.algo.device)
@@ -479,6 +509,26 @@ def main():
                     value = torch.mean(info_tensor)
                     self.writer.add_scalar("Episode/" + key, value, epoch_num)
                 self.ep_infos.clear()
+
+            # Override direct_info — prevent rl_games from injecting its own
+            # success metrics. Use accumulated per-step counts from the wrapper
+            # so that drop_ratio reflects actual termination events, not
+            # the post-reset sim state.
+            env = self.algo.vec_env.env
+            _rg = getattr(env, "_last_rolling_goal_updates", 0)
+            _accum_steps = getattr(env, "_accum_step_count", 1)
+            _accum_drops = getattr(env, "_accum_drop_count", 0.0)
+            _accum_left = getattr(env, "_accum_left_hand_count", 0.0)
+            self.direct_info = {
+                "success_ratio": _rg / max(env.num_envs, 1),
+                "rolling_goal_updates": _rg,
+                "drop_ratio": _accum_drops / max(_accum_steps, 1),
+                "left_hand_ratio": _accum_left / max(_accum_steps, 1),
+            }
+            # Reset accumulators for next epoch
+            env._accum_drop_count = 0.0
+            env._accum_left_hand_count = 0.0
+            env._accum_step_count = 0
 
             for k, v in self.direct_info.items():
                 self.writer.add_scalar(f"Performance/{k}", v, epoch_num)
@@ -493,9 +543,28 @@ def main():
     print(f"[Stage 1] Seq length: {ppo_runtime_cfg['seq_length']}")
     print(f"[Stage 1] Batch size: {args.num_envs * ppo_runtime_cfg['horizon_length']}")
     print(f"[Stage 1] Minibatch size: {ppo_runtime_cfg['minibatch_size']}")
+
     runner = Runner(_CompactIsaacAlgoObserver())
     runner.load(cfg)
     runner.reset()
+
+    # When resuming, ensure epoch_num is restored from checkpoint.
+    # rl_games normally restores this in A2CBase.restore(), but verify
+    # and log it so we can confirm tensorboard step continuity.
+    if args.resume and hasattr(runner, "algo"):
+        epoch = getattr(runner.algo, "epoch_num", 0)
+        frame = getattr(runner.algo, "frame", 0)
+        print(f"[Stage 1] Resumed: epoch_num={epoch}, frame={frame}")
+        if epoch == 0:
+            # Fallback: try to extract from checkpoint filename (e.g. model_5000.pth)
+            import re
+            m = re.search(r'(\d+)', Path(args.resume).stem)
+            if m:
+                epoch = int(m.group(1))
+                runner.algo.epoch_num = epoch
+                runner.algo.frame = epoch * args.num_envs * ppo_runtime_cfg["horizon_length"]
+                print(f"[Stage 1] Fallback epoch from filename: {epoch}")
+
     runner.run({"train": True})
 
     print(f"\n=== Stage 1 Complete ===")
@@ -527,9 +596,15 @@ def _to_rl_obs(obs):
 class _IsaacLabVecEnv:
     """Thin wrapper to make Isaac Lab ManagerBasedRLEnv compatible with rl_games."""
 
-    def __init__(self, env, num_envs: int):
+    def __init__(self, env, num_envs: int, action_mode: str = "absolute", delta_scale: float = 0.05,
+                 actions_moving_average: float = 1.0):
         self.env = env
         self.num_envs = num_envs
+        self._action_mode = action_mode
+        self._delta_scale = delta_scale
+        self._actions_moving_average = actions_moving_average
+        self._joint_target = None  # initialised on first reset
+        self._prev_actions = None  # for moving average
 
         # Build batch-free spaces so rl_games sees (obs_dim,) not (num_envs, obs_dim).
         # rl_games reads both env.observation_space AND get_env_info() —
@@ -578,49 +653,90 @@ class _IsaacLabVecEnv:
             extras["last_action"] = actions.clone()
         extras["current_action"] = actions.clone()
 
+        # Delta action mode (IsaacGymEnvs ShadowHand style):
+        #   smoothed = α * actions + (1-α) * prev_actions
+        #   targets  = prev_targets + dof_speed_scale * dt * smoothed
+        #   targets  = clamp(targets, joint_lower, joint_upper)
+        if self._action_mode == "delta":
+            if self._joint_target is None:
+                self._joint_target = torch.zeros_like(actions)
+            if self._prev_actions is None:
+                self._prev_actions = torch.zeros_like(actions)
+            alpha = self._actions_moving_average
+            smoothed = alpha * actions + (1.0 - alpha) * self._prev_actions
+            self._prev_actions = smoothed.clone()
+            self._joint_target = (self._joint_target + self._delta_scale * smoothed).clamp(-1.0, 1.0)
+            env_actions = self._joint_target
+        else:
+            env_actions = actions
+
         # Apply action delay DR (0-2 step lag set by randomize_action_delay).
         # Must be called here — the randomize event only sets the delay length;
         # the actual buffering and delayed output happens at every step.
         from envs.mdp.domain_rand import apply_action_delay
-        delayed_actions = apply_action_delay(self.env, actions)
+        delayed_actions = apply_action_delay(self.env, env_actions)
 
         obs, rew, terminated, truncated, info = self.env.step(delayed_actions)
         done = terminated | truncated
+
+        # Delta mode: re-initialise joint target for reset envs
+        if self._action_mode == "delta" and done.any():
+            done_ids = done.nonzero(as_tuple=False).squeeze(-1)
+            robot = self.env.scene["robot"]
+            cur_q = robot.data.joint_pos[done_ids]
+            soft_lower = robot.data.soft_joint_pos_limits[done_ids, :, 0]
+            soft_upper = robot.data.soft_joint_pos_limits[done_ids, :, 1]
+            mid = (soft_upper + soft_lower) * 0.5
+            rng = (soft_upper - soft_lower) * 0.5
+            rng = rng.clamp(min=1e-6)
+            norm_q = ((cur_q - mid) / rng).clamp(-1.0, 1.0)
+            num_dof = self._joint_target.shape[-1]
+            if norm_q.shape[-1] > num_dof:
+                norm_q = norm_q[:, -num_dof:]
+            self._joint_target[done_ids] = norm_q
+            self._prev_actions[done_ids] = 0.0
+
         from envs.mdp import events as mdp_events
         from envs.mdp import rewards as mdp_rewards
 
-        # Rolling goal: when a grasp is achieved mid-episode, immediately
-        # select a new nearby goal (kNN) so the policy keeps transitioning
-        # rather than idling until reset.  Uses threshold=2 cm (looser than
-        # the 1 cm sparse-reward threshold) so the new goal is set just
-        # before the sparse bonus fires.
+        # Rolling goal: when all fingertips are within threshold of goal,
+        # select a new nearby goal (kNN) so the policy keeps transitioning.
         n_updated = mdp_events.update_rolling_goal(self.env)
+        # Cache on env so the observer can read it for Performance/ logging
+        self.env._last_rolling_goal_updates = n_updated
 
         info = dict(info) if isinstance(info, dict) else {}
         info["success_ratio"] = n_updated / self.env.num_envs
 
-        # Isaac Lab resets done envs inside env.step() before returning obs/info.
-        # Read termination terms from the manager's cached per-step masks so these
-        # ratios reflect the step that just ended, not the freshly reset state.
+        # Compute drop/left_hand from the done mask returned by env.step().
+        # Isaac Lab resets terminated envs inside step(), so querying the sim
+        # state afterwards would always show the post-reset (healthy) state.
+        # Instead, use the `done` mask (terminated | truncated) together with
+        # a fresh check to distinguish drop vs left_hand vs timeout.
+        # However, `done` already reflects reset envs too.
+        #
+        # The reliable source is the termination_manager's get_term() method
+        # which reads from the cached _term_dones tensor (computed BEFORE reset).
+        # _term_dones is a (num_envs, num_terms) bool Tensor, NOT a dict.
         term_manager = getattr(self.env, "termination_manager", None)
+        drop_ratio = 0.0
+        left_hand_ratio = 0.0
         if term_manager is not None:
-            active_terms = set(getattr(term_manager, "active_terms", []))
-            if "object_drop" in active_terms:
-                drop_mask = term_manager.get_term("object_drop")
-                info["drop_ratio"] = float(drop_mask.float().mean().item())
-            else:
-                info["drop_ratio"] = float(mdp_events.object_dropped(self.env).float().mean().item())
+            active = set(getattr(term_manager, "active_terms", []))
+            if "object_drop" in active:
+                drop_ratio = float(term_manager.get_term("object_drop").float().mean().item())
+            if "object_left_hand" in active:
+                left_hand_ratio = float(term_manager.get_term("object_left_hand").float().mean().item())
 
-            if "object_left_hand" in active_terms:
-                left_hand_mask = term_manager.get_term("object_left_hand")
-                info["left_hand_ratio"] = float(left_hand_mask.float().mean().item())
-            else:
-                info["left_hand_ratio"] = float(mdp_events.object_left_hand(self.env).float().mean().item())
-        else:
-            info["drop_ratio"] = float(mdp_events.object_dropped(self.env).float().mean().item())
-            info["left_hand_ratio"] = float(mdp_events.object_left_hand(self.env).float().mean().item())
-
+        info["drop_ratio"] = drop_ratio
+        info["left_hand_ratio"] = left_hand_ratio
         info["rolling_goal_updates"] = n_updated
+
+        # Accumulate for epoch-level Performance/ logging
+        self.env._accum_drop_count = getattr(self.env, "_accum_drop_count", 0) + drop_ratio
+        self.env._accum_left_hand_count = getattr(self.env, "_accum_left_hand_count", 0) + left_hand_ratio
+        self.env._accum_step_count = getattr(self.env, "_accum_step_count", 0) + 1
+
         return _to_rl_obs(obs), rew, done, info
 
     def reset(self):
@@ -635,6 +751,20 @@ class _IsaacLabVecEnv:
             self.env.extras["current_action"] = torch.zeros(
                 self.num_envs, num_dof, device=self.env.device
             )
+        # Delta mode: initialise joint target from current joint positions
+        if self._action_mode == "delta":
+            robot = self.env.scene["robot"]
+            cur_q = robot.data.joint_pos  # (N, num_joints)
+            soft_lower = robot.data.soft_joint_pos_limits[..., 0]
+            soft_upper = robot.data.soft_joint_pos_limits[..., 1]
+            # Normalise current joints to [-1, 1] to match action space
+            mid = (soft_upper + soft_lower) * 0.5
+            rng = (soft_upper - soft_lower) * 0.5
+            rng = rng.clamp(min=1e-6)
+            self._joint_target = ((cur_q - mid) / rng).clamp(-1.0, 1.0)
+            # Slice to action dim (exclude wrist if needed)
+            if self._joint_target.shape[-1] > num_dof:
+                self._joint_target = self._joint_target[:, -num_dof:]
         return _to_rl_obs(obs)
 
     def get_number_of_agents(self):

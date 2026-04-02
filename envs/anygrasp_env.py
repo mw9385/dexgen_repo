@@ -131,11 +131,11 @@ def _build_object_spawner(object_pool_specs: Optional[List[dict]] = None):
 
     if not object_pool_specs:
         return sim_utils.CuboidCfg(
-            size=(0.065, 0.065, 0.065),
+            size=(0.040, 0.040, 0.040),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 disable_gravity=False, max_depenetration_velocity=5.0,
             ),
-            mass_props=sim_utils.MassPropertiesCfg(mass=0.1),
+            mass_props=sim_utils.MassPropertiesCfg(mass=0.05),
             collision_props=sim_utils.CollisionPropertiesCfg(),
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.8, 0.2, 0.2)),
         )
@@ -177,8 +177,8 @@ if _ISAACLAB_AVAILABLE:
         robot: ArticulationCfg = SHADOW_HAND_CFG.replace(
             prim_path="{ENV_REGEX_NS}/ShadowHand",
             init_state=ArticulationCfg.InitialStateCfg(
-                pos=(0.0, 0.0, 0.45),     # wrist above object
-                rot=(1.0, 0.0, 0.0, 0.0), # aligned by _align_wrist_palm_down at reset
+                pos=(0.0, 0.0, 0.35),     # wrist height (palm-up: object rests on palm)
+                rot=(1.0, 0.0, 0.0, 0.0), # overridden at reset by align_palm_up
                 joint_pos={
                     "robot0_THJ4": 0.5,   # thumb rotation: natural resting pose
                     "robot0_THJ3": 0.3,
@@ -195,16 +195,16 @@ if _ISAACLAB_AVAILABLE:
         object: RigidObjectCfg = RigidObjectCfg(
             prim_path="{ENV_REGEX_NS}/Object",
             spawn=sim_utils.CuboidCfg(
-                size=(0.065, 0.065, 0.065),
+                size=(0.040, 0.040, 0.040),
                 rigid_props=sim_utils.RigidBodyPropertiesCfg(
                     disable_gravity=False, max_depenetration_velocity=5.0,
                 ),
-                mass_props=sim_utils.MassPropertiesCfg(mass=0.10),
+                mass_props=sim_utils.MassPropertiesCfg(mass=0.05),
                 collision_props=sim_utils.CollisionPropertiesCfg(),
                 visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.8, 0.2, 0.2)),
             ),
             init_state=RigidObjectCfg.InitialStateCfg(
-                pos=(0.0, 0.0, 0.035), rot=(1.0, 0.0, 0.0, 0.0),
+                pos=(0.0, 0.0, 0.025), rot=(1.0, 0.0, 0.0, 0.0),
             ),
         )
 
@@ -356,41 +356,59 @@ if _ISAACLAB_AVAILABLE:
     @configclass
     class AnyGraspRewardsCfg:
         # ══════════════════════════════════════════════════════════════
-        # DexterityGen reward structure (arXiv:2502.04307 §3.2):
-        #   r = r_goal + r_style + r_reg
-        #
-        # All functions output [-1, 1]. Weights are positive.
-        # Drop/escape handled by termination (no explicit penalty).
+        # DexterityGen reward (arXiv:2502.04307 Eq. 4-9)
+        # All terms normalized to [-1, 1]. Weights control importance.
         # ══════════════════════════════════════════════════════════════
 
-        # ── r_goal: fingertip tracking (func → [0, 1]) ───────────────
-        # Primary dense signal. Fingertips in object frame, so correct
-        # object pose is implicitly required.
-        fingertip_tracking = RewTerm(
-            func=mdp_rewards.fingertip_tracking_reward,
+        # ── r_goal (Eq. 5-7) ────────────────────────────────────────
+        # Object position error (Eq. 5, pos part) → [0, 1]
+        object_position = RewTerm(
+            func=mdp_rewards.object_position_reward,
             weight=1.0,
-            params={"alpha": 5.0},
+            params={"alpha": 20.0},
+        )
+        # Object orientation error (Eq. 5, rot part) → [0, 1]
+        object_orientation = RewTerm(
+            func=mdp_rewards.object_orientation_reward,
+            weight=1.0,
+            params={"alpha": 10.0},
+        )
+        # Joint tracking (Eq. 6) → [-1, 0]
+        joint_tracking = RewTerm(
+            func=mdp_rewards.joint_tracking_reward,
+            weight=0.5,
+            params={"alpha": 2.0},
+        )
+        # Goal bonus (Eq. 7) → {0, 1}
+        goal_bonus = RewTerm(
+            func=mdp_rewards.goal_bonus,
+            weight=5.0,
+            params={"pos_thresh": 0.02, "rot_thresh": 0.1},
         )
 
-        # ── r_style: fingertip velocity (func → [-1, 0]) ─────────────
-        fingertip_velocity = RewTerm(
-            func=mdp_rewards.fingertip_velocity_penalty,
-            weight=0.05,
-        )
+        # ── r_style (Eq. 9) — DISABLED for Stage 1 ─────────────────
+        # fingertip_velocity = RewTerm(
+        #     func=mdp_rewards.fingertip_velocity_penalty,
+        #     weight=0.05,
+        # )
 
-        # ── r_reg: action/torque/work (func → [-1, 0]) ───────────────
-        action_scale = RewTerm(
-            func=mdp_rewards.action_scale_penalty,
-            weight=0.0001,
+        # ── r_reg (Eq. 8) ───────────────────────────────────────────
+        work = RewTerm(
+            func=mdp_rewards.work_penalty,
+            weight=0.001,
+            params={"alpha": 0.01},
+        )
+        action = RewTerm(
+            func=mdp_rewards.action_penalty,
+            weight=0.001,
+            params={"alpha": 0.5},
         )
         torque = RewTerm(
-            func=mdp_rewards.applied_torque_penalty,
-            weight=0.0001,
+            func=mdp_rewards.torque_penalty,
+            weight=0.001,
+            params={"alpha": 0.005},
         )
-        mechanical_work = RewTerm(
-            func=mdp_rewards.mechanical_work_penalty,
-            weight=0.0001,
-        )
+
 
 
 # ---------------------------------------------------------------------------
@@ -409,7 +427,7 @@ if _ISAACLAB_AVAILABLE:
         randomize_object_physics = EventTerm(
             func=mdp_dr.randomize_object_physics,
             mode="reset",
-            params={"mass_range": (0.05, 0.15), "friction_range": (0.5, 1.0), "restitution_range": (0.00, 0.20)},
+            params={"mass_range": (0.02, 0.10), "friction_range": (0.5, 1.0), "restitution_range": (0.00, 0.20)},
         )
         randomize_robot_physics = EventTerm(
             func=mdp_dr.randomize_robot_physics,
@@ -460,21 +478,20 @@ if _ISAACLAB_AVAILABLE:
 
             # Build multi-object spawner.
             # Priority: explicit object_pool_specs > default diverse pool.
-            # "Default diverse pool" covers cube/sphere/cylinder at 3 sizes so
-            # even without running Stage 0 the env uses varied objects.
-            # Mixed pool: medium (transitional) → large (power grasp)
-            # Shadow Hand palm ~8-9 cm, finger span ~16-20 cm
-            # Minimum 5 cm so objects are clearly visible in simulation
+            # Sized for single-hand precision grasp + in-hand rotation:
+            # Shadow Hand fingertip-to-fingertip ~5-6 cm in pinch,
+            # objects must fit inside finger envelope to rotate without ejecting.
+            # Range: 3-5 cm, mass 30-100g (light enough to manipulate).
             _DEFAULT_POOL = [
-                {"shape_type": "cube",     "size": 0.050, "mass": 0.06, "color": (1.0, 0.3, 0.3)},
-                {"shape_type": "cube",     "size": 0.065, "mass": 0.10, "color": (0.8, 0.2, 0.2)},
-                {"shape_type": "cube",     "size": 0.080, "mass": 0.15, "color": (0.6, 0.1, 0.1)},
-                {"shape_type": "sphere",   "size": 0.050, "mass": 0.05, "color": (0.4, 0.6, 1.0)},
-                {"shape_type": "sphere",   "size": 0.065, "mass": 0.09, "color": (0.2, 0.4, 0.9)},
-                {"shape_type": "sphere",   "size": 0.080, "mass": 0.13, "color": (0.1, 0.3, 0.8)},
-                {"shape_type": "cylinder", "size": 0.050, "mass": 0.06, "color": (0.3, 0.9, 0.4)},
-                {"shape_type": "cylinder", "size": 0.065, "mass": 0.10, "color": (0.2, 0.7, 0.3)},
-                {"shape_type": "cylinder", "size": 0.080, "mass": 0.15, "color": (0.1, 0.6, 0.2)},
+                {"shape_type": "cube",     "size": 0.030, "mass": 0.03, "color": (1.0, 0.5, 0.5)},
+                {"shape_type": "cube",     "size": 0.040, "mass": 0.05, "color": (1.0, 0.3, 0.3)},
+                {"shape_type": "cube",     "size": 0.050, "mass": 0.08, "color": (0.8, 0.2, 0.2)},
+                {"shape_type": "sphere",   "size": 0.030, "mass": 0.02, "color": (0.5, 0.7, 1.0)},
+                {"shape_type": "sphere",   "size": 0.040, "mass": 0.04, "color": (0.4, 0.6, 1.0)},
+                {"shape_type": "sphere",   "size": 0.050, "mass": 0.07, "color": (0.2, 0.4, 0.9)},
+                {"shape_type": "cylinder", "size": 0.030, "mass": 0.03, "color": (0.5, 0.9, 0.5)},
+                {"shape_type": "cylinder", "size": 0.040, "mass": 0.05, "color": (0.3, 0.9, 0.4)},
+                {"shape_type": "cylinder", "size": 0.050, "mass": 0.07, "color": (0.2, 0.7, 0.3)},
             ]
             specs = self.object_pool_specs or _DEFAULT_POOL
             spawner = _build_object_spawner(specs)
@@ -495,9 +512,9 @@ if _ISAACLAB_AVAILABLE:
                 self.reset_randomization = {
                     "object_pos_jitter_std": 0.005,         # 5 mm position jitter
                     "object_rot_jitter_deg": 5.0,           # ±5° object orientation jitter
-                    "wrist_pos_jitter_std": 0.01,           # 1 cm wrist position jitter
-                    "wrist_rot_std_deg": 20.0,              # ±20° wrist orientation noise
-                    "align_palm_toward_object": True,       # palm faces object (not up)
+                    "wrist_pos_jitter_std": 0.0,            # no position jitter
+                    "wrist_rot_std_deg": 15.0,              # ±15° wrist tilt for robustness
+                    "align_palm_up": False,                 # palm faces downward (-Z), hand grasps from above
                 }
 
             if self.reset_refinement is None:

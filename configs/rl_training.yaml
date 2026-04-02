@@ -10,21 +10,29 @@ env:
   num_envs: 512
   episode_length_s: 10.0
   action_scale: 1.0              # normalized [-1, 1] action mapped to full soft joint range
+  action_mode: "absolute"        # "absolute" or "delta"
+  # Delta params (IsaacGymEnvs ShadowHand style):
+  #   delta = dof_speed_scale * dt * action = 20.0 * (1/30) = 0.67 rad/step
+  delta_scale: 0.67              # dof_speed_scale * dt
+  actions_moving_average: 1.0    # 1.0=no smoothing, 0.3=strong smoothing
   decimation: 4                  # control at 30 Hz (120 Hz sim / 4)
 
   rewards:
-    # DexterityGen reward structure (arXiv:2502.04307 §3.2):
-    #   r = r_goal + r_style + r_reg
-    # All functions output [-1, 1]. Drop/escape → termination (no penalty).
+    # DexterityGen reward (arXiv:2502.04307 Eq. 4-9)
+    # All terms normalized to [-1, 1]. Weights control importance.
     #
-    # r_goal (func → [0, 1])
-    fingertip_tracking: 1.0     # exp(-5 * tip_dist) in object frame
-    # r_style (func → [-1, 0])
-    fingertip_velocity: 0.05
-    # r_reg (func → [-1, 0]) — minimal, just smoothing
-    action_scale:       0.0001
-    torque:             0.0001
-    mechanical_work:    0.0001
+    # r_goal (Eq. 5-7)
+    object_position:     1.0     # exp(-α * ||pos_err||²)     [0, 1]
+    object_orientation:  1.0     # exp(-α * rot_err)           [0, 1]
+    joint_tracking:      0.5     # -tanh(α * ||q_err||)        [-1, 0]
+    goal_bonus:          5.0     # 1(goal achieved)            {0, 1}
+    # r_style (Eq. 9) — disabled for Stage 1
+    # fingertip_velocity: 0.05
+    # r_reg (Eq. 8)
+    work:                0.001
+    action:              0.001
+    torque:              0.001
+    # No termination penalty — drop/escape handled by DoneTerm only
 
 # ==============================================================================
 # Asymmetric Actor-Critic PPO (rl_games)
@@ -72,8 +80,8 @@ ppo:
   # entropy_coef=0.0: standard for dexterous manipulation (IsaacGymEnvs ShadowHand).
   # Nonzero values can cause entropy to rise continuously when reward signal is weak.
   entropy_coef: 0.0
-  # bounds_loss_coef=0.0001: standard IsaacGymEnvs value.
-  bounds_loss_coef: 0.0001
+  # bounds_loss_coef=0.005: raised from 0.0001 to prevent action saturation.
+  bounds_loss_coef: 0.005
   critic_coef: 4.0
   grad_norm: 1.0
   # [FIX] normalize_input/value: true — critical for stable learning

@@ -41,15 +41,13 @@ def object_dropped(env, min_height: float = 0.2) -> torch.Tensor:
 
 
 def object_left_hand(env, max_dist: float = 0.20) -> torch.Tensor:
-    """
-    True when the object has escaped the palm support region.
-
-    We treat two cases as failure:
-      1. the object is too far from the palm and fingertips no longer touch it,
-      2. the object moved behind the palm plane (wrist-side cheat).
-    """
-    escaped, _ = _object_escape_mask(env, max_dist=max_dist)
-    return escaped
+    """Terminate when object is too far from palm center."""
+    robot = env.scene["robot"]
+    obj = env.scene["object"]
+    palm_body_id = _get_palm_body_id_from_env(robot, env)
+    palm_pos_w = robot.data.body_pos_w[:, palm_body_id, :]
+    dist = torch.norm(obj.data.root_pos_w - palm_pos_w, dim=-1)
+    return dist > max_dist
 
 
 def _log_reset_reasons(env, env_ids: torch.Tensor, max_dist: float = 0.20) -> None:
@@ -382,7 +380,9 @@ def _sample_start_and_nn_goal(
 
     start_idx = int(rng.integers(0, N))
     start_grasp = g.grasp_set[start_idx]
-    goal_idx = _sample_nearby_goal_index(g, start_idx, rng)
+    # Curriculum: start with easy goals, increase min_dist over time
+    cur_min_dist = getattr(graph, "_curriculum_min_dist", 0.08)
+    goal_idx = _sample_nearby_goal_index(g, start_idx, rng, min_dist=cur_min_dist, num_fingers=env_num_fingers)
     goal_grasp = g.grasp_set[goal_idx]
 
     start_fps  = _pad_fingertip_positions(start_grasp.fingertip_positions.copy(), env_num_fingers)
@@ -417,21 +417,17 @@ def _sample_start_and_nn_goal(
 def _sample_nearby_goal_index(
     graph, start_idx: int, rng: np.random.Generator,
     top_k: int = 5, min_dist: float = 0.08,
+    num_fingers: int = 5,
 ) -> int:
     """
-    Sample a goal grasp index that is reachable from start_idx.
+    Sample a goal grasp from the grasp set, filtered by min_dist.
+
+    min_dist is compared against the MAX per-finger distance (same metric
+    as rolling goal success_threshold) to prevent trivial initial success.
 
     Args:
-        min_dist: minimum fingertip L2 distance between start and goal (m).
-            Goals closer than this are filtered out to prevent the policy
-            from starting already at the goal (spurious initial success).
-            Default 8 cm >> rolling goal success_threshold (2 cm).
-
-    Strategy (in priority order):
-      1. Use graph edges — if start_idx has edge-connected neighbours, sample
-         from those beyond min_dist. Falls through if none qualify.
-      2. Fall back to top-k kNN over fingertip positions only (raw L2),
-         filtered by min_dist.
+        min_dist: minimum per-finger distance (m). ALL fingers of the
+            sampled goal must have at least one finger >= min_dist away.
     """
     grasps = graph.grasp_set.grasps
     N = len(grasps)
@@ -440,73 +436,116 @@ def _sample_nearby_goal_index(
 
     all_fps = graph.grasp_set.as_array()   # (N, F*3)
     start_flat = all_fps[start_idx]
-    fp_dists = np.linalg.norm(all_fps - start_flat, axis=-1)
-    fp_dists[start_idx] = np.inf
 
-    # ── Strategy 1: graph edge neighbours with min_dist filter ────────────
-    neighbours = np.asarray(graph.get_neighbors(start_idx))
-    if len(neighbours) > 0:
-        neighbour_dists = fp_dists[neighbours]
-        far_enough = neighbours[neighbour_dists >= min_dist]
-        if len(far_enough) > 0:
-            return int(rng.choice(far_enough))
-        # All neighbours too close — fall through to kNN
+    # Per-finger max distance: reshape to (N, F, 3), compute per-finger dist, take max
+    nf = num_fingers
+    diff = (all_fps - start_flat).reshape(N, nf, 3)
+    per_finger_dist = np.linalg.norm(diff, axis=-1)  # (N, F)
+    max_finger_dist = per_finger_dist.max(axis=-1)    # (N,) — worst-case finger
+    max_finger_dist[start_idx] = np.inf
 
-    # ── Strategy 2: kNN fallback with min_dist filter ─────────────────────
-    valid_idx = np.where((np.isfinite(fp_dists)) & (fp_dists >= min_dist))[0]
+    valid_idx = np.where((np.isfinite(max_finger_dist)) & (max_finger_dist >= min_dist))[0]
     if len(valid_idx) == 0:
-        # No grasp far enough — relax filter and pick any other grasp
-        valid_idx = np.where(np.isfinite(fp_dists))[0]
+        valid_idx = np.where(np.isfinite(max_finger_dist))[0]
         if len(valid_idx) == 0:
             return start_idx
 
+    # Sort by total distance (prefer closer goals that still satisfy min_dist)
+    total_dist = np.linalg.norm(all_fps[valid_idx] - start_flat, axis=-1)
     k = min(top_k, len(valid_idx))
-    top_k_local = np.argpartition(fp_dists[valid_idx], k - 1)[:k]
+    top_k_local = np.argpartition(total_dist, k - 1)[:k]
     top_k_indices = valid_idx[top_k_local]
     return int(rng.choice(top_k_indices))
+
+
+# ---------------------------------------------------------------------------
+# Curriculum: gradually increase goal difficulty
+# ---------------------------------------------------------------------------
+
+def update_curriculum(env, epoch: int, total_epochs: int = 10000):
+    """
+    Linearly increase min_dist from 0.03 to 0.08 over the first 30%
+    of training. Stored on the graph object so reset picks it up.
+
+    Call once per epoch from the training loop.
+    """
+    graph = _load_grasp_graph(env)
+    if graph is None:
+        return
+    warmup_epochs = int(total_epochs * 0.3)
+    t = min(epoch / max(warmup_epochs, 1), 1.0)
+    min_dist_start = 0.06
+    min_dist_end = 0.10
+    graph._curriculum_min_dist = min_dist_start + t * (min_dist_end - min_dist_start)
 
 
 # ---------------------------------------------------------------------------
 # Rolling goal: update goal when current goal is achieved mid-episode
 # ---------------------------------------------------------------------------
 
-def update_rolling_goal(env, success_threshold: float = 0.02) -> int:
+def update_rolling_goal(
+    env,
+    pos_threshold: float = 0.02,
+    rot_threshold: float = 0.1,
+) -> int:
     """
-    Called every step. For each env where ALL fingertips are within
-    *success_threshold* of the current goal, select a new nearby goal
-    via kNN (same procedure as reset) and update env.extras in-place.
+    Called every step. For each env where the object pose is within
+    threshold of the target, select a new nearby goal via kNN.
 
-    This implements the "rolling goal" design from the DexterityGen paper:
-    the policy keeps transitioning through consecutive nearby grasps within
-    a single episode rather than waiting for episode reset.
+    Success = object position error < pos_threshold (2cm)
+            AND object orientation error < rot_threshold (0.1 rad ~5.7°)
 
-    Args:
-        success_threshold: distance (m) at which goal is considered reached.
-            2 cm — strict threshold, well below min_dist (15cm).
+    Same criteria as goal_bonus in the reward function.
 
     Returns:
         Number of envs whose goal was updated this step.
     """
-    from .observations import fingertip_positions_in_object_frame, _get_num_fingers
+    from isaaclab.utils.math import quat_apply_inverse
 
     graph = _load_grasp_graph(env)
     if graph is None:
         return 0
 
-    goal_fps_flat = env.extras.get("target_fingertip_pos")   # (N, F*3)
-    goal_idx_buf  = env.extras.get("goal_grasp_idx")         # (N,) long
-    obj_names     = env.extras.get("env_obj_names")          # list[str|None]
-    if goal_fps_flat is None or goal_idx_buf is None:
+    goal_idx_buf  = env.extras.get("goal_grasp_idx")
+    obj_names     = env.extras.get("env_obj_names")
+    target_pos    = env.extras.get("target_object_pos_hand")
+    target_quat   = env.extras.get("target_object_quat_hand")
+    if goal_idx_buf is None or target_pos is None or target_quat is None:
         return 0
 
-    nf = _get_num_fingers(env)
-    cur_fps = fingertip_positions_in_object_frame(env)        # (N, F*3)
-    dist = (cur_fps - goal_fps_flat).reshape(env.num_envs, nf, 3)
-    per_tip_dist = torch.norm(dist, dim=-1)                   # (N, F)
-    # Fingertip-only check (DexterityGen §3.2): since fingertips are
-    # in object frame, reaching goal fingertip positions implicitly
-    # requires correct object pose.
-    success_mask = (per_tip_dist < success_threshold).all(dim=-1)  # (N,)
+    # Grace period
+    GRACE_STEPS = 20
+    step_buf = getattr(env, "episode_length_buf", None)
+
+    # Object pose in hand frame
+    robot = env.scene["robot"]
+    obj = env.scene["object"]
+    root_pos = robot.data.root_pos_w
+    root_quat = robot.data.root_quat_w
+    cur_pos = quat_apply_inverse(root_quat, obj.data.root_pos_w - root_pos)
+
+    def _qc(q):
+        return torch.cat([q[..., :1], -q[..., 1:]], dim=-1)
+    def _qm(q1, q2):
+        w1, x1, y1, z1 = q1.unbind(-1)
+        w2, x2, y2, z2 = q2.unbind(-1)
+        return torch.stack([
+            w1*w2-x1*x2-y1*y2-z1*z2, w1*x2+x1*w2+y1*z2-z1*y2,
+            w1*y2-x1*z2+y1*w2+z1*x2, w1*z2+x1*y2-y1*x2+z1*w2], dim=-1)
+
+    cur_quat = _qm(_qc(root_quat), obj.data.root_quat_w)
+
+    pos_err = torch.norm(cur_pos - target_pos, dim=-1)
+    dot = (cur_quat * target_quat).sum(dim=-1).abs().clamp(0.0, 1.0)
+    orn_err = 2.0 * torch.acos(dot)
+
+    success_mask = (pos_err < pos_threshold) & (orn_err < rot_threshold)
+
+    if step_buf is not None:
+        success_mask = success_mask & (step_buf >= GRACE_STEPS)
+
+    success_mask = success_mask & ~object_dropped(env)
+    success_mask = success_mask & ~object_left_hand(env)
 
     success_ids = success_mask.nonzero(as_tuple=False).squeeze(-1)
     if success_ids.numel() == 0:
@@ -535,7 +574,7 @@ def update_rolling_goal(env, success_threshold: float = 0.02) -> int:
             g = graph
 
         # kNN from current goal → new goal
-        new_goal_idx = _sample_nearby_goal_index(g, cur_goal_idx, rng)
+        new_goal_idx = _sample_nearby_goal_index(g, cur_goal_idx, rng, num_fingers=env_num_fingers)
         new_goal_grasp = g.grasp_set[new_goal_idx]
 
         # Update goal fingertip positions
@@ -903,43 +942,56 @@ def _randomise_wrist_pose(
     default_robot_root = robot.data.default_root_state[env_ids, :7].clone()
     default_obj_root = obj.data.default_root_state[env_ids, :7].clone()
 
-    wrist_pos = obj.data.root_pos_w[env_ids].clone()
-    nominal_offset = default_robot_root[:, :3] - default_obj_root[:, :3]
-    wrist_pos += nominal_offset
+    palm_up = bool(cfg.get("align_palm_up", False))
 
-    pos_jitter_std = float(cfg.get("wrist_pos_jitter_std", 0.005))
-    if pos_jitter_std > 0.0:
-        wrist_pos += torch.randn(n, 3, device=env.device) * pos_jitter_std
-
-    # --- Wrist orientation ---
-    # Try to use DexGraspNet's object_quat_hand to derive wrist orientation.
-    # wrist_quat = obj_quat_world * inv(object_quat_hand)
-    has_grasp_quat = (
-        object_quat_hand_list is not None
-        and any(q is not None for q in object_quat_hand_list)
-    )
-    if has_grasp_quat:
-        obj.update(0.0)
-        obj_quat_w = obj.data.root_quat_w[env_ids].clone()
+    if palm_up:
+        # Palm-up mode: hand stays at fixed default position, only apply palm-up rotation.
+        # Object will be placed at fingertip locations by _place_object_in_hand.
+        # default_root_state is in local env frame → add env_origins for world frame.
+        wrist_pos = default_robot_root[:, :3].clone() + env.scene.env_origins[env_ids]
         wrist_quat = default_robot_root[:, 3:7].clone()
-        for i, oq in enumerate(object_quat_hand_list):
-            if oq is None:
-                # Fallback: palm-down for envs without grasp data
-                wrist_quat[i:i+1] = _align_wrist_palm_down(env, env_ids[i:i+1], wrist_quat[i:i+1])
-                continue
-            oq_t = torch.tensor(oq, device=env.device, dtype=torch.float32).unsqueeze(0)
-            wrist_quat[i:i+1] = _quat_multiply(obj_quat_w[i:i+1], _quat_conjugate(oq_t))
-            wrist_quat[i:i+1] = wrist_quat[i:i+1] / (torch.norm(wrist_quat[i:i+1], dim=-1, keepdim=True) + 1e-8)
+        wrist_quat = _align_wrist_palm_up(env, env_ids, wrist_quat)
     else:
-        wrist_quat = default_robot_root[:, 3:7]
-        if bool(cfg.get("align_palm_toward_object", False)):
-            wrist_quat = _align_palm_toward_object(env, env_ids, wrist_quat, wrist_pos)
+        wrist_pos = obj.data.root_pos_w[env_ids].clone()
+        nominal_offset = default_robot_root[:, :3] - default_obj_root[:, :3]
+        wrist_pos += nominal_offset
+
+        pos_jitter_std = float(cfg.get("wrist_pos_jitter_std", 0.005))
+        if pos_jitter_std > 0.0:
+            wrist_pos += torch.randn(n, 3, device=env.device) * pos_jitter_std
+
+        # --- Wrist orientation ---
+        has_grasp_quat = (
+            object_quat_hand_list is not None
+            and any(q is not None for q in object_quat_hand_list)
+        )
+
+        if has_grasp_quat:
+            obj.update(0.0)
+            obj_quat_w = obj.data.root_quat_w[env_ids].clone()
+            wrist_quat = default_robot_root[:, 3:7].clone()
+            for i, oq in enumerate(object_quat_hand_list):
+                if oq is None:
+                    wrist_quat[i:i+1] = _align_wrist_palm_down(env, env_ids[i:i+1], wrist_quat[i:i+1])
+                    continue
+                oq_t = torch.tensor(oq, device=env.device, dtype=torch.float32).unsqueeze(0)
+                wrist_quat[i:i+1] = _quat_multiply(obj_quat_w[i:i+1], _quat_conjugate(oq_t))
+                wrist_quat[i:i+1] = wrist_quat[i:i+1] / (torch.norm(wrist_quat[i:i+1], dim=-1, keepdim=True) + 1e-8)
         else:
-            wrist_quat = _align_wrist_palm_down(env, env_ids, wrist_quat)
+            wrist_quat = default_robot_root[:, 3:7]
+            if bool(cfg.get("align_palm_toward_object", False)):
+                wrist_quat = _align_palm_toward_object(env, env_ids, wrist_quat, wrist_pos)
+            else:
+                wrist_quat = _align_wrist_palm_down(env, env_ids, wrist_quat)
 
     rot_std = math.radians(float(cfg.get("wrist_rot_std_deg", 5.0)))
     if rot_std > 0.0:
-        wrist_quat = _add_rotation_noise(wrist_quat, rot_std, env.device, n)
+        if palm_up:
+            # Palm-up: tilt around X/Y axes so gravity pulls object off palm.
+            # Yaw-only noise keeps palm horizontal → suboptimal "balance" policy.
+            wrist_quat = _add_tilt_noise(wrist_quat, rot_std, env.device, n)
+        else:
+            wrist_quat = _add_rotation_noise(wrist_quat, rot_std, env.device, n)
 
     _set_robot_root_pose(env, env_ids, wrist_pos, wrist_quat)
 
@@ -1131,6 +1183,16 @@ def _align_wrist_palm_down(env, env_ids: torch.Tensor, wrist_quat: torch.Tensor)
     return _quat_multiply(correction, wrist_quat)
 
 
+def _align_wrist_palm_up(env, env_ids: torch.Tensor, wrist_quat: torch.Tensor) -> torch.Tensor:
+    """Align palm normal to world +Z (upward). Object rests on palm."""
+    robot = env.scene["robot"]
+    palm_normal_local = _get_local_palm_normal(robot, env).unsqueeze(0).expand(len(env_ids), 3)
+    palm_normal_world = quat_apply(wrist_quat, palm_normal_local)
+    target_up = torch.tensor([0.0, 0.0, 1.0], device=env.device).expand_as(palm_normal_world)
+    correction = _quat_from_two_vectors(palm_normal_world, target_up)
+    return _quat_multiply(correction, wrist_quat)
+
+
 def _align_palm_toward_object(
     env,
     env_ids: torch.Tensor,
@@ -1211,6 +1273,8 @@ def _object_escape_mask(
     env,
     max_dist: float = 0.20,
     max_behind_offset: float = 0.015,
+    max_lateral: float = 0.15,
+    no_contact_max_dist: float = 0.12,
     contact_force_thresh: float = 0.5,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     robot = env.scene["robot"]
@@ -1234,8 +1298,10 @@ def _object_escape_mask(
 
     too_far = dist > max_dist
     behind_palm = normal_offset < -max_behind_offset
+    too_lateral = lateral_offset > max_lateral
+    no_contact_drift = (~has_contact) & (dist > no_contact_max_dist)
 
-    escaped = behind_palm | (too_far & (~has_contact))
+    escaped = behind_palm | (too_far & (~has_contact)) | too_lateral | no_contact_drift
     return escaped, {
         "dist": dist,
         "normal_offset": normal_offset,
@@ -1243,6 +1309,8 @@ def _object_escape_mask(
         "has_contact": has_contact,
         "too_far": too_far,
         "behind_palm": behind_palm,
+        "too_lateral": too_lateral,
+        "no_contact_drift": no_contact_drift,
     }
 
 
@@ -1445,6 +1513,26 @@ def _look_at_quat(direction: torch.Tensor) -> torch.Tensor:
     identity = torch.tensor([1.0, 0.0, 0.0, 0.0], device=device).expand(N, 4)
     quat = torch.where(parallel.unsqueeze(-1), identity, quat)
     return quat / (torch.norm(quat, dim=-1, keepdim=True) + 1e-8)
+
+
+def _add_tilt_noise(quat, std_rad, device, n):
+    """
+    Apply random tilt around X and Y axes (Gaussian).
+
+    For palm-up mode, tilting around X/Y makes the palm slope so gravity
+    pulls the object off unless the fingers actively grip it.
+    """
+    angle_x = torch.randn(n, device=device) * std_rad
+    angle_y = torch.randn(n, device=device) * std_rad
+    hx = angle_x * 0.5
+    hy = angle_y * 0.5
+    zero = torch.zeros(n, device=device)
+    # Rotation around X: (cos(θ/2), sin(θ/2), 0, 0)
+    qx = torch.stack([torch.cos(hx), torch.sin(hx), zero, zero], dim=-1)
+    # Rotation around Y: (cos(θ/2), 0, sin(θ/2), 0)
+    qy = torch.stack([torch.cos(hy), zero, torch.sin(hy), zero], dim=-1)
+    tilt = _quat_multiply(qx, qy)
+    return _quat_multiply(tilt, quat)
 
 
 def _add_rotation_noise(quat, std_rad, device, n):

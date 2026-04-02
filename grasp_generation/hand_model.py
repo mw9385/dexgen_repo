@@ -178,6 +178,18 @@ class DexGraspNetHandModel:
         )
         self.n_contact_candidates = self.contact_candidates.shape[0]
 
+        # Indices of contact candidates on distal (fingertip) links only
+        distal_suffixes = ("ffdistal_child", "mfdistal_child", "rfdistal_child",
+                           "lfdistal_child", "thdistal_child")
+        distal_link_indices = [
+            idx for name, idx in self.link_name_to_link_index.items()
+            if any(name.endswith(s) for s in distal_suffixes)
+        ]
+        self.distal_contact_indices = torch.where(
+            sum(self.global_index_to_link_index == li for li in distal_link_indices)
+        )[0]
+        self.n_distal_contact_candidates = self.distal_contact_indices.shape[0]
+
         # Indexing for penetration keypoints
         self.penetration_keypoints = [
             self.mesh[n]['penetration_keypoints'] for n in self.mesh
@@ -204,7 +216,8 @@ class DexGraspNetHandModel:
         self._precompute_penetration_params()
 
         print(f"[HandModel] Shadow Hand: {self.n_dofs} DOFs, "
-              f"{self.n_contact_candidates} contact candidates, "
+              f"{self.n_contact_candidates} contact candidates "
+              f"({self.n_distal_contact_candidates} distal-only), "
               f"{self.n_keypoints} penetration keypoints, "
               f"{self._n_col_links} collision links")
 
