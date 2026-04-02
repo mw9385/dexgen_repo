@@ -421,19 +421,13 @@ def _sample_nearby_goal_index(
     top_k: int = 5, min_dist: float = 0.08,
 ) -> int:
     """
-    Sample a goal grasp index that is reachable from start_idx.
+    Sample a goal grasp from the grasp set, filtered by min_dist.
+
+    Picks from the top-k nearest grasps (by fingertip L2 distance)
+    that are at least min_dist away from the start grasp.
 
     Args:
         min_dist: minimum fingertip L2 distance between start and goal (m).
-            Goals closer than this are filtered out to prevent the policy
-            from starting already at the goal (spurious initial success).
-            Default 8 cm >> rolling goal success_threshold (2 cm).
-
-    Strategy (in priority order):
-      1. Use graph edges — if start_idx has edge-connected neighbours, sample
-         from those beyond min_dist. Falls through if none qualify.
-      2. Fall back to top-k kNN over fingertip positions only (raw L2),
-         filtered by min_dist.
     """
     grasps = graph.grasp_set.grasps
     N = len(grasps)
@@ -445,19 +439,8 @@ def _sample_nearby_goal_index(
     fp_dists = np.linalg.norm(all_fps - start_flat, axis=-1)
     fp_dists[start_idx] = np.inf
 
-    # ── Strategy 1: graph edge neighbours with min_dist filter ────────────
-    neighbours = np.asarray(graph.get_neighbors(start_idx))
-    if len(neighbours) > 0:
-        neighbour_dists = fp_dists[neighbours]
-        far_enough = neighbours[neighbour_dists >= min_dist]
-        if len(far_enough) > 0:
-            return int(rng.choice(far_enough))
-        # All neighbours too close — fall through to kNN
-
-    # ── Strategy 2: kNN fallback with min_dist filter ─────────────────────
     valid_idx = np.where((np.isfinite(fp_dists)) & (fp_dists >= min_dist))[0]
     if len(valid_idx) == 0:
-        # No grasp far enough — relax filter and pick any other grasp
         valid_idx = np.where(np.isfinite(fp_dists))[0]
         if len(valid_idx) == 0:
             return start_idx
