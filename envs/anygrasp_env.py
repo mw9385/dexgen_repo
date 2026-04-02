@@ -363,28 +363,11 @@ if _ISAACLAB_AVAILABLE:
         # Drop/escape handled by termination (no explicit penalty).
         # ══════════════════════════════════════════════════════════════
 
-        # ── r_goal: fingertip tracking (func → [0, 1]) ───────────────
-        # Primary dense signal. Fingertips in object frame, so correct
-        # object pose is implicitly required.
-        fingertip_tracking = RewTerm(
-            func=mdp_rewards.fingertip_tracking_reward,
-            weight=1.0,
-            params={"alpha": 10.0},
-        )
-
-        # ── r_style: fingertip velocity — DISABLED for Stage 1 ──────────
-        # DexterityGen §3.2: velocity penalty only in Stage 2 (fine-tuning).
-        # Enabling it from the start rewards "stay still" over "reach goal".
-        # fingertip_velocity = RewTerm(
-        #     func=mdp_rewards.fingertip_velocity_penalty,
-        #     weight=0.05,
-        # )
-
         # ── r_goal: object pose tracking (func → [0, 1]) ─────────────
-        # Auxiliary signal: encourage object to reach target pose.
+        # Direct signal: move object to target pose in hand frame.
         object_pose = RewTerm(
             func=mdp_rewards.object_pose_reward,
-            weight=0.5,
+            weight=1.0,
             params={"pos_alpha": 10.0, "rot_alpha": 5.0},
         )
 
