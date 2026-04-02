@@ -356,41 +356,63 @@ if _ISAACLAB_AVAILABLE:
     @configclass
     class AnyGraspRewardsCfg:
         # ══════════════════════════════════════════════════════════════
-        # DexterityGen reward (arXiv:2502.04307 Eq. 4-9):
-        #   r = w_goal * r_goal + w_style * r_style + w_reg * r_reg
+        # DexterityGen reward (arXiv:2502.04307 Eq. 4-9)
+        # All terms normalized to [-1, 1]. Weights control importance.
         # ══════════════════════════════════════════════════════════════
 
-        # ── r_goal (Eq. 5-7): object pose + joint tracking + bonus ──
-        goal = RewTerm(
-            func=mdp_rewards.goal_reward,
+        # ── r_goal (Eq. 5-7) ────────────────────────────────────────
+        # Object position error (Eq. 5, pos part) → [0, 1]
+        object_position = RewTerm(
+            func=mdp_rewards.object_position_reward,
             weight=1.0,
-            params={
-                "alpha_pos": 20.0,
-                "alpha_orn": 10.0,
-                "alpha_hand": 1.0,
-                "alpha_bonus": 5.0,
-                "bonus_threshold": 0.05,
-            },
+            params={"alpha": 20.0},
+        )
+        # Object orientation error (Eq. 5, rot part) → [0, 1]
+        object_orientation = RewTerm(
+            func=mdp_rewards.object_orientation_reward,
+            weight=1.0,
+            params={"alpha": 10.0},
+        )
+        # Joint tracking (Eq. 6) → [-1, 0]
+        joint_tracking = RewTerm(
+            func=mdp_rewards.joint_tracking_reward,
+            weight=0.5,
+            params={"alpha": 2.0},
+        )
+        # Goal bonus (Eq. 7) → {0, 1}
+        goal_bonus = RewTerm(
+            func=mdp_rewards.goal_bonus,
+            weight=5.0,
+            params={"pos_thresh": 0.02, "rot_thresh": 0.1},
         )
 
-        # ── r_style (Eq. 9): fingertip velocity — DISABLED for Stage 1
+        # ── r_style (Eq. 9) — DISABLED for Stage 1 ─────────────────
         # fingertip_velocity = RewTerm(
         #     func=mdp_rewards.fingertip_velocity_penalty,
         #     weight=0.05,
         # )
 
-        # ── r_reg (Eq. 8): work + action + torque ───────────────────
+        # ── r_reg (Eq. 8) ───────────────────────────────────────────
         work = RewTerm(
             func=mdp_rewards.work_penalty,
-            weight=0.0005,
+            weight=0.001,
+            params={"alpha": 0.01},
         )
         action = RewTerm(
             func=mdp_rewards.action_penalty,
-            weight=0.00025,
+            weight=0.001,
+            params={"alpha": 0.5},
         )
         torque = RewTerm(
             func=mdp_rewards.torque_penalty,
-            weight=0.0001,
+            weight=0.001,
+            params={"alpha": 0.005},
+        )
+
+        # ── Termination penalty ─────────────────────────────────────
+        termination = RewTerm(
+            func=mdp_rewards.termination_penalty,
+            weight=10.0,
         )
 
 

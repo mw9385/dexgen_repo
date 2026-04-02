@@ -18,17 +18,22 @@ env:
   decimation: 4                  # control at 30 Hz (120 Hz sim / 4)
 
   rewards:
-    # DexterityGen reward (arXiv:2502.04307 Eq. 4-9):
-    #   r = w_goal * r_goal + w_style * r_style + w_reg * r_reg
+    # DexterityGen reward (arXiv:2502.04307 Eq. 4-9)
+    # All terms normalized to [-1, 1]. Weights control importance.
     #
-    # r_goal (Eq. 5-7): object pose + joint tracking + goal bonus
-    goal: 1.0
+    # r_goal (Eq. 5-7)
+    object_position:     1.0     # exp(-α * ||pos_err||²)     [0, 1]
+    object_orientation:  1.0     # exp(-α * rot_err)           [0, 1]
+    joint_tracking:      0.5     # -tanh(α * ||q_err||)        [-1, 0]
+    goal_bonus:          5.0     # 1(goal achieved)            {0, 1}
     # r_style (Eq. 9) — disabled for Stage 1
     # fingertip_velocity: 0.05
     # r_reg (Eq. 8)
-    work:     0.0005
-    action:   0.00025
-    torque:   0.0001
+    work:                0.001
+    action:              0.001
+    torque:              0.001
+    # Termination
+    termination:         10.0    # -(remaining_frac) on drop   [-1, 0]
 
 # ==============================================================================
 # Asymmetric Actor-Critic PPO (rl_games)
