@@ -532,24 +532,26 @@ def main():
     print(f"[Stage 1] Batch size: {args.num_envs * ppo_runtime_cfg['horizon_length']}")
     print(f"[Stage 1] Minibatch size: {ppo_runtime_cfg['minibatch_size']}")
 
-    # When resuming, extract epoch from checkpoint to continue tensorboard logging
-    _resume_epoch = 0
-    if args.resume:
-        try:
-            ckpt = torch.load(args.resume, map_location="cpu")
-            _resume_epoch = int(ckpt.get("epoch", 0))
-            print(f"[Stage 1] Resuming from epoch {_resume_epoch}")
-        except Exception as e:
-            print(f"[Stage 1] WARNING: Could not read epoch from checkpoint: {e}")
-
     runner = Runner(_CompactIsaacAlgoObserver())
     runner.load(cfg)
     runner.reset()
 
-    # Patch epoch_num so rl_games continues from where it left off
-    if _resume_epoch > 0 and hasattr(runner, "algo"):
-        runner.algo.epoch_num = _resume_epoch
-        runner.algo.frame = _resume_epoch * args.num_envs * ppo_runtime_cfg["horizon_length"]
+    # When resuming, ensure epoch_num is restored from checkpoint.
+    # rl_games normally restores this in A2CBase.restore(), but verify
+    # and log it so we can confirm tensorboard step continuity.
+    if args.resume and hasattr(runner, "algo"):
+        epoch = getattr(runner.algo, "epoch_num", 0)
+        frame = getattr(runner.algo, "frame", 0)
+        print(f"[Stage 1] Resumed: epoch_num={epoch}, frame={frame}")
+        if epoch == 0:
+            # Fallback: try to extract from checkpoint filename (e.g. model_5000.pth)
+            import re
+            m = re.search(r'(\d+)', Path(args.resume).stem)
+            if m:
+                epoch = int(m.group(1))
+                runner.algo.epoch_num = epoch
+                runner.algo.frame = epoch * args.num_envs * ppo_runtime_cfg["horizon_length"]
+                print(f"[Stage 1] Fallback epoch from filename: {epoch}")
 
     runner.run({"train": True})
 
