@@ -384,7 +384,7 @@ def _sample_start_and_nn_goal(
     start_grasp = g.grasp_set[start_idx]
     # Curriculum: start with easy goals, increase min_dist over time
     cur_min_dist = getattr(graph, "_curriculum_min_dist", 0.08)
-    goal_idx = _sample_nearby_goal_index(g, start_idx, rng, min_dist=cur_min_dist)
+    goal_idx = _sample_nearby_goal_index(g, start_idx, rng, min_dist=cur_min_dist, num_fingers=env_num_fingers)
     goal_grasp = g.grasp_set[goal_idx]
 
     start_fps  = _pad_fingertip_positions(start_grasp.fingertip_positions.copy(), env_num_fingers)
@@ -419,15 +419,17 @@ def _sample_start_and_nn_goal(
 def _sample_nearby_goal_index(
     graph, start_idx: int, rng: np.random.Generator,
     top_k: int = 5, min_dist: float = 0.08,
+    num_fingers: int = 5,
 ) -> int:
     """
     Sample a goal grasp from the grasp set, filtered by min_dist.
 
-    Picks from the top-k nearest grasps (by fingertip L2 distance)
-    that are at least min_dist away from the start grasp.
+    min_dist is compared against the MAX per-finger distance (same metric
+    as rolling goal success_threshold) to prevent trivial initial success.
 
     Args:
-        min_dist: minimum fingertip L2 distance between start and goal (m).
+        min_dist: minimum per-finger distance (m). ALL fingers of the
+            sampled goal must have at least one finger >= min_dist away.
     """
     grasps = graph.grasp_set.grasps
     N = len(grasps)
@@ -436,16 +438,26 @@ def _sample_nearby_goal_index(
 
     all_fps = graph.grasp_set.as_array()   # (N, F*3)
     start_flat = all_fps[start_idx]
-    fp_dists = np.linalg.norm(all_fps - start_flat, axis=-1)
-    fp_dists[start_idx] = np.inf
 
-    valid_idx = np.where((np.isfinite(fp_dists)) & (fp_dists >= min_dist))[0]
+    # Per-finger max distance: reshape to (N, F, 3), compute per-finger dist, take max
+    nf = num_fingers
+    diff = (all_fps - start_flat).reshape(N, nf, 3)
+    per_finger_dist = np.linalg.norm(diff, axis=-1)  # (N, F)
+    max_finger_dist = per_finger_dist.max(axis=-1)    # (N,) — worst-case finger
+    max_finger_dist[start_idx] = np.inf
+
+    valid_idx = np.where((np.isfinite(max_finger_dist)) & (max_finger_dist >= min_dist))[0]
     if len(valid_idx) == 0:
-        valid_idx = np.where(np.isfinite(fp_dists))[0]
+        valid_idx = np.where(np.isfinite(max_finger_dist))[0]
         if len(valid_idx) == 0:
             return start_idx
 
+    # Sort by total distance (prefer closer goals that still satisfy min_dist)
+    total_dist = np.linalg.norm(all_fps[valid_idx] - start_flat, axis=-1)
     k = min(top_k, len(valid_idx))
+    top_k_local = np.argpartition(total_dist, k - 1)[:k]
+    top_k_indices = valid_idx[top_k_local]
+    return int(rng.choice(top_k_indices))
     top_k_local = np.argpartition(fp_dists[valid_idx], k - 1)[:k]
     top_k_indices = valid_idx[top_k_local]
     return int(rng.choice(top_k_indices))
@@ -468,7 +480,7 @@ def update_curriculum(env, epoch: int, total_epochs: int = 10000):
     warmup_epochs = int(total_epochs * 0.3)
     t = min(epoch / max(warmup_epochs, 1), 1.0)
     min_dist_start = 0.06
-    min_dist_end = 0.08
+    min_dist_end = 0.10
     graph._curriculum_min_dist = min_dist_start + t * (min_dist_end - min_dist_start)
 
 
@@ -541,7 +553,7 @@ def update_rolling_goal(env, success_threshold: float = 0.05) -> int:
             g = graph
 
         # kNN from current goal → new goal
-        new_goal_idx = _sample_nearby_goal_index(g, cur_goal_idx, rng)
+        new_goal_idx = _sample_nearby_goal_index(g, cur_goal_idx, rng, num_fingers=env_num_fingers)
         new_goal_grasp = g.grasp_set[new_goal_idx]
 
         # Update goal fingertip positions
