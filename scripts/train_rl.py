@@ -511,18 +511,11 @@ def main():
             # success metrics. Only log what we explicitly set from step().
             env = self.algo.vec_env.env
             _rg = getattr(env, "_last_rolling_goal_updates", 0)
-            # Contact ratio: fraction of envs where at least one fingertip touches the object
-            from envs.mdp.observations import _get_fingertip_contact_forces_world
-            forces = _get_fingertip_contact_forces_world(env)  # (N, F, 3)
-            has_contact = (torch.norm(forces, dim=-1) > 0.5).any(dim=-1)
-            contact_ratio = float(has_contact.float().mean().item())
-
             self.direct_info = {
                 "success_ratio": _rg / max(env.num_envs, 1),
                 "rolling_goal_updates": _rg,
                 "drop_ratio": float(mdp_events.object_dropped(env).float().mean().item()),
                 "left_hand_ratio": float(mdp_events.object_left_hand(env).float().mean().item()),
-                "contact_ratio": contact_ratio,
             }
 
             for k, v in self.direct_info.items():
@@ -538,9 +531,26 @@ def main():
     print(f"[Stage 1] Seq length: {ppo_runtime_cfg['seq_length']}")
     print(f"[Stage 1] Batch size: {args.num_envs * ppo_runtime_cfg['horizon_length']}")
     print(f"[Stage 1] Minibatch size: {ppo_runtime_cfg['minibatch_size']}")
+
+    # When resuming, extract epoch from checkpoint to continue tensorboard logging
+    _resume_epoch = 0
+    if args.resume:
+        try:
+            ckpt = torch.load(args.resume, map_location="cpu")
+            _resume_epoch = int(ckpt.get("epoch", 0))
+            print(f"[Stage 1] Resuming from epoch {_resume_epoch}")
+        except Exception as e:
+            print(f"[Stage 1] WARNING: Could not read epoch from checkpoint: {e}")
+
     runner = Runner(_CompactIsaacAlgoObserver())
     runner.load(cfg)
     runner.reset()
+
+    # Patch epoch_num so rl_games continues from where it left off
+    if _resume_epoch > 0 and hasattr(runner, "algo"):
+        runner.algo.epoch_num = _resume_epoch
+        runner.algo.frame = _resume_epoch * args.num_envs * ppo_runtime_cfg["horizon_length"]
+
     runner.run({"train": True})
 
     print(f"\n=== Stage 1 Complete ===")
