@@ -372,11 +372,13 @@ if _ISAACLAB_AVAILABLE:
             params={"alpha": 5.0},
         )
 
-        # ── r_style: fingertip velocity (func → [-1, 0]) ─────────────
-        fingertip_velocity = RewTerm(
-            func=mdp_rewards.fingertip_velocity_penalty,
-            weight=0.05,
-        )
+        # ── r_style: fingertip velocity — DISABLED for Stage 1 ──────────
+        # DexterityGen §3.2: velocity penalty only in Stage 2 (fine-tuning).
+        # Enabling it from the start rewards "stay still" over "reach goal".
+        # fingertip_velocity = RewTerm(
+        #     func=mdp_rewards.fingertip_velocity_penalty,
+        #     weight=0.05,
+        # )
 
         # ── r_reg: action/torque/work (func → [-1, 0]) ───────────────
         action_scale = RewTerm(
