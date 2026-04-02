@@ -986,7 +986,12 @@ def _randomise_wrist_pose(
 
     rot_std = math.radians(float(cfg.get("wrist_rot_std_deg", 5.0)))
     if rot_std > 0.0:
-        wrist_quat = _add_rotation_noise(wrist_quat, rot_std, env.device, n)
+        if palm_up:
+            # Palm-up: tilt around X/Y axes so gravity pulls object off palm.
+            # Yaw-only noise keeps palm horizontal → suboptimal "balance" policy.
+            wrist_quat = _add_tilt_noise(wrist_quat, rot_std, env.device, n)
+        else:
+            wrist_quat = _add_rotation_noise(wrist_quat, rot_std, env.device, n)
 
     _set_robot_root_pose(env, env_ids, wrist_pos, wrist_quat)
 
@@ -1508,6 +1513,26 @@ def _look_at_quat(direction: torch.Tensor) -> torch.Tensor:
     identity = torch.tensor([1.0, 0.0, 0.0, 0.0], device=device).expand(N, 4)
     quat = torch.where(parallel.unsqueeze(-1), identity, quat)
     return quat / (torch.norm(quat, dim=-1, keepdim=True) + 1e-8)
+
+
+def _add_tilt_noise(quat, std_rad, device, n):
+    """
+    Apply random tilt around X and Y axes (Gaussian).
+
+    For palm-up mode, tilting around X/Y makes the palm slope so gravity
+    pulls the object off unless the fingers actively grip it.
+    """
+    angle_x = torch.randn(n, device=device) * std_rad
+    angle_y = torch.randn(n, device=device) * std_rad
+    hx = angle_x * 0.5
+    hy = angle_y * 0.5
+    zero = torch.zeros(n, device=device)
+    # Rotation around X: (cos(θ/2), sin(θ/2), 0, 0)
+    qx = torch.stack([torch.cos(hx), torch.sin(hx), zero, zero], dim=-1)
+    # Rotation around Y: (cos(θ/2), 0, sin(θ/2), 0)
+    qy = torch.stack([torch.cos(hy), zero, torch.sin(hy), zero], dim=-1)
+    tilt = _quat_multiply(qx, qy)
+    return _quat_multiply(tilt, quat)
 
 
 def _add_rotation_noise(quat, std_rad, device, n):
