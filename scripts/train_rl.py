@@ -136,21 +136,11 @@ def apply_env_config(env_cfg, env_cfg_dict: dict):
     rewards_cfg = env_cfg_dict.get("rewards", {})
     if rewards_cfg:
         reward_terms = {
-            "object_pose": "object_pose",
-            "finger_joint_goal": "finger_joint_goal",
             "fingertip_tracking": "fingertip_tracking",
-            "grasp_success": "grasp_success",
             "fingertip_velocity": "fingertip_velocity",
-            "fingertip_contact": "fingertip_contact",
             "action_scale": "action_scale",
             "torque": "torque",
             "mechanical_work": "mechanical_work",
-            "action_rate": "action_rate",
-            "object_velocity": "object_velocity",
-            "object_drop": "object_drop",
-            "object_left_hand": "object_left_hand",
-            "joint_limit": "joint_limit",
-            "wrist_height": "wrist_height",
         }
         for cfg_name, term_name in reward_terms.items():
             if cfg_name in rewards_cfg and hasattr(env_cfg.rewards, term_name):
@@ -465,8 +455,14 @@ def main():
         ),
     )
 
+    _max_iters = args.max_iterations
+
     class _CompactIsaacAlgoObserver(IsaacAlgoObserver):
         def after_print_stats(self, frame, epoch_num, total_time):
+            # Update curriculum (min_dist: 3cm → 8cm over first 30%)
+            mdp_events.update_curriculum(
+                self.algo.vec_env.env, epoch_num, _max_iters,
+            )
             if self.ep_infos:
                 for key in self.ep_infos[0]:
                     info_tensor = torch.tensor([], device=self.algo.device)
@@ -589,11 +585,8 @@ class _IsaacLabVecEnv:
         from envs.mdp import events as mdp_events
         from envs.mdp import rewards as mdp_rewards
 
-        # Rolling goal: when a grasp is achieved mid-episode, immediately
-        # select a new nearby goal (kNN) so the policy keeps transitioning
-        # rather than idling until reset.  Uses threshold=2 cm (looser than
-        # the 1 cm sparse-reward threshold) so the new goal is set just
-        # before the sparse bonus fires.
+        # Rolling goal: when all fingertips are within threshold of goal,
+        # select a new nearby goal (kNN) so the policy keeps transitioning.
         n_updated = mdp_events.update_rolling_goal(self.env)
 
         info = dict(info) if isinstance(info, dict) else {}

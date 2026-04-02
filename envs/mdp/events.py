@@ -382,7 +382,9 @@ def _sample_start_and_nn_goal(
 
     start_idx = int(rng.integers(0, N))
     start_grasp = g.grasp_set[start_idx]
-    goal_idx = _sample_nearby_goal_index(g, start_idx, rng)
+    # Curriculum: start with easy goals, increase min_dist over time
+    cur_min_dist = getattr(graph, "_curriculum_min_dist", 0.08)
+    goal_idx = _sample_nearby_goal_index(g, start_idx, rng, min_dist=cur_min_dist)
     goal_grasp = g.grasp_set[goal_idx]
 
     start_fps  = _pad_fingertip_positions(start_grasp.fingertip_positions.copy(), env_num_fingers)
@@ -464,6 +466,27 @@ def _sample_nearby_goal_index(
     top_k_local = np.argpartition(fp_dists[valid_idx], k - 1)[:k]
     top_k_indices = valid_idx[top_k_local]
     return int(rng.choice(top_k_indices))
+
+
+# ---------------------------------------------------------------------------
+# Curriculum: gradually increase goal difficulty
+# ---------------------------------------------------------------------------
+
+def update_curriculum(env, epoch: int, total_epochs: int = 10000):
+    """
+    Linearly increase min_dist from 0.03 to 0.08 over the first 30%
+    of training. Stored on the graph object so reset picks it up.
+
+    Call once per epoch from the training loop.
+    """
+    graph = _load_grasp_graph(env)
+    if graph is None:
+        return
+    warmup_epochs = int(total_epochs * 0.3)
+    t = min(epoch / max(warmup_epochs, 1), 1.0)
+    min_dist_start = 0.03
+    min_dist_end = 0.08
+    graph._curriculum_min_dist = min_dist_start + t * (min_dist_end - min_dist_start)
 
 
 # ---------------------------------------------------------------------------
