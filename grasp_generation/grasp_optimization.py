@@ -228,7 +228,7 @@ class AnnealingOptimizer:
 def initialize_grasp_poses(hand_model: DexGraspNetHandModel,
                            object_model: PrimitiveObjectModel,
                            batch_size: int,
-                           n_contact: int = 4,
+                           n_contact: int = 10,
                            distance_range=(0.12, 0.25),
                            jitter_strength: float = 0.3,
                            device: str = "cuda"):
@@ -356,7 +356,7 @@ class GraspOptimizer:
         # SA optimizer params
         n_iter: int = 2000,
         batch_size: int = 128,
-        n_contact: int = 4,
+        n_contact: int = 10,
         step_size: float = 0.005,
         starting_temperature: float = 18.0,
         temperature_decay: float = 0.95,
