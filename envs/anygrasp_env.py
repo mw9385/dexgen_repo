@@ -497,8 +497,8 @@ if _ISAACLAB_AVAILABLE:
                 self.reset_randomization = {
                     "object_pos_jitter_std": 0.005,         # 5 mm position jitter
                     "object_rot_jitter_deg": 5.0,           # ±5° object orientation jitter
-                    "wrist_pos_jitter_std": 0.01,           # 1 cm wrist position jitter
-                    "wrist_rot_std_deg": 10.0,              # ±10° wrist orientation noise
+                    "wrist_pos_jitter_std": 0.0,            # no position jitter
+                    "wrist_rot_std_deg": 0.0,               # no rotation noise
                     "align_palm_up": True,                  # palm faces upward (+Z), object rests on palm
                 }
 
