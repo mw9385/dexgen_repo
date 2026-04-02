@@ -216,7 +216,8 @@ class DexGraspNetHandModel:
         self._precompute_penetration_params()
 
         print(f"[HandModel] Shadow Hand: {self.n_dofs} DOFs, "
-              f"{self.n_contact_candidates} contact candidates, "
+              f"{self.n_contact_candidates} contact candidates "
+              f"({self.n_distal_contact_candidates} distal-only), "
               f"{self.n_keypoints} penetration keypoints, "
               f"{self._n_col_links} collision links")
 
