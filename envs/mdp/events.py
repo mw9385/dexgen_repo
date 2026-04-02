@@ -1323,13 +1323,14 @@ def _place_object_in_hand(
     env,
     env_ids: torch.Tensor,
     fingertip_positions_obj: torch.Tensor,   # (n, F, 3) in object frame
+    penetration_offset: float = 0.005,       # 5mm outward along palm normal
 ):
     """
     Place the object so the sampled grasp-set fingertip positions line up
     with the current fingertip world positions of the hand.
 
-    This makes reset start from the Stage 0 grasp itself instead of from an
-    unrelated hand/object arrangement.
+    A small offset along the palm normal pushes the object slightly outward
+    to prevent fingertip-object penetration at sim start.
     """
     robot = env.scene["robot"]
     obj = env.scene["object"]
@@ -1356,6 +1357,14 @@ def _place_object_in_hand(
     pose_pos_delta = torch.norm(pos_w - full_pos_w, dim=-1)
     pose_quat_dot = (quat_w * full_quat_w).sum(dim=-1).abs().clamp(0.0, 1.0)
     pose_rot_delta = 2.0 * torch.arccos(pose_quat_dot)
+
+    # Push object slightly outward along palm normal to avoid penetration
+    if penetration_offset > 0.0:
+        palm_body_id = _get_palm_body_id_from_env(robot, env)
+        palm_normal_root = _get_local_palm_normal(robot, env).unsqueeze(0).expand(len(env_ids), 3)
+        palm_normal_world = quat_apply(robot.data.root_quat_w[env_ids], palm_normal_root)
+        palm_normal_world = palm_normal_world / (torch.norm(palm_normal_world, dim=-1, keepdim=True) + 1e-8)
+        pos_w = pos_w + penetration_offset * palm_normal_world
 
     root_state = obj.data.default_root_state[env_ids].clone()
     root_state[:, :3] = pos_w
