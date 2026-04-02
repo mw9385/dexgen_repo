@@ -237,7 +237,7 @@ def initialize_grasp_poses(hand_model: DexGraspNetHandModel,
     # Sample approach points from inflated convex hull
     hull = mesh.convex_hull
     vertices = hull.vertices.copy()
-    vertices += 0.15 * vertices / (np.linalg.norm(vertices, axis=1, keepdims=True) + 1e-8)
+    vertices += 0.2 * vertices / (np.linalg.norm(vertices, axis=1, keepdims=True) + 1e-8)
     inflated = trimesh.Trimesh(vertices=vertices, faces=hull.faces).convex_hull
 
     hull_points, _ = trimesh.sample.sample_surface(inflated, batch_size * 10)
