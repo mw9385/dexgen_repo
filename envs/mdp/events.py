@@ -40,30 +40,14 @@ def object_dropped(env, min_height: float = 0.2) -> torch.Tensor:
     return obj.data.root_pos_w[:, 2] < min_height
 
 
-def object_left_hand(
-    env,
-    max_dist: float = 0.20,
-    contact_force_thresh: float = 0.5,
-) -> torch.Tensor:
-    """
-    Terminate when:
-      1. object is too far from palm (absolute safety net), OR
-      2. no fingertip has contact with the object
-    """
+def object_left_hand(env, max_dist: float = 0.20) -> torch.Tensor:
+    """Terminate when object is too far from palm center."""
     robot = env.scene["robot"]
     obj = env.scene["object"]
-
-    # --- distance check ---
     palm_body_id = _get_palm_body_id_from_env(robot, env)
     palm_pos_w = robot.data.body_pos_w[:, palm_body_id, :]
     dist = torch.norm(obj.data.root_pos_w - palm_pos_w, dim=-1)
-    too_far = dist > max_dist
-
-    # --- contact check ---
-    forces = _get_fingertip_contact_forces_world(env)
-    no_contact = ~(torch.norm(forces, dim=-1) > contact_force_thresh).any(dim=-1)
-
-    return too_far | no_contact
+    return dist > max_dist
 
 
 def _log_reset_reasons(env, env_ids: torch.Tensor, max_dist: float = 0.20) -> None:
