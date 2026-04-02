@@ -144,7 +144,6 @@ def apply_env_config(env_cfg, env_cfg_dict: dict):
             "work": "work",
             "action": "action",
             "torque": "torque",
-            "termination": "termination",
         }
         for cfg_name, term_name in reward_terms.items():
             if cfg_name in rewards_cfg and hasattr(env_cfg.rewards, term_name):

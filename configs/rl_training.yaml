@@ -32,8 +32,7 @@ env:
     work:                0.001
     action:              0.001
     torque:              0.001
-    # Termination
-    termination:         10.0    # -(remaining_frac) on drop   [-1, 0]
+    # No termination penalty — drop/escape handled by DoneTerm only
 
 # ==============================================================================
 # Asymmetric Actor-Critic PPO (rl_games)

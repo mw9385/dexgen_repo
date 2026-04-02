@@ -409,11 +409,6 @@ if _ISAACLAB_AVAILABLE:
             params={"alpha": 0.005},
         )
 
-        # ── Termination penalty ─────────────────────────────────────
-        termination = RewTerm(
-            func=mdp_rewards.termination_penalty,
-            weight=10.0,
-        )
 
 
 # ---------------------------------------------------------------------------
