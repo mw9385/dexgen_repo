@@ -36,18 +36,29 @@ from .observations import (
 
 def fingertip_tracking_reward(env, alpha: float = 20.0) -> torch.Tensor:
     """
-    min_i exp(-alpha * ||tip_i - goal_i||)
+    Per-finger tracking + coordination bonus.
 
-    Primary dense reward: uses min over fingers so reward only
-    increases when the worst finger improves.
+    r = mean_i(exp(-alpha * dist_i)) * prod_i(exp(-alpha * dist_i))^(1/F)
+      = mean_term * geometric_mean_term
+
+    - mean term: each finger independently incentivised to reach goal
+    - geometric mean term: multiplicative — any single finger off
+      drags the entire reward down, preventing fingers from "free-riding"
+
+    Together they ensure ALL fingers are precisely coordinated.
 
     Returns: (N,) in (0, 1]
     """
     nf = _get_num_fingers(env)
     current = fingertip_positions_in_object_frame(env).reshape(-1, nf, 3)
     target  = target_fingertip_positions(env).reshape(-1, nf, 3)
-    dist    = torch.norm(current - target, dim=-1)
-    return torch.exp(-alpha * dist).min(dim=-1).values
+    dist    = torch.norm(current - target, dim=-1)            # (N, F)
+    per_finger = torch.exp(-alpha * dist)                     # (N, F)
+
+    mean_term = per_finger.mean(dim=-1)                       # (N,)
+    geom_term = per_finger.prod(dim=-1).pow(1.0 / nf)         # (N,)
+
+    return mean_term * geom_term
 
 
 # ═══════════════════════════════════════════════════════════
