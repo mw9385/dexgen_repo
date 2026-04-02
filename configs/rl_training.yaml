@@ -16,7 +16,6 @@ env:
   delta_scale: 0.67              # dof_speed_scale * dt
   actions_moving_average: 1.0    # 1.0=no smoothing, 0.3=strong smoothing
   decimation: 4                  # control at 30 Hz (120 Hz sim / 4)
-  settle_steps: 5                # zero-action sim steps after reset to resolve penetration
 
   rewards:
     # DexterityGen reward structure (arXiv:2502.04307 §3.2):

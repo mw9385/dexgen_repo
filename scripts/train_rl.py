@@ -459,7 +459,6 @@ def main():
             create_env(), num_actors,
             action_mode=_action_mode, delta_scale=_delta_scale,
             actions_moving_average=_actions_ma,
-            settle_steps=int(cfg_file.get("env", {}).get("settle_steps", 5)),
         ),
     )
 
@@ -567,13 +566,12 @@ class _IsaacLabVecEnv:
     """Thin wrapper to make Isaac Lab ManagerBasedRLEnv compatible with rl_games."""
 
     def __init__(self, env, num_envs: int, action_mode: str = "absolute", delta_scale: float = 0.05,
-                 actions_moving_average: float = 1.0, settle_steps: int = 5):
+                 actions_moving_average: float = 1.0):
         self.env = env
         self.num_envs = num_envs
         self._action_mode = action_mode
         self._delta_scale = delta_scale
         self._actions_moving_average = actions_moving_average
-        self._settle_steps = settle_steps
         self._joint_target = None  # initialised on first reset
         self._prev_actions = None  # for moving average
 
@@ -705,17 +703,8 @@ class _IsaacLabVecEnv:
 
     def reset(self):
         obs, _ = self.env.reset()
-
-        # Settling: run a few sim steps with zero action to let PhysX
-        # resolve any fingertip-object penetration from the grasp init.
-        num_dof = self.env.action_manager.action.shape[-1]
-        zero_action = torch.zeros(self.num_envs, num_dof, device=self.env.device)
-        for _ in range(self._settle_steps):
-            obs, _, _, _, _ = self.env.step(zero_action)
-        # Reset episode counters so settling steps don't count
-        self.env.episode_length_buf[:] = 0
-
         # Initialise action buffers on first reset
+        num_dof = self.env.action_manager.action.shape[-1]
         if "last_action" not in self.env.extras:
             self.env.extras["last_action"] = torch.zeros(
                 self.num_envs, num_dof, device=self.env.device
