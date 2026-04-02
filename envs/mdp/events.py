@@ -1260,8 +1260,8 @@ def _object_escape_mask(
     env,
     max_dist: float = 0.20,
     max_behind_offset: float = 0.015,
-    max_lateral: float = 0.08,
-    no_contact_max_dist: float = 0.08,
+    max_lateral: float = 0.15,
+    no_contact_max_dist: float = 0.12,
     contact_force_thresh: float = 0.5,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     robot = env.scene["robot"]
