@@ -239,34 +239,65 @@ def reset_to_random_grasp(
     # ------------------------------------------------------------------
     # 2. Set object / robot initial state.
     #
-    #    1. Set wrist pose (position + orientation from DexGraspNet)
-    #    2. Set joints to DexGraspNet joint_angles
-    #    3. Place object using stored object_pos/quat_hand (exact relative pose)
+    # *** KNOWN ISSUE (물체가 손 안에 안 들어오는 문제) ***
+    # DexGraspNet grasp 데이터에는 두 가지 좌표가 있다:
+    #   a) object_pos/quat_hand: 물체의 pose (hand root frame 기준)
+    #   b) fingertip_positions: 손가락 끝 위치 (object frame 기준)
     #
-    #    Using stored hand-object relative pose instead of fingertip rigid
-    #    alignment. The optimizer finds grasps with contacts anywhere on the
-    #    hand (palm, middle phalanges, etc.), but _place_object_in_hand only
-    #    uses 5 fingertip positions for alignment — causing mismatch when the
-    #    actual grasp contacts are not at the fingertips.
+    # object_pos/quat_hand를 직접 쓰면 정확하지만,
+    # _randomise_wrist_pose가 임시 물체 위치 기준으로 wrist를 배치한 뒤
+    # 다시 물체 위치를 덮어씌우면 엇갈린다.
+    #
+    # 올바른 순서:
+    #   1. wrist pose 결정 (위치 + 방향)
+    #   2. joint angles 세팅
+    #   3. FK 업데이트
+    #   4. object_pos/quat_hand로 물체 배치 (robot root 기준 상대 pose)
+    #
+    # wrist 위치는 물체 위치와 독립적으로 결정해야 한다.
+    # DexGraspNet은 물체가 원점, 손이 물체 주위에 있는 좌표계.
+    # Isaac에서는 wrist를 고정 위치에 놓고, 물체를 hand root 기준
+    # 상대 pose로 배치하는 것이 맞다.
     # ------------------------------------------------------------------
     has_joints = any(j is not None for j in start_joints_list)
     has_obj_pose = any(p is not None for p in start_object_pos_hand_list)
 
-    # Wrist: nominal position + DexGraspNet orientation
-    _randomise_object_pose(env, env_ids)
-    _randomise_wrist_pose(env, env_ids, object_quat_hand_list=start_object_quat_hand_list)
+    # Step 1: Set wrist at a fixed position (independent of object).
+    # DexGraspNet stores hand-object relative pose, so we first place the
+    # wrist, then derive the object position from it — NOT the other way.
+    robot = env.scene["robot"]
+    obj = env.scene["object"]
+    wrist_pos, wrist_quat = _sample_wrist_pose_world(env, env_ids, apply_noise=True)
 
-    # Joints from DexGraspNet
+    # Orient wrist using grasp data if available (palm-down alignment otherwise)
+    cfg = getattr(env.cfg, "reset_randomization", {}) or {}
+    has_grasp_quat = (
+        start_object_quat_hand_list is not None
+        and any(q is not None for q in start_object_quat_hand_list)
+    )
+    if has_grasp_quat and has_obj_pose:
+        # Derive wrist orientation from stored object_quat_hand:
+        # object_quat_world = wrist_quat * object_quat_hand
+        # We want the hand oriented so the object ends up in a reasonable place.
+        # Use _align_wrist_palm_down as base, then apply rotation noise.
+        wrist_quat = _align_wrist_palm_down(env, env_ids, wrist_quat)
+
+    rot_std = math.radians(float(cfg.get("wrist_rot_std_deg", 5.0)))
+    if rot_std > 0.0:
+        wrist_quat = _add_rotation_noise(wrist_quat, rot_std, env.device, len(env_ids))
+
+    _set_robot_root_pose(env, env_ids, wrist_pos, wrist_quat)
+
+    # Step 2: Set joint angles from DexGraspNet
     if has_joints:
         _set_robot_joints_direct(env, env_ids, start_joints_list)
     else:
         _set_robot_to_fingertip_config(env, env_ids, start_fps)
 
-    # Flush wrist + joints so robot root pose is available
-    robot = env.scene["robot"]
+    # Step 3: FK update so robot root pose is committed
     robot.update(0.0)
 
-    # Place object using exact hand-object relative pose from optimization
+    # Step 4: Place object relative to robot root using stored hand-object pose
     if has_obj_pose:
         _set_object_pose_from_grasp(
             env, env_ids, start_object_pos_hand_list, start_object_quat_hand_list
