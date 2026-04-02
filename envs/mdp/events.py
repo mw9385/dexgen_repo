@@ -239,11 +239,18 @@ def reset_to_random_grasp(
     # ------------------------------------------------------------------
     # 2. Set object / robot initial state.
     #
-    #    1. Place wrist at nominal offset, orientation from DexGraspNet
+    #    1. Set wrist pose (position + orientation from DexGraspNet)
     #    2. Set joints to DexGraspNet joint_angles
-    #    3. Place object at fingertip centroid (rigid alignment)
+    #    3. Place object using stored object_pos/quat_hand (exact relative pose)
+    #
+    #    Using stored hand-object relative pose instead of fingertip rigid
+    #    alignment. The optimizer finds grasps with contacts anywhere on the
+    #    hand (palm, middle phalanges, etc.), but _place_object_in_hand only
+    #    uses 5 fingertip positions for alignment — causing mismatch when the
+    #    actual grasp contacts are not at the fingertips.
     # ------------------------------------------------------------------
     has_joints = any(j is not None for j in start_joints_list)
+    has_obj_pose = any(p is not None for p in start_object_pos_hand_list)
 
     # Wrist: nominal position + DexGraspNet orientation
     _randomise_object_pose(env, env_ids)
@@ -255,16 +262,18 @@ def reset_to_random_grasp(
     else:
         _set_robot_to_fingertip_config(env, env_ids, start_fps)
 
-    # Flush wrist + joints, then place object at fingertip centroid
+    # Flush wrist + joints so robot root pose is available
     robot = env.scene["robot"]
     robot.update(0.0)
 
-    _place_object_in_hand(env, env_ids, start_fps)
-    # IK refinement (currently disabled via config)
-    _refine_hand_to_start_grasp(env, env_ids, start_fps)
-    robot.update(0.0)
-    _place_object_in_hand(env, env_ids, start_fps)
-    solve_mean_err, solve_max_err = _measure_grasp_contact_error(env, env_ids, start_fps)
+    # Place object using exact hand-object relative pose from optimization
+    if has_obj_pose:
+        _set_object_pose_from_grasp(
+            env, env_ids, start_object_pos_hand_list, start_object_quat_hand_list
+        )
+    else:
+        # Fallback: rigid alignment from fingertip positions
+        _place_object_in_hand(env, env_ids, start_fps)
 
     # ------------------------------------------------------------------
     # 7. Fill in target_object_pos/quat_hand for envs that had no stored
