@@ -457,6 +457,20 @@ def main():
 
     _max_iters = args.max_iterations
 
+    class _FilteredWriter:
+        """Wraps a SummaryWriter to drop redundant rl_games metrics."""
+        _KEEP_PREFIXES = ("Performance/", "Episode/", "losses/", "info/")
+
+        def __init__(self, writer):
+            self._writer = writer
+
+        def add_scalar(self, tag, value, step, *args, **kwargs):
+            if tag.startswith(self._KEEP_PREFIXES):
+                self._writer.add_scalar(tag, value, step, *args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(self._writer, name)
+
     class _CompactIsaacAlgoObserver(IsaacAlgoObserver):
         def after_print_stats(self, frame, epoch_num, total_time):
             from envs.mdp import events as mdp_events
@@ -504,6 +518,11 @@ def main():
     runner = Runner(_CompactIsaacAlgoObserver())
     runner.load(cfg)
     runner.reset()
+    # Wrap the writer to filter out redundant rl_games metrics
+    # (rewards/iter, rewards/step, shaped_rewards/*, etc.)
+    algo = runner.algo
+    if hasattr(algo, "writer"):
+        algo.writer = _FilteredWriter(algo.writer)
     runner.run({"train": True})
 
     print(f"\n=== Stage 1 Complete ===")
