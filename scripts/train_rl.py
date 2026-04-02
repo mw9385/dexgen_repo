@@ -448,10 +448,15 @@ def main():
             "env_creator": create_env,
         },
     )
+    _action_mode = cfg_file.get("env", {}).get("action_mode", "absolute")
+    _delta_scale = float(cfg_file.get("env", {}).get("delta_scale", 0.05))
+    if _action_mode == "delta":
+        print(f"[Stage 1] Action mode: delta (scale={_delta_scale})")
     vecenv.register(
         "RLGPU",
         lambda config_name, num_actors, **kwargs: _IsaacLabVecEnv(
-            create_env(), num_actors
+            create_env(), num_actors,
+            action_mode=_action_mode, delta_scale=_delta_scale,
         ),
     )
 
@@ -558,9 +563,12 @@ def _to_rl_obs(obs):
 class _IsaacLabVecEnv:
     """Thin wrapper to make Isaac Lab ManagerBasedRLEnv compatible with rl_games."""
 
-    def __init__(self, env, num_envs: int):
+    def __init__(self, env, num_envs: int, action_mode: str = "absolute", delta_scale: float = 0.05):
         self.env = env
         self.num_envs = num_envs
+        self._action_mode = action_mode
+        self._delta_scale = delta_scale
+        self._joint_target = None  # initialised on first reset
 
         # Build batch-free spaces so rl_games sees (obs_dim,) not (num_envs, obs_dim).
         # rl_games reads both env.observation_space AND get_env_info() —
@@ -609,14 +617,40 @@ class _IsaacLabVecEnv:
             extras["last_action"] = actions.clone()
         extras["current_action"] = actions.clone()
 
+        # Delta action mode: integrate policy output as offset
+        if self._action_mode == "delta":
+            if self._joint_target is None:
+                self._joint_target = torch.zeros_like(actions)
+            self._joint_target = (self._joint_target + self._delta_scale * actions).clamp(-1.0, 1.0)
+            env_actions = self._joint_target
+        else:
+            env_actions = actions
+
         # Apply action delay DR (0-2 step lag set by randomize_action_delay).
         # Must be called here — the randomize event only sets the delay length;
         # the actual buffering and delayed output happens at every step.
         from envs.mdp.domain_rand import apply_action_delay
-        delayed_actions = apply_action_delay(self.env, actions)
+        delayed_actions = apply_action_delay(self.env, env_actions)
 
         obs, rew, terminated, truncated, info = self.env.step(delayed_actions)
         done = terminated | truncated
+
+        # Delta mode: re-initialise joint target for reset envs
+        if self._action_mode == "delta" and done.any():
+            done_ids = done.nonzero(as_tuple=False).squeeze(-1)
+            robot = self.env.scene["robot"]
+            cur_q = robot.data.joint_pos[done_ids]
+            soft_lower = robot.data.soft_joint_pos_limits[done_ids, :, 0]
+            soft_upper = robot.data.soft_joint_pos_limits[done_ids, :, 1]
+            mid = (soft_upper + soft_lower) * 0.5
+            rng = (soft_upper - soft_lower) * 0.5
+            rng = rng.clamp(min=1e-6)
+            norm_q = ((cur_q - mid) / rng).clamp(-1.0, 1.0)
+            num_dof = self._joint_target.shape[-1]
+            if norm_q.shape[-1] > num_dof:
+                norm_q = norm_q[:, -num_dof:]
+            self._joint_target[done_ids] = norm_q
+
         from envs.mdp import events as mdp_events
         from envs.mdp import rewards as mdp_rewards
 
@@ -665,6 +699,20 @@ class _IsaacLabVecEnv:
             self.env.extras["current_action"] = torch.zeros(
                 self.num_envs, num_dof, device=self.env.device
             )
+        # Delta mode: initialise joint target from current joint positions
+        if self._action_mode == "delta":
+            robot = self.env.scene["robot"]
+            cur_q = robot.data.joint_pos  # (N, num_joints)
+            soft_lower = robot.data.soft_joint_pos_limits[..., 0]
+            soft_upper = robot.data.soft_joint_pos_limits[..., 1]
+            # Normalise current joints to [-1, 1] to match action space
+            mid = (soft_upper + soft_lower) * 0.5
+            rng = (soft_upper - soft_lower) * 0.5
+            rng = rng.clamp(min=1e-6)
+            self._joint_target = ((cur_q - mid) / rng).clamp(-1.0, 1.0)
+            # Slice to action dim (exclude wrist if needed)
+            if self._joint_target.shape[-1] > num_dof:
+                self._joint_target = self._joint_target[:, -num_dof:]
         return _to_rl_obs(obs)
 
     def get_number_of_agents(self):

@@ -10,6 +10,8 @@ env:
   num_envs: 512
   episode_length_s: 10.0
   action_scale: 1.0              # normalized [-1, 1] action mapped to full soft joint range
+  action_mode: "absolute"        # "absolute" or "delta"
+  delta_scale: 0.05              # max joint offset per step (rad), only used when action_mode=delta
   decimation: 4                  # control at 30 Hz (120 Hz sim / 4)
 
   rewards:
