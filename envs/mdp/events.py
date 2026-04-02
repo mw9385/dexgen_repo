@@ -949,21 +949,30 @@ def _randomise_wrist_pose(
         object_quat_hand_list is not None
         and any(q is not None for q in object_quat_hand_list)
     )
+    palm_up = bool(cfg.get("align_palm_up", False))
+
     if has_grasp_quat:
         obj.update(0.0)
         obj_quat_w = obj.data.root_quat_w[env_ids].clone()
         wrist_quat = default_robot_root[:, 3:7].clone()
         for i, oq in enumerate(object_quat_hand_list):
             if oq is None:
-                # Fallback: palm-down for envs without grasp data
-                wrist_quat[i:i+1] = _align_wrist_palm_down(env, env_ids[i:i+1], wrist_quat[i:i+1])
+                if palm_up:
+                    wrist_quat[i:i+1] = _align_wrist_palm_up(env, env_ids[i:i+1], wrist_quat[i:i+1])
+                else:
+                    wrist_quat[i:i+1] = _align_wrist_palm_down(env, env_ids[i:i+1], wrist_quat[i:i+1])
                 continue
             oq_t = torch.tensor(oq, device=env.device, dtype=torch.float32).unsqueeze(0)
             wrist_quat[i:i+1] = _quat_multiply(obj_quat_w[i:i+1], _quat_conjugate(oq_t))
             wrist_quat[i:i+1] = wrist_quat[i:i+1] / (torch.norm(wrist_quat[i:i+1], dim=-1, keepdim=True) + 1e-8)
+        # Override: force palm-up for all envs after grasp-based orientation
+        if palm_up:
+            wrist_quat = _align_wrist_palm_up(env, env_ids, wrist_quat)
     else:
         wrist_quat = default_robot_root[:, 3:7]
-        if bool(cfg.get("align_palm_toward_object", False)):
+        if palm_up:
+            wrist_quat = _align_wrist_palm_up(env, env_ids, wrist_quat)
+        elif bool(cfg.get("align_palm_toward_object", False)):
             wrist_quat = _align_palm_toward_object(env, env_ids, wrist_quat, wrist_pos)
         else:
             wrist_quat = _align_wrist_palm_down(env, env_ids, wrist_quat)
@@ -1159,6 +1168,16 @@ def _align_wrist_palm_down(env, env_ids: torch.Tensor, wrist_quat: torch.Tensor)
     palm_normal_world = quat_apply(wrist_quat, palm_normal_local)
     target_down = torch.tensor([0.0, 0.0, -1.0], device=env.device).expand_as(palm_normal_world)
     correction = _quat_from_two_vectors(palm_normal_world, target_down)
+    return _quat_multiply(correction, wrist_quat)
+
+
+def _align_wrist_palm_up(env, env_ids: torch.Tensor, wrist_quat: torch.Tensor) -> torch.Tensor:
+    """Align palm normal to world +Z (upward). Object rests on palm."""
+    robot = env.scene["robot"]
+    palm_normal_local = _get_local_palm_normal(robot, env).unsqueeze(0).expand(len(env_ids), 3)
+    palm_normal_world = quat_apply(wrist_quat, palm_normal_local)
+    target_up = torch.tensor([0.0, 0.0, 1.0], device=env.device).expand_as(palm_normal_world)
+    correction = _quat_from_two_vectors(palm_normal_world, target_up)
     return _quat_multiply(correction, wrist_quat)
 
 

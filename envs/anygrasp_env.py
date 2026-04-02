@@ -177,8 +177,8 @@ if _ISAACLAB_AVAILABLE:
         robot: ArticulationCfg = SHADOW_HAND_CFG.replace(
             prim_path="{ENV_REGEX_NS}/ShadowHand",
             init_state=ArticulationCfg.InitialStateCfg(
-                pos=(0.0, 0.0, 0.45),     # wrist above object
-                rot=(1.0, 0.0, 0.0, 0.0), # aligned by _align_wrist_palm_down at reset
+                pos=(0.0, 0.0, 0.35),     # wrist height (palm-up: object rests on palm)
+                rot=(1.0, 0.0, 0.0, 0.0), # overridden at reset by align_palm_up
                 joint_pos={
                     "robot0_THJ4": 0.5,   # thumb rotation: natural resting pose
                     "robot0_THJ3": 0.3,
@@ -498,8 +498,8 @@ if _ISAACLAB_AVAILABLE:
                     "object_pos_jitter_std": 0.005,         # 5 mm position jitter
                     "object_rot_jitter_deg": 5.0,           # ±5° object orientation jitter
                     "wrist_pos_jitter_std": 0.01,           # 1 cm wrist position jitter
-                    "wrist_rot_std_deg": 20.0,              # ±20° wrist orientation noise
-                    "align_palm_toward_object": True,       # palm faces object (not up)
+                    "wrist_rot_std_deg": 10.0,              # ±10° wrist orientation noise
+                    "align_palm_up": True,                  # palm faces upward (+Z), object rests on palm
                 }
 
             if self.reset_refinement is None:
