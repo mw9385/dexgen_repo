@@ -476,6 +476,15 @@ def main():
                     self.writer.add_scalar("Episode/" + key, value, epoch_num)
                 self.ep_infos.clear()
 
+            # Override direct_info — prevent rl_games from injecting its own
+            # success metrics. Only log what we explicitly set from step().
+            env = self.algo.vec_env.env
+            _rg = getattr(env, "_last_rolling_goal_updates", 0)
+            self.direct_info = {
+                "success_ratio": _rg / max(env.num_envs, 1),
+                "rolling_goal_updates": _rg,
+            }
+
             for k, v in self.direct_info.items():
                 self.writer.add_scalar(f"Performance/{k}", v, epoch_num)
 
@@ -588,6 +597,8 @@ class _IsaacLabVecEnv:
         # Rolling goal: when all fingertips are within threshold of goal,
         # select a new nearby goal (kNN) so the policy keeps transitioning.
         n_updated = mdp_events.update_rolling_goal(self.env)
+        # Cache on env so the observer can read it for Performance/ logging
+        self.env._last_rolling_goal_updates = n_updated
 
         info = dict(info) if isinstance(info, dict) else {}
         info["success_ratio"] = n_updated / self.env.num_envs
