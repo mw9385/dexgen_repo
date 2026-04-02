@@ -358,8 +358,8 @@ def main():
                 policy._h[:, done_ids, :] = 0.0
                 policy._c[:, done_ids, :] = 0.0
 
-            sr = float(mdp_rewards.fingertip_tracking_reward(env).mean().item())
-            total_success += sr * n_done
+            # Success = envs that achieved a rolling goal update this step
+            total_success += n_updated
 
             term_manager = getattr(env, "termination_manager", None)
             if term_manager is not None:
@@ -389,6 +389,8 @@ def main():
     elapsed = time.time() - t_start
 
     # ── Results ──
+    # success = total rolling goal updates / total episodes
+    # (average number of goal transitions per episode)
     success_rate = total_success / max(total_episodes, 1)
     drop_rate = total_drops / max(total_episodes, 1)
     left_hand_rate = total_left_hand / max(total_episodes, 1)
