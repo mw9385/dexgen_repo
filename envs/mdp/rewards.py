@@ -36,11 +36,11 @@ from .observations import (
 
 def fingertip_tracking_reward(env, alpha: float = 20.0) -> torch.Tensor:
     """
-    mean_i exp(-alpha * ||tip_i - goal_i||)
+    min_i exp(-alpha * ||tip_i - goal_i||)
 
-    Primary dense reward: fingertip positions in object frame vs goal.
-    Since fingertips are defined in the object frame, tracking them
-    implicitly requires correct object pose.
+    Primary dense reward: uses min over fingers so reward only
+    increases when the worst finger improves. Aligns with rolling
+    goal success criterion (ALL fingers within threshold).
 
     Returns: (N,) in (0, 1]
     """
@@ -48,7 +48,7 @@ def fingertip_tracking_reward(env, alpha: float = 20.0) -> torch.Tensor:
     current = fingertip_positions_in_object_frame(env).reshape(-1, nf, 3)
     target  = target_fingertip_positions(env).reshape(-1, nf, 3)
     dist    = torch.norm(current - target, dim=-1)
-    return torch.exp(-alpha * dist).mean(dim=-1)
+    return torch.exp(-alpha * dist).min(dim=-1).values
 
 
 # ═══════════════════════════════════════════════════════════
