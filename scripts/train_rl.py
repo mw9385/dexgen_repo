@@ -459,6 +459,7 @@ def main():
 
     class _CompactIsaacAlgoObserver(IsaacAlgoObserver):
         def after_print_stats(self, frame, epoch_num, total_time):
+            from envs.mdp import events as mdp_events
             # Update curriculum (min_dist: 3cm → 8cm over first 30%)
             mdp_events.update_curriculum(
                 self.algo.vec_env.env, epoch_num, _max_iters,
