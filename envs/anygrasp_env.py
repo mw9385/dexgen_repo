@@ -356,32 +356,40 @@ if _ISAACLAB_AVAILABLE:
     @configclass
     class AnyGraspRewardsCfg:
         # ══════════════════════════════════════════════════════════════
-        # DexterityGen reward structure (arXiv:2502.04307 §3.2):
-        #   r = r_goal + r_style + r_reg
-        #
-        # All functions output [-1, 1]. Weights are positive.
-        # Drop/escape handled by termination (no explicit penalty).
+        # DexterityGen reward (arXiv:2502.04307 Eq. 4-9):
+        #   r = w_goal * r_goal + w_style * r_style + w_reg * r_reg
         # ══════════════════════════════════════════════════════════════
 
-        # ── r_goal: object pose tracking (func → [0, 1]) ─────────────
-        # Direct signal: move object to target pose in hand frame.
-        object_pose = RewTerm(
-            func=mdp_rewards.object_pose_reward,
+        # ── r_goal (Eq. 5-7): object pose + joint tracking + bonus ──
+        goal = RewTerm(
+            func=mdp_rewards.goal_reward,
             weight=1.0,
-            params={"pos_alpha": 10.0, "rot_alpha": 5.0},
+            params={
+                "alpha_pos": 20.0,
+                "alpha_orn": 10.0,
+                "alpha_hand": 1.0,
+                "alpha_bonus": 5.0,
+                "bonus_threshold": 0.05,
+            },
         )
 
-        # ── r_reg: action/torque/work (func → [-1, 0]) ───────────────
-        action_scale = RewTerm(
-            func=mdp_rewards.action_scale_penalty,
-            weight=0.0001,
+        # ── r_style (Eq. 9): fingertip velocity — DISABLED for Stage 1
+        # fingertip_velocity = RewTerm(
+        #     func=mdp_rewards.fingertip_velocity_penalty,
+        #     weight=0.05,
+        # )
+
+        # ── r_reg (Eq. 8): work + action + torque ───────────────────
+        work = RewTerm(
+            func=mdp_rewards.work_penalty,
+            weight=0.0005,
+        )
+        action = RewTerm(
+            func=mdp_rewards.action_penalty,
+            weight=0.00025,
         )
         torque = RewTerm(
-            func=mdp_rewards.applied_torque_penalty,
-            weight=0.0001,
-        )
-        mechanical_work = RewTerm(
-            func=mdp_rewards.mechanical_work_penalty,
+            func=mdp_rewards.torque_penalty,
             weight=0.0001,
         )
 

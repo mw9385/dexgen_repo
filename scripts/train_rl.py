@@ -136,11 +136,11 @@ def apply_env_config(env_cfg, env_cfg_dict: dict):
     rewards_cfg = env_cfg_dict.get("rewards", {})
     if rewards_cfg:
         reward_terms = {
-            "fingertip_tracking": "fingertip_tracking",
+            "goal": "goal",
             "fingertip_velocity": "fingertip_velocity",
-            "action_scale": "action_scale",
+            "work": "work",
+            "action": "action",
             "torque": "torque",
-            "mechanical_work": "mechanical_work",
         }
         for cfg_name, term_name in reward_terms.items():
             if cfg_name in rewards_cfg and hasattr(env_cfg.rewards, term_name):
