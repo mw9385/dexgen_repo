@@ -7,13 +7,11 @@ Pipeline:
   1. DexGraspNet optimization (pure PyTorch, full GPU)
   2. NFO quality filtering
   3. Graph construction (kNN edges)
-  4. Isaac Sim refinement (settle penetration, record joint angles)
-  5. Output: data/grasp_graph.pkl (ready for RL training)
+  4. Output: data/grasp_graph.pkl (ready for RL training)
 
 Usage:
     /isaac-sim/python.sh scripts/run_grasp_generation.py
     /isaac-sim/python.sh scripts/run_grasp_generation.py --shapes cube --num_sizes 1
-    /isaac-sim/python.sh scripts/run_grasp_generation.py --no_refine   # skip refinement
 """
 
 import argparse
@@ -77,8 +75,6 @@ def parse_args():
     p.add_argument("--config", type=str,
                    default=str(Path(__file__).parent.parent / "configs" / "grasp_generation.yaml"))
     p.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
-    p.add_argument("--no_refine", action="store_true",
-                   help="Skip Isaac Sim refinement step")
 
     return p.parse_args()
 
@@ -253,16 +249,6 @@ def main():
     if len(multi_graph) == 0:
         print("\nERROR: No valid grasps generated.")
         sys.exit(1)
-
-    # ── Step 2: Isaac Sim refinement (settle penetration) ──
-    if not args.no_refine:
-        print(f"\n{'='*55}")
-        print(f"  Isaac Sim Refinement")
-        print(f"{'='*55}")
-        from grasp_generation.isaac_refinement import refine_multi_object_graph_with_isaac
-        multi_graph = refine_multi_object_graph_with_isaac(
-            multi_graph, batch_envs=min(16, args.batch_size),
-        )
 
     output_path = output_dir / "grasp_graph.pkl"
     multi_graph.save(output_path)
