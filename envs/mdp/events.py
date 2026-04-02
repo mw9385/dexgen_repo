@@ -476,8 +476,8 @@ def update_curriculum(env, epoch: int, total_epochs: int = 10000):
         return
     warmup_epochs = int(total_epochs * 0.3)
     t = min(epoch / max(warmup_epochs, 1), 1.0)
-    min_dist_start = 0.03
-    min_dist_end = 0.08
+    min_dist_start = 0.06
+    min_dist_end = 0.10
     graph._curriculum_min_dist = min_dist_start + t * (min_dist_end - min_dist_start)
 
 
