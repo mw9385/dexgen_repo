@@ -472,7 +472,16 @@ def main():
             return getattr(self._writer, name)
 
     class _CompactIsaacAlgoObserver(IsaacAlgoObserver):
+        _writer_wrapped = False
+
         def after_print_stats(self, frame, epoch_num, total_time):
+            # Wrap the writer once on first callback to filter redundant metrics
+            if not self._writer_wrapped and hasattr(self, "writer"):
+                self.writer = _FilteredWriter(self.writer)
+                if hasattr(self.algo, "writer"):
+                    self.algo.writer = _FilteredWriter(self.algo.writer)
+                self._writer_wrapped = True
+
             from envs.mdp import events as mdp_events
             # Update curriculum (min_dist: 3cm → 8cm over first 30%)
             mdp_events.update_curriculum(
@@ -518,11 +527,6 @@ def main():
     runner = Runner(_CompactIsaacAlgoObserver())
     runner.load(cfg)
     runner.reset()
-    # Wrap the writer to filter out redundant rl_games metrics
-    # (rewards/iter, rewards/step, shaped_rewards/*, etc.)
-    algo = runner.algo
-    if hasattr(algo, "writer"):
-        algo.writer = _FilteredWriter(algo.writer)
     runner.run({"train": True})
 
     print(f"\n=== Stage 1 Complete ===")
