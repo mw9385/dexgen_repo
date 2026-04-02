@@ -222,7 +222,12 @@ def fingertip_contact_forces(env) -> torch.Tensor:
     Returns: (N, num_fingers*3)  [fx, fy, fz] × num_fingers tips
     """
     num_fingers = _get_num_fingers(env)
-    forces = _get_fingertip_contact_forces_world(env)
+    forces = _get_fingertip_contact_forces_world(env)   # (N, F, 3) world
+    # Rotate to object frame so contact forces are consistent with
+    # fingertip positions (also in object frame).
+    obj_quat = env.scene["object"].data.root_quat_w     # (N, 4)
+    q_inv = _quat_conjugate(obj_quat)
+    forces = _quat_rotate_batch(q_inv, forces)           # (N, F, 3) obj frame
     return (forces / 10.0).clamp(-3.0, 3.0).reshape(env.num_envs, -1)
 
 

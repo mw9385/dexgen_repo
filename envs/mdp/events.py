@@ -458,9 +458,6 @@ def _sample_nearby_goal_index(
     top_k_local = np.argpartition(total_dist, k - 1)[:k]
     top_k_indices = valid_idx[top_k_local]
     return int(rng.choice(top_k_indices))
-    top_k_local = np.argpartition(fp_dists[valid_idx], k - 1)[:k]
-    top_k_indices = valid_idx[top_k_local]
-    return int(rng.choice(top_k_indices))
 
 
 # ---------------------------------------------------------------------------
@@ -479,8 +476,8 @@ def update_curriculum(env, epoch: int, total_epochs: int = 10000):
         return
     warmup_epochs = int(total_epochs * 0.3)
     t = min(epoch / max(warmup_epochs, 1), 1.0)
-    min_dist_start = 0.10
-    min_dist_end = 0.10
+    min_dist_start = 0.03
+    min_dist_end = 0.08
     graph._curriculum_min_dist = min_dist_start + t * (min_dist_end - min_dist_start)
 
 
