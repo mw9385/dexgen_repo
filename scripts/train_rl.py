@@ -511,11 +511,18 @@ def main():
             # success metrics. Only log what we explicitly set from step().
             env = self.algo.vec_env.env
             _rg = getattr(env, "_last_rolling_goal_updates", 0)
+            # Contact ratio: fraction of envs where at least one fingertip touches the object
+            from envs.mdp.observations import _get_fingertip_contact_forces_world
+            forces = _get_fingertip_contact_forces_world(env)  # (N, F, 3)
+            has_contact = (torch.norm(forces, dim=-1) > 0.5).any(dim=-1)
+            contact_ratio = float(has_contact.float().mean().item())
+
             self.direct_info = {
                 "success_ratio": _rg / max(env.num_envs, 1),
                 "rolling_goal_updates": _rg,
                 "drop_ratio": float(mdp_events.object_dropped(env).float().mean().item()),
                 "left_hand_ratio": float(mdp_events.object_left_hand(env).float().mean().item()),
+                "contact_ratio": contact_ratio,
             }
 
             for k, v in self.direct_info.items():
