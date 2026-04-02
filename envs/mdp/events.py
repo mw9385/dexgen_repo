@@ -939,7 +939,8 @@ def _randomise_wrist_pose(
     if palm_up:
         # Palm-up mode: hand stays at fixed default position, only apply palm-up rotation.
         # Object will be placed at fingertip locations by _place_object_in_hand.
-        wrist_pos = default_robot_root[:, :3].clone()
+        # default_root_state is in local env frame → add env_origins for world frame.
+        wrist_pos = default_robot_root[:, :3].clone() + env.scene.env_origins[env_ids]
         wrist_quat = default_robot_root[:, 3:7].clone()
         wrist_quat = _align_wrist_palm_up(env, env_ids, wrist_quat)
     else:
