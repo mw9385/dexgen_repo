@@ -533,6 +533,12 @@ def update_rolling_goal(env, success_threshold: float = 0.05) -> int:
     if step_buf is not None:
         success_mask = success_mask & (step_buf >= GRACE_STEPS)
 
+    # Mask out envs where the object is dropping or has left the hand —
+    # physics can produce spurious fingertip-goal alignment when the
+    # object is tumbling away.
+    success_mask = success_mask & ~object_dropped(env)
+    success_mask = success_mask & ~object_left_hand(env)
+
     success_ids = success_mask.nonzero(as_tuple=False).squeeze(-1)
     if success_ids.numel() == 0:
         return 0
