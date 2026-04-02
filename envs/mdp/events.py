@@ -483,57 +483,67 @@ def update_curriculum(env, epoch: int, total_epochs: int = 10000):
 # Rolling goal: update goal when current goal is achieved mid-episode
 # ---------------------------------------------------------------------------
 
-def update_rolling_goal(env, success_threshold: float = 0.05) -> int:
+def update_rolling_goal(
+    env,
+    pos_threshold: float = 0.02,
+    rot_threshold: float = 0.1,
+) -> int:
     """
-    Called every step. For each env where ALL fingertips are within
-    *success_threshold* of the current goal, select a new nearby goal
-    via kNN (same procedure as reset) and update env.extras in-place.
+    Called every step. For each env where the object pose is within
+    threshold of the target, select a new nearby goal via kNN.
 
-    This implements the "rolling goal" design from the DexterityGen paper:
-    the policy keeps transitioning through consecutive nearby grasps within
-    a single episode rather than waiting for episode reset.
+    Success = object position error < pos_threshold (2cm)
+            AND object orientation error < rot_threshold (0.1 rad ~5.7°)
 
-    Args:
-        success_threshold: distance (m) at which goal is considered reached.
-            5 cm — relaxed for Shadow Hand (24 DOF).
+    Same criteria as goal_bonus in the reward function.
 
     Returns:
         Number of envs whose goal was updated this step.
     """
-    from .observations import fingertip_positions_in_object_frame, _get_num_fingers
+    from isaaclab.utils.math import quat_apply_inverse
 
     graph = _load_grasp_graph(env)
     if graph is None:
         return 0
 
-    goal_fps_flat = env.extras.get("target_fingertip_pos")   # (N, F*3)
-    goal_idx_buf  = env.extras.get("goal_grasp_idx")         # (N,) long
-    obj_names     = env.extras.get("env_obj_names")          # list[str|None]
-    if goal_fps_flat is None or goal_idx_buf is None:
+    goal_idx_buf  = env.extras.get("goal_grasp_idx")
+    obj_names     = env.extras.get("env_obj_names")
+    target_pos    = env.extras.get("target_object_pos_hand")
+    target_quat   = env.extras.get("target_object_quat_hand")
+    if goal_idx_buf is None or target_pos is None or target_quat is None:
         return 0
 
-    # Grace period: skip rolling-goal check for the first N control steps
-    # after each episode reset to prevent false positives from physics
-    # settling or transient initial states.
-    GRACE_STEPS = 20  # ~0.67 s at 30 Hz control
+    # Grace period
+    GRACE_STEPS = 20
     step_buf = getattr(env, "episode_length_buf", None)
 
-    nf = _get_num_fingers(env)
-    cur_fps = fingertip_positions_in_object_frame(env)        # (N, F*3)
-    dist = (cur_fps - goal_fps_flat).reshape(env.num_envs, nf, 3)
-    per_tip_dist = torch.norm(dist, dim=-1)                   # (N, F)
-    # Fingertip-only check (DexterityGen §3.2): since fingertips are
-    # in object frame, reaching goal fingertip positions implicitly
-    # requires correct object pose.
-    success_mask = (per_tip_dist < success_threshold).all(dim=-1)  # (N,)
+    # Object pose in hand frame
+    robot = env.scene["robot"]
+    obj = env.scene["object"]
+    root_pos = robot.data.root_pos_w
+    root_quat = robot.data.root_quat_w
+    cur_pos = quat_apply_inverse(root_quat, obj.data.root_pos_w - root_pos)
 
-    # Mask out envs still in the grace period
+    def _qc(q):
+        return torch.cat([q[..., :1], -q[..., 1:]], dim=-1)
+    def _qm(q1, q2):
+        w1, x1, y1, z1 = q1.unbind(-1)
+        w2, x2, y2, z2 = q2.unbind(-1)
+        return torch.stack([
+            w1*w2-x1*x2-y1*y2-z1*z2, w1*x2+x1*w2+y1*z2-z1*y2,
+            w1*y2-x1*z2+y1*w2+z1*x2, w1*z2+x1*y2-y1*x2+z1*w2], dim=-1)
+
+    cur_quat = _qm(_qc(root_quat), obj.data.root_quat_w)
+
+    pos_err = torch.norm(cur_pos - target_pos, dim=-1)
+    dot = (cur_quat * target_quat).sum(dim=-1).abs().clamp(0.0, 1.0)
+    orn_err = 2.0 * torch.acos(dot)
+
+    success_mask = (pos_err < pos_threshold) & (orn_err < rot_threshold)
+
     if step_buf is not None:
         success_mask = success_mask & (step_buf >= GRACE_STEPS)
 
-    # Mask out envs where the object is dropping or has left the hand —
-    # physics can produce spurious fingertip-goal alignment when the
-    # object is tumbling away.
     success_mask = success_mask & ~object_dropped(env)
     success_mask = success_mask & ~object_left_hand(env)
 

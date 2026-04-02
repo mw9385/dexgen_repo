@@ -344,7 +344,7 @@ def main():
             obs, rew, terminated, truncated, info = env.step(actions)
             done = terminated | truncated
 
-            n_updated = mdp_events.update_rolling_goal(env, success_threshold=0.02)
+            n_updated = mdp_events.update_rolling_goal(env, pos_threshold=0.02, rot_threshold=0.1)
             total_goal_updates += n_updated
 
         step_count += 1
