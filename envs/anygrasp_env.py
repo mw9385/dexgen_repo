@@ -363,7 +363,7 @@ if _ISAACLAB_AVAILABLE:
         # Drop/escape handled by termination (no explicit penalty).
         # ══════════════════════════════════════════════════════════════
 
-        # ── r_goal: fingertip tracking (func → [0, 1]) ───────────────
+        # ── r_goal: fingertip tracking (func → [-1, 1]) ──────────────
         # Primary dense signal. Fingertips in object frame, so correct
         # object pose is implicitly required.
         fingertip_tracking = RewTerm(
