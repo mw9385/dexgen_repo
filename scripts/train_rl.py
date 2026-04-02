@@ -715,19 +715,18 @@ class _IsaacLabVecEnv:
         # a fresh check to distinguish drop vs left_hand vs timeout.
         # However, `done` already reflects reset envs too.
         #
-        # The reliable source is the termination_manager's per-term buffers
-        # which are computed BEFORE reset and cached for the current step.
+        # The reliable source is the termination_manager's get_term() method
+        # which reads from the cached _term_dones tensor (computed BEFORE reset).
+        # _term_dones is a (num_envs, num_terms) bool Tensor, NOT a dict.
         term_manager = getattr(self.env, "termination_manager", None)
         drop_ratio = 0.0
         left_hand_ratio = 0.0
         if term_manager is not None:
-            # Isaac Lab TerminationManager stores per-term results in
-            # _term_dones dict after compute(). Keys match cfg attribute names.
-            term_dones = getattr(term_manager, "_term_dones", {})
-            if "object_drop" in term_dones:
-                drop_ratio = float(term_dones["object_drop"].float().mean().item())
-            if "object_left_hand" in term_dones:
-                left_hand_ratio = float(term_dones["object_left_hand"].float().mean().item())
+            active = set(getattr(term_manager, "active_terms", []))
+            if "object_drop" in active:
+                drop_ratio = float(term_manager.get_term("object_drop").float().mean().item())
+            if "object_left_hand" in active:
+                left_hand_ratio = float(term_manager.get_term("object_left_hand").float().mean().item())
 
         info["drop_ratio"] = drop_ratio
         info["left_hand_ratio"] = left_hand_ratio

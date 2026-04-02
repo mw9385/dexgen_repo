@@ -363,11 +363,11 @@ def main():
 
             term_manager = getattr(env, "termination_manager", None)
             if term_manager is not None:
-                term_dones = getattr(term_manager, "_term_dones", {})
-                if "object_drop" in term_dones:
-                    total_drops += float(term_dones["object_drop"].float().mean().item()) * n_done
-                if "object_left_hand" in term_dones:
-                    total_left_hand += float(term_dones["object_left_hand"].float().mean().item()) * n_done
+                active = set(getattr(term_manager, "active_terms", []))
+                if "object_drop" in active:
+                    total_drops += float(term_manager.get_term("object_drop").float().mean().item()) * n_done
+                if "object_left_hand" in active:
+                    total_left_hand += float(term_manager.get_term("object_left_hand").float().mean().item()) * n_done
 
         # Track fingertip error
         target_fp = env.extras.get("target_fingertip_pos")
