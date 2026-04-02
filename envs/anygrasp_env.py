@@ -363,13 +363,13 @@ if _ISAACLAB_AVAILABLE:
         # Drop/escape handled by termination (no explicit penalty).
         # ══════════════════════════════════════════════════════════════
 
-        # ── r_goal: fingertip tracking (func → [-1, 1]) ──────────────
+        # ── r_goal: fingertip tracking (func → [0, 1]) ───────────────
         # Primary dense signal. Fingertips in object frame, so correct
         # object pose is implicitly required.
         fingertip_tracking = RewTerm(
             func=mdp_rewards.fingertip_tracking_reward,
             weight=1.0,
-            params={"alpha": 10.0},
+            params={"alpha": 5.0},
         )
 
         # ── r_style: fingertip velocity — DISABLED for Stage 1 ──────────
