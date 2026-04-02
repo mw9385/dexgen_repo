@@ -459,7 +459,7 @@ def main():
 
     class _FilteredWriter:
         """Wraps a SummaryWriter to drop redundant rl_games metrics."""
-        _KEEP_PREFIXES = ("Performance/", "Episode/", "losses/", "info/")
+        _KEEP_PREFIXES = ("Performance/", "Episode/", "losses/", "info/", "rewards/")
 
         def __init__(self, writer):
             self._writer = writer
