@@ -177,10 +177,10 @@ class AnnealingOptimizer:
         )
         contact_point_indices = self.hand_model.contact_point_indices.clone()
         rand_idx = torch.randint(
-            self.hand_model.n_distal_contact_candidates,
+            self.hand_model.n_contact_candidates,
             size=[switch_mask.sum()], device=self.device,
         )
-        contact_point_indices[switch_mask] = self.hand_model.distal_contact_indices[rand_idx]
+        contact_point_indices[switch_mask] = rand_idx
 
         self.old_hand_pose = self.hand_model.hand_pose
         self.old_contact_point_indices = self.hand_model.contact_point_indices
@@ -315,12 +315,12 @@ def initialize_grasp_poses(hand_model: DexGraspNetHandModel,
     hand_pose = torch.cat([translation, rot6d, joint_angles], dim=1)
     hand_pose.requires_grad_()
 
-    # Random contact point indices (distal/fingertip links only)
+    # Random contact point indices (all contact candidates)
     rand_idx = torch.randint(
-        hand_model.n_distal_contact_candidates,
+        hand_model.n_contact_candidates,
         size=[batch_size, n_contact], device=device,
     )
-    contact_point_indices = hand_model.distal_contact_indices[rand_idx]
+    contact_point_indices = rand_idx
 
     hand_model.set_parameters(hand_pose, contact_point_indices)
 
