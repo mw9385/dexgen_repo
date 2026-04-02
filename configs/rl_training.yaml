@@ -11,7 +11,10 @@ env:
   episode_length_s: 10.0
   action_scale: 1.0              # normalized [-1, 1] action mapped to full soft joint range
   action_mode: "absolute"        # "absolute" or "delta"
-  delta_scale: 0.05              # max joint offset per step (rad), only used when action_mode=delta
+  # Delta params (IsaacGymEnvs ShadowHand style):
+  #   delta = dof_speed_scale * dt * action = 20.0 * (1/30) = 0.67 rad/step
+  delta_scale: 0.67              # dof_speed_scale * dt
+  actions_moving_average: 1.0    # 1.0=no smoothing, 0.3=strong smoothing
   decimation: 4                  # control at 30 Hz (120 Hz sim / 4)
 
   rewards:

@@ -449,14 +449,16 @@ def main():
         },
     )
     _action_mode = cfg_file.get("env", {}).get("action_mode", "absolute")
-    _delta_scale = float(cfg_file.get("env", {}).get("delta_scale", 0.05))
+    _delta_scale = float(cfg_file.get("env", {}).get("delta_scale", 0.67))
+    _actions_ma = float(cfg_file.get("env", {}).get("actions_moving_average", 1.0))
     if _action_mode == "delta":
-        print(f"[Stage 1] Action mode: delta (scale={_delta_scale})")
+        print(f"[Stage 1] Action mode: delta (scale={_delta_scale}, moving_avg={_actions_ma})")
     vecenv.register(
         "RLGPU",
         lambda config_name, num_actors, **kwargs: _IsaacLabVecEnv(
             create_env(), num_actors,
             action_mode=_action_mode, delta_scale=_delta_scale,
+            actions_moving_average=_actions_ma,
         ),
     )
 
@@ -563,12 +565,15 @@ def _to_rl_obs(obs):
 class _IsaacLabVecEnv:
     """Thin wrapper to make Isaac Lab ManagerBasedRLEnv compatible with rl_games."""
 
-    def __init__(self, env, num_envs: int, action_mode: str = "absolute", delta_scale: float = 0.05):
+    def __init__(self, env, num_envs: int, action_mode: str = "absolute", delta_scale: float = 0.05,
+                 actions_moving_average: float = 1.0):
         self.env = env
         self.num_envs = num_envs
         self._action_mode = action_mode
         self._delta_scale = delta_scale
+        self._actions_moving_average = actions_moving_average
         self._joint_target = None  # initialised on first reset
+        self._prev_actions = None  # for moving average
 
         # Build batch-free spaces so rl_games sees (obs_dim,) not (num_envs, obs_dim).
         # rl_games reads both env.observation_space AND get_env_info() —
@@ -617,11 +622,19 @@ class _IsaacLabVecEnv:
             extras["last_action"] = actions.clone()
         extras["current_action"] = actions.clone()
 
-        # Delta action mode: integrate policy output as offset
+        # Delta action mode (IsaacGymEnvs ShadowHand style):
+        #   smoothed = α * actions + (1-α) * prev_actions
+        #   targets  = prev_targets + dof_speed_scale * dt * smoothed
+        #   targets  = clamp(targets, joint_lower, joint_upper)
         if self._action_mode == "delta":
             if self._joint_target is None:
                 self._joint_target = torch.zeros_like(actions)
-            self._joint_target = (self._joint_target + self._delta_scale * actions).clamp(-1.0, 1.0)
+            if self._prev_actions is None:
+                self._prev_actions = torch.zeros_like(actions)
+            alpha = self._actions_moving_average
+            smoothed = alpha * actions + (1.0 - alpha) * self._prev_actions
+            self._prev_actions = smoothed.clone()
+            self._joint_target = (self._joint_target + self._delta_scale * smoothed).clamp(-1.0, 1.0)
             env_actions = self._joint_target
         else:
             env_actions = actions
@@ -650,6 +663,7 @@ class _IsaacLabVecEnv:
             if norm_q.shape[-1] > num_dof:
                 norm_q = norm_q[:, -num_dof:]
             self._joint_target[done_ids] = norm_q
+            self._prev_actions[done_ids] = 0.0
 
         from envs.mdp import events as mdp_events
         from envs.mdp import rewards as mdp_rewards
