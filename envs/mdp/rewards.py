@@ -28,37 +28,25 @@ from .observations import (
     target_fingertip_positions,
     _get_fingertip_body_ids,
     _get_num_fingers,
-    _get_fingertip_contact_forces_world,
 )
 
 # ═══════════════════════════════════════════════════════════
 # 1. GOAL REWARD  →  [0, 1]
 # ═══════════════════════════════════════════════════════════
 
-def fingertip_tracking_reward(
-    env, alpha: float = 20.0, contact_force_thresh: float = 0.5,
-) -> torch.Tensor:
+def fingertip_tracking_reward(env, alpha: float = 20.0) -> torch.Tensor:
     """
     mean_i exp(-alpha * ||tip_i - goal_i||)
 
     Each finger independently incentivised to reach its goal.
-    When NO fingertip has contact with the object, reward is forced to 0
-    so the policy cannot earn reward by letting the object drift away.
 
-    Returns: (N,) in [0, 1]
+    Returns: (N,) in (0, 1]
     """
     nf = _get_num_fingers(env)
     current = fingertip_positions_in_object_frame(env).reshape(-1, nf, 3)
     target  = target_fingertip_positions(env).reshape(-1, nf, 3)
     dist    = torch.norm(current - target, dim=-1)
-    reward  = torch.exp(-alpha * dist).mean(dim=-1)
-
-    # Zero reward when all fingertips have lost contact with the object
-    forces = _get_fingertip_contact_forces_world(env)  # (N, F, 3)
-    has_any_contact = (torch.norm(forces, dim=-1) > contact_force_thresh).any(dim=-1)
-    reward = reward * has_any_contact.float()
-
-    return reward
+    return torch.exp(-alpha * dist).mean(dim=-1)
 
 
 # ═══════════════════════════════════════════════════════════
