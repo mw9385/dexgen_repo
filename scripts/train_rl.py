@@ -511,15 +511,24 @@ def main():
                 self.ep_infos.clear()
 
             # Override direct_info — prevent rl_games from injecting its own
-            # success metrics. Only log what we explicitly set from step().
+            # success metrics. Use accumulated per-step counts from the wrapper
+            # so that drop_ratio reflects actual termination events, not
+            # the post-reset sim state.
             env = self.algo.vec_env.env
             _rg = getattr(env, "_last_rolling_goal_updates", 0)
+            _accum_steps = getattr(env, "_accum_step_count", 1)
+            _accum_drops = getattr(env, "_accum_drop_count", 0.0)
+            _accum_left = getattr(env, "_accum_left_hand_count", 0.0)
             self.direct_info = {
                 "success_ratio": _rg / max(env.num_envs, 1),
                 "rolling_goal_updates": _rg,
-                "drop_ratio": float(mdp_events.object_dropped(env).float().mean().item()),
-                "left_hand_ratio": float(mdp_events.object_left_hand(env).float().mean().item()),
+                "drop_ratio": _accum_drops / max(_accum_steps, 1),
+                "left_hand_ratio": _accum_left / max(_accum_steps, 1),
             }
+            # Reset accumulators for next epoch
+            env._accum_drop_count = 0.0
+            env._accum_left_hand_count = 0.0
+            env._accum_step_count = 0
 
             for k, v in self.direct_info.items():
                 self.writer.add_scalar(f"Performance/{k}", v, epoch_num)
@@ -699,28 +708,36 @@ class _IsaacLabVecEnv:
         info = dict(info) if isinstance(info, dict) else {}
         info["success_ratio"] = n_updated / self.env.num_envs
 
-        # Isaac Lab resets done envs inside env.step() before returning obs/info.
-        # Read termination terms from the manager's cached per-step masks so these
-        # ratios reflect the step that just ended, not the freshly reset state.
+        # Compute drop/left_hand from the done mask returned by env.step().
+        # Isaac Lab resets terminated envs inside step(), so querying the sim
+        # state afterwards would always show the post-reset (healthy) state.
+        # Instead, use the `done` mask (terminated | truncated) together with
+        # a fresh check to distinguish drop vs left_hand vs timeout.
+        # However, `done` already reflects reset envs too.
+        #
+        # The reliable source is the termination_manager's per-term buffers
+        # which are computed BEFORE reset and cached for the current step.
         term_manager = getattr(self.env, "termination_manager", None)
+        drop_ratio = 0.0
+        left_hand_ratio = 0.0
         if term_manager is not None:
-            active_terms = set(getattr(term_manager, "active_terms", []))
-            if "object_drop" in active_terms:
-                drop_mask = term_manager.get_term("object_drop")
-                info["drop_ratio"] = float(drop_mask.float().mean().item())
-            else:
-                info["drop_ratio"] = float(mdp_events.object_dropped(self.env).float().mean().item())
+            # Isaac Lab TerminationManager stores per-term results in
+            # _term_dones dict after compute(). Keys match cfg attribute names.
+            term_dones = getattr(term_manager, "_term_dones", {})
+            if "object_drop" in term_dones:
+                drop_ratio = float(term_dones["object_drop"].float().mean().item())
+            if "object_left_hand" in term_dones:
+                left_hand_ratio = float(term_dones["object_left_hand"].float().mean().item())
 
-            if "object_left_hand" in active_terms:
-                left_hand_mask = term_manager.get_term("object_left_hand")
-                info["left_hand_ratio"] = float(left_hand_mask.float().mean().item())
-            else:
-                info["left_hand_ratio"] = float(mdp_events.object_left_hand(self.env).float().mean().item())
-        else:
-            info["drop_ratio"] = float(mdp_events.object_dropped(self.env).float().mean().item())
-            info["left_hand_ratio"] = float(mdp_events.object_left_hand(self.env).float().mean().item())
-
+        info["drop_ratio"] = drop_ratio
+        info["left_hand_ratio"] = left_hand_ratio
         info["rolling_goal_updates"] = n_updated
+
+        # Accumulate for epoch-level Performance/ logging
+        self.env._accum_drop_count = getattr(self.env, "_accum_drop_count", 0) + drop_ratio
+        self.env._accum_left_hand_count = getattr(self.env, "_accum_left_hand_count", 0) + left_hand_ratio
+        self.env._accum_step_count = getattr(self.env, "_accum_step_count", 0) + 1
+
         return _to_rl_obs(obs), rew, done, info
 
     def reset(self):
