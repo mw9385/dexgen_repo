@@ -484,6 +484,8 @@ def main():
             self.direct_info = {
                 "success_ratio": _rg / max(env.num_envs, 1),
                 "rolling_goal_updates": _rg,
+                "drop_ratio": float(mdp_events.object_dropped(env).float().mean().item()),
+                "left_hand_ratio": float(mdp_events.object_left_hand(env).float().mean().item()),
             }
 
             for k, v in self.direct_info.items():

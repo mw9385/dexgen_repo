@@ -517,6 +517,12 @@ def update_rolling_goal(env, success_threshold: float = 0.05) -> int:
     if goal_fps_flat is None or goal_idx_buf is None:
         return 0
 
+    # Grace period: skip rolling-goal check for the first N control steps
+    # after each episode reset to prevent false positives from physics
+    # settling or transient initial states.
+    GRACE_STEPS = 20  # ~0.67 s at 30 Hz control
+    step_buf = getattr(env, "episode_length_buf", None)
+
     nf = _get_num_fingers(env)
     cur_fps = fingertip_positions_in_object_frame(env)        # (N, F*3)
     dist = (cur_fps - goal_fps_flat).reshape(env.num_envs, nf, 3)
@@ -525,6 +531,10 @@ def update_rolling_goal(env, success_threshold: float = 0.05) -> int:
     # in object frame, reaching goal fingertip positions implicitly
     # requires correct object pose.
     success_mask = (per_tip_dist < success_threshold).all(dim=-1)  # (N,)
+
+    # Mask out envs still in the grace period
+    if step_buf is not None:
+        success_mask = success_mask & (step_buf >= GRACE_STEPS)
 
     success_ids = success_mask.nonzero(as_tuple=False).squeeze(-1)
     if success_ids.numel() == 0:
