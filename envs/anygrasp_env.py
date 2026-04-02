@@ -514,8 +514,8 @@ if _ISAACLAB_AVAILABLE:
                     "object_pos_jitter_std": 0.005,         # 5 mm position jitter
                     "object_rot_jitter_deg": 5.0,           # ±5° object orientation jitter
                     "wrist_pos_jitter_std": 0.0,            # no position jitter
-                    "wrist_rot_std_deg": 15.0,              # ±15° wrist tilt so object slides off without grip
-                    "align_palm_up": True,                  # palm faces upward (+Z), object rests on palm
+                    "wrist_rot_std_deg": 15.0,              # ±15° wrist tilt for robustness
+                    "align_palm_up": False,                 # palm faces downward (-Z), hand grasps from above
                 }
 
             if self.reset_refinement is None:
