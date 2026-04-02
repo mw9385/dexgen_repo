@@ -380,6 +380,14 @@ if _ISAACLAB_AVAILABLE:
         #     weight=0.05,
         # )
 
+        # ── r_goal: object pose tracking (func → [0, 1]) ─────────────
+        # Auxiliary signal: encourage object to reach target pose.
+        object_pose = RewTerm(
+            func=mdp_rewards.object_pose_reward,
+            weight=0.5,
+            params={"pos_alpha": 10.0, "rot_alpha": 5.0},
+        )
+
         # ── r_reg: action/torque/work (func → [-1, 0]) ───────────────
         action_scale = RewTerm(
             func=mdp_rewards.action_scale_penalty,
