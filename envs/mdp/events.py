@@ -934,48 +934,46 @@ def _randomise_wrist_pose(
     default_robot_root = robot.data.default_root_state[env_ids, :7].clone()
     default_obj_root = obj.data.default_root_state[env_ids, :7].clone()
 
-    wrist_pos = obj.data.root_pos_w[env_ids].clone()
-    nominal_offset = default_robot_root[:, :3] - default_obj_root[:, :3]
-    wrist_pos += nominal_offset
-
-    pos_jitter_std = float(cfg.get("wrist_pos_jitter_std", 0.005))
-    if pos_jitter_std > 0.0:
-        wrist_pos += torch.randn(n, 3, device=env.device) * pos_jitter_std
-
-    # --- Wrist orientation ---
-    # Try to use DexGraspNet's object_quat_hand to derive wrist orientation.
-    # wrist_quat = obj_quat_world * inv(object_quat_hand)
-    has_grasp_quat = (
-        object_quat_hand_list is not None
-        and any(q is not None for q in object_quat_hand_list)
-    )
     palm_up = bool(cfg.get("align_palm_up", False))
 
-    if has_grasp_quat:
-        obj.update(0.0)
-        obj_quat_w = obj.data.root_quat_w[env_ids].clone()
+    if palm_up:
+        # Palm-up mode: hand stays at fixed default position, only apply palm-up rotation.
+        # Object will be placed at fingertip locations by _place_object_in_hand.
+        wrist_pos = default_robot_root[:, :3].clone()
         wrist_quat = default_robot_root[:, 3:7].clone()
-        for i, oq in enumerate(object_quat_hand_list):
-            if oq is None:
-                if palm_up:
-                    wrist_quat[i:i+1] = _align_wrist_palm_up(env, env_ids[i:i+1], wrist_quat[i:i+1])
-                else:
-                    wrist_quat[i:i+1] = _align_wrist_palm_down(env, env_ids[i:i+1], wrist_quat[i:i+1])
-                continue
-            oq_t = torch.tensor(oq, device=env.device, dtype=torch.float32).unsqueeze(0)
-            wrist_quat[i:i+1] = _quat_multiply(obj_quat_w[i:i+1], _quat_conjugate(oq_t))
-            wrist_quat[i:i+1] = wrist_quat[i:i+1] / (torch.norm(wrist_quat[i:i+1], dim=-1, keepdim=True) + 1e-8)
-        # Override: force palm-up for all envs after grasp-based orientation
-        if palm_up:
-            wrist_quat = _align_wrist_palm_up(env, env_ids, wrist_quat)
+        wrist_quat = _align_wrist_palm_up(env, env_ids, wrist_quat)
     else:
-        wrist_quat = default_robot_root[:, 3:7]
-        if palm_up:
-            wrist_quat = _align_wrist_palm_up(env, env_ids, wrist_quat)
-        elif bool(cfg.get("align_palm_toward_object", False)):
-            wrist_quat = _align_palm_toward_object(env, env_ids, wrist_quat, wrist_pos)
+        wrist_pos = obj.data.root_pos_w[env_ids].clone()
+        nominal_offset = default_robot_root[:, :3] - default_obj_root[:, :3]
+        wrist_pos += nominal_offset
+
+        pos_jitter_std = float(cfg.get("wrist_pos_jitter_std", 0.005))
+        if pos_jitter_std > 0.0:
+            wrist_pos += torch.randn(n, 3, device=env.device) * pos_jitter_std
+
+        # --- Wrist orientation ---
+        has_grasp_quat = (
+            object_quat_hand_list is not None
+            and any(q is not None for q in object_quat_hand_list)
+        )
+
+        if has_grasp_quat:
+            obj.update(0.0)
+            obj_quat_w = obj.data.root_quat_w[env_ids].clone()
+            wrist_quat = default_robot_root[:, 3:7].clone()
+            for i, oq in enumerate(object_quat_hand_list):
+                if oq is None:
+                    wrist_quat[i:i+1] = _align_wrist_palm_down(env, env_ids[i:i+1], wrist_quat[i:i+1])
+                    continue
+                oq_t = torch.tensor(oq, device=env.device, dtype=torch.float32).unsqueeze(0)
+                wrist_quat[i:i+1] = _quat_multiply(obj_quat_w[i:i+1], _quat_conjugate(oq_t))
+                wrist_quat[i:i+1] = wrist_quat[i:i+1] / (torch.norm(wrist_quat[i:i+1], dim=-1, keepdim=True) + 1e-8)
         else:
-            wrist_quat = _align_wrist_palm_down(env, env_ids, wrist_quat)
+            wrist_quat = default_robot_root[:, 3:7]
+            if bool(cfg.get("align_palm_toward_object", False)):
+                wrist_quat = _align_palm_toward_object(env, env_ids, wrist_quat, wrist_pos)
+            else:
+                wrist_quat = _align_wrist_palm_down(env, env_ids, wrist_quat)
 
     rot_std = math.radians(float(cfg.get("wrist_rot_std_deg", 5.0)))
     if rot_std > 0.0:
