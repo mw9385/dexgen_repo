@@ -64,7 +64,7 @@ def main():
         return
 
     # Create a minimal env for sim testing
-    env_cfg = AnyGraspEnvCfg(num_envs=1)
+    env_cfg = AnyGraspEnvCfg()
     env_cfg.scene.num_envs = 1
     env_cfg.grasp_graph_path = args.input
     # Override depenetration velocity to HIGH so penetrating grasps
