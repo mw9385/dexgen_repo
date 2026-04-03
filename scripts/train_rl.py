@@ -433,26 +433,36 @@ def main():
     except Exception as _e:
         print(f"[Stage 1] WARNING: Could not load object specs from graph: {_e}")
 
-    apply_env_config(env_cfg, cfg_file.get("env", {}))
-    apply_dr_config(env_cfg, cfg_file.get("domain_randomization", {}))
+    try:
+        apply_env_config(env_cfg, cfg_file.get("env", {}))
+    except Exception as _e:
+        print(f"[WARNING] apply_env_config failed: {_e}")
+    try:
+        apply_dr_config(env_cfg, cfg_file.get("domain_randomization", {}))
+    except Exception as _e:
+        print(f"[WARNING] apply_dr_config failed: {_e}")
 
     # ── Verify final config after YAML overrides ──
-    _dr_obj = env_cfg.events.randomize_object_physics.params
-    _rw = env_cfg.rewards
-    _term = env_cfg.terminations
-    print("=" * 60)
-    print("[CONFIG] ── Final values (after YAML override) ──")
-    print(f"[CONFIG] mass_range:      {_dr_obj.get('mass_range')}")
-    print(f"[CONFIG] friction_range:  {_dr_obj.get('friction_range')}")
-    print(f"[CONFIG] restitution:     {_dr_obj.get('restitution_range')}")
-    print(f"[CONFIG] rewards:  orientation={_rw.object_orientation.weight}  "
-          f"position={_rw.object_position.weight}  "
-          f"goal_bonus={_rw.goal_bonus.weight}  "
-          f"work={_rw.work.weight}  action={_rw.action.weight}  torque={_rw.torque.weight}")
-    if hasattr(_term, "no_fingertip_contact"):
-        print(f"[CONFIG] no_contact_patience: {_term.no_fingertip_contact.params.get('patience')}")
-    print(f"[CONFIG] episode_length_s: {env_cfg.episode_length_s}")
-    print("=" * 60)
+    try:
+        _dr_obj = env_cfg.events.randomize_object_physics.params
+        _rw = env_cfg.rewards
+        _term = env_cfg.terminations
+        print("=" * 60)
+        print("[CONFIG] ── Final values (after YAML override) ──")
+        print(f"[CONFIG] mass_range:      {_dr_obj.get('mass_range')}")
+        print(f"[CONFIG] friction_range:  {_dr_obj.get('friction_range')}")
+        print(f"[CONFIG] restitution:     {_dr_obj.get('restitution_range')}")
+        print(f"[CONFIG] rewards:  orientation={_rw.object_orientation.weight}  "
+              f"position={_rw.object_position.weight}  "
+              f"goal_bonus={_rw.goal_bonus.weight}  "
+              f"work={_rw.work.weight}  action={_rw.action.weight}  torque={_rw.torque.weight}")
+        if hasattr(_term, "no_fingertip_contact"):
+            print(f"[CONFIG] no_contact_patience: {_term.no_fingertip_contact.params.get('patience')}")
+        print(f"[CONFIG] episode_length_s: {env_cfg.episode_length_s}")
+        print("=" * 60)
+    except Exception as _e:
+        print(f"[WARNING] Config verification failed: {_e}")
+        import traceback; traceback.print_exc()
 
     print(f"[Stage 1] Config:   {args.config}")
     print(f"[Stage 1] Task: DexGen-AnyGrasp-Allegro-v0")
