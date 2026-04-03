@@ -378,6 +378,14 @@ if _ISAACLAB_AVAILABLE:
             weight=2.0,
             params={"alpha": 2.0},
         )
+        # Finger joint tracking → [-1, 0]
+        # Guides fingers toward goal grasp configuration.
+        # Low weight so it doesn't block intermediate states.
+        joint_tracking = RewTerm(
+            func=mdp_rewards.joint_tracking_reward,
+            weight=0.2,
+            params={"alpha": 1.0},
+        )
         # Goal bonus → {0, 1}
         goal_bonus = RewTerm(
             func=mdp_rewards.goal_bonus,
