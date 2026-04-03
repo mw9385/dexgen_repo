@@ -5,7 +5,7 @@ Observation functions – Actor (policy) and Critic (privileged).
   ASYMMETRIC ACTOR-CRITIC OBSERVATION SPLIT
 =======================================================================
 
-  ACTOR (policy) — 101 dims — available on a real robot at deployment
+  ACTOR (policy) — 130 dims — available on a real robot at deployment
   ┌─────────────────────────────────────────────────────────────────┐
   │ joint_pos_normalized       22   finger joints only (excl wrist)│
   │ joint_vel_normalized       22   finger joints only (excl wrist)│
@@ -13,12 +13,15 @@ Observation functions – Actor (policy) and Critic (privileged).
   │ rel_fingertip_to_goal      15   (goal - current) in obj frame  │
   │ fingertip_contact_binary    5   tactile: 1 if tip in contact   │
   │ last_action                22   previous joint targets         │
+  │ target_object_pos_hand      3   goal object pos (hand frame)   │
+  │ target_object_quat_hand     4   goal object quat (hand frame)  │
+  │ target_joint_angles        22   goal finger joint positions    │
   └─────────────────────────────────────────────────────────────────┘
-  Total: 22+22+15+15+5+22 = 101
+  Total: 22+22+15+15+5+22+3+4+22 = 130
 
-  CRITIC (privileged) — 132 dims — simulation-only, training only
+  CRITIC (privileged) — 161 dims — simulation-only, training only
   ┌─────────────────────────────────────────────────────────────────┐
-  │ [All actor obs]           101                                   │
+  │ [All actor obs]           130                                   │
   │ object_pos_world            3   true 3-D position              │
   │ object_quat_world           4   true orientation               │
   │ object_lin_vel              3   true linear velocity           │
@@ -26,7 +29,7 @@ Observation functions – Actor (policy) and Critic (privileged).
   │ fingertip_contact_forces   15   full 3-D force per tip, 5×3    │
   │ dr_params                   3   mass / obj_friction / damping  │
   └─────────────────────────────────────────────────────────────────┘
-  Total: 101 + 3 + 4 + 3 + 3 + 15 + 3 = 132
+  Total: 130 + 3 + 4 + 3 + 3 + 15 + 3 = 161
 
   Hand: Shadow Hand E-Series — 5 fingers, 24 total USD DOF
         Policy observes/controls 22 finger joints (wrist WRJ0/WRJ1 excluded)
@@ -166,6 +169,59 @@ def fingertip_contact_binary(env) -> torch.Tensor:
     forces = _get_fingertip_contact_forces_world(env)
     force_mag = torch.norm(forces, dim=-1)                       # (N, F)
     return (force_mag > 0.5).float()
+
+
+def target_object_pos_in_hand_frame(env) -> torch.Tensor:
+    """
+    Goal object position in hand root frame (set by reset/rolling goal).
+    The policy needs this to optimize object_position_reward.
+    Returns: (N, 3)
+    """
+    target = env.extras.get("target_object_pos_hand")
+    if target is None:
+        return torch.zeros(env.num_envs, 3, device=env.device)
+    return target
+
+
+def target_object_quat_in_hand_frame(env) -> torch.Tensor:
+    """
+    Goal object quaternion in hand root frame (set by reset/rolling goal).
+    The policy needs this to optimize object_orientation_reward.
+    Returns: (N, 4)
+    """
+    target = env.extras.get("target_object_quat_hand")
+    if target is None:
+        out = torch.zeros(env.num_envs, 4, device=env.device)
+        out[:, 0] = 1.0  # identity quaternion
+        return out
+    return target
+
+
+def target_joint_angles_normalized(env) -> torch.Tensor:
+    """
+    Goal finger joint positions normalised to [-1, 1] (set by reset/rolling goal).
+    The policy needs this to optimize joint_tracking_reward.
+    Wrist joints excluded to match 22-dim action space.
+    Returns: (N, 22)
+    """
+    target = env.extras.get("target_joint_angles")
+    if target is None:
+        robot = env.scene["robot"]
+        num_dof = robot.data.joint_pos.shape[-1]
+        hand_cfg = getattr(env.cfg, "hand", None) or {}
+        if hand_cfg.get("name", "shadow") == "shadow" and num_dof == 24:
+            num_dof = num_dof - 2
+        return torch.zeros(env.num_envs, num_dof, device=env.device)
+    # Normalize using soft joint limits
+    asset = env.scene["robot"]
+    q_low = asset.data.soft_joint_pos_limits[..., 0]
+    q_high = asset.data.soft_joint_pos_limits[..., 1]
+    q_norm = 2.0 * (target - q_low) / (q_high - q_low + 1e-6) - 1.0
+    q_norm = q_norm.clamp(-1.0, 1.0)
+    hand_cfg = getattr(env.cfg, "hand", None) or {}
+    if hand_cfg.get("name", "shadow") == "shadow" and target.shape[-1] == 24:
+        return q_norm[:, 2:]
+    return q_norm
 
 
 def last_action(env) -> torch.Tensor:

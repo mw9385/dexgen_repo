@@ -77,7 +77,7 @@ Key parameters in `configs/grasp_generation.yaml` (DexGraspNet defaults):
 
 ## Stage 1: RL Training
 
-Symmetric actor-critic PPO. Both actor and critic receive the same 132-dim observation.
+Symmetric actor-critic PPO. Both actor and critic receive the same 161-dim observation.
 
 Hand orientation: palm-down (hand grasps from above). Wrist tilt randomization (+/-15 deg) forces the policy to learn active grasping instead of passive balancing.
 
@@ -88,7 +88,7 @@ Object pool: 3-5cm cube/sphere/cylinder (9 variants), mass 20-100g. Sized for si
     --grasp_graph data/grasp_graph.pkl --num_envs 4096 --headless
 ```
 
-### Observation (132 dims)
+### Observation (161 dims)
 
 | Component | Dims |
 |-----------|------|
@@ -98,6 +98,9 @@ Object pool: 3-5cm cube/sphere/cylinder (9 variants), mass 20-100g. Sized for si
 | Relative fingertip to goal | 15 |
 | Fingertip contact binary | 5 |
 | Last action | 22 |
+| Target object pos (hand frame) | 3 |
+| Target object quat (hand frame) | 4 |
+| Target joint angles (normalized) | 22 |
 | Object position (world) | 3 |
 | Object quaternion | 4 |
 | Object linear velocity | 3 |

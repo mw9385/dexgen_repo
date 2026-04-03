@@ -276,6 +276,11 @@ if _ISAACLAB_AVAILABLE:
             fingertip_contact     = ObsTerm(func=mdp_obs.fingertip_contact_binary)
             last_action           = ObsTerm(func=mdp_obs.last_action)
 
+            # Goal observations — policy needs to see target pose for rewards
+            target_obj_pos_hand  = ObsTerm(func=mdp_obs.target_object_pos_in_hand_frame)
+            target_obj_quat_hand = ObsTerm(func=mdp_obs.target_object_quat_in_hand_frame)
+            target_joint_angles  = ObsTerm(func=mdp_obs.target_joint_angles_normalized)
+
             # Previously critic-only — now shared with actor
             object_pos    = ObsTerm(func=mdp_obs.object_position_world)
             object_quat   = ObsTerm(func=mdp_obs.object_orientation_world)
@@ -305,6 +310,11 @@ if _ISAACLAB_AVAILABLE:
             rel_fingertip_to_goal = ObsTerm(func=mdp_obs.relative_fingertip_to_goal)
             fingertip_contact     = ObsTerm(func=mdp_obs.fingertip_contact_binary)
             last_action           = ObsTerm(func=mdp_obs.last_action)
+
+            # Goal observations
+            target_obj_pos_hand  = ObsTerm(func=mdp_obs.target_object_pos_in_hand_frame)
+            target_obj_quat_hand = ObsTerm(func=mdp_obs.target_object_quat_in_hand_frame)
+            target_joint_angles  = ObsTerm(func=mdp_obs.target_joint_angles_normalized)
 
             object_pos   = ObsTerm(func=mdp_obs.object_position_world)
             object_quat  = ObsTerm(func=mdp_obs.object_orientation_world)
