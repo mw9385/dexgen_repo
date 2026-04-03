@@ -139,7 +139,6 @@ def apply_env_config(env_cfg, env_cfg_dict: dict):
             "object_position": "object_position",
             "object_orientation": "object_orientation",
             "goal_bonus": "goal_bonus",
-            "fingertip_velocity": "fingertip_velocity",
             "work": "work",
             "action": "action",
             "torque": "torque",
