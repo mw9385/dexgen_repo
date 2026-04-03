@@ -273,7 +273,7 @@ if _ISAACLAB_AVAILABLE:
     @configclass
     class AnyGraspObservationsCfg:
         # All spatial observations in HAND ROOT (wrist) frame.
-        # Actor: 106 dims, Critic: 124 dims (actor + privileged)
+        # Actor: 91 dims, Critic: 109 dims (actor + privileged)
 
         @configclass
         class PolicyObs(ObsGroup):
@@ -285,11 +285,6 @@ if _ISAACLAB_AVAILABLE:
             joint_vel = ObsTerm(
                 func=mdp_obs.joint_velocities_normalized,
                 noise=GaussianNoise(std=0.04),
-            )
-            # ── Fingertip state (hand frame) ──
-            fingertip_pos = ObsTerm(
-                func=mdp_obs.fingertip_positions_hand_frame,
-                noise=GaussianNoise(std=0.003),
             )
             # ── Current object state (hand frame) ──
             object_pos   = ObsTerm(func=mdp_obs.object_pos_in_hand_frame)
@@ -318,10 +313,6 @@ if _ISAACLAB_AVAILABLE:
             joint_vel = ObsTerm(
                 func=mdp_obs.joint_velocities_normalized,
                 noise=GaussianNoise(std=0.04),
-            )
-            fingertip_pos = ObsTerm(
-                func=mdp_obs.fingertip_positions_hand_frame,
-                noise=GaussianNoise(std=0.003),
             )
             object_pos   = ObsTerm(func=mdp_obs.object_pos_in_hand_frame)
             object_quat  = ObsTerm(func=mdp_obs.object_quat_in_hand_frame)
