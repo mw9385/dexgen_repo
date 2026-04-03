@@ -149,6 +149,12 @@ def apply_env_config(env_cfg, env_cfg_dict: dict):
             if cfg_name in rewards_cfg and hasattr(env_cfg.rewards, term_name):
                 getattr(env_cfg.rewards, term_name).weight = float(rewards_cfg[cfg_name])
 
+    # Termination overrides from YAML
+    term_cfg = env_cfg_dict.get("terminations", {})
+    if term_cfg:
+        if "no_contact_patience" in term_cfg and hasattr(env_cfg.terminations, "no_fingertip_contact"):
+            env_cfg.terminations.no_fingertip_contact.params["patience"] = int(term_cfg["no_contact_patience"])
+
 
 def _resolve_valid_minibatch_size(batch_size: int, requested_minibatch: int, seq_length: int) -> int:
     """Return the largest valid minibatch not exceeding the requested size."""
@@ -679,6 +685,12 @@ class _IsaacLabVecEnv:
         obs, rew, terminated, truncated, info = self.env.step(delayed_actions)
         done = terminated | truncated
 
+        # Contact reward masking: zero out reward when no fingertip touches the object.
+        # This prevents the policy from earning reward when the object sits on the wrist.
+        from envs.mdp.observations import fingertip_contact_binary
+        contact_mask = (fingertip_contact_binary(self.env).sum(dim=-1) > 0).float()
+        rew = rew * contact_mask
+
         # ── DEBUG: print per-term reward for env 0 ──
         from envs.mdp import rewards as mdp_rewards
         _step_count = getattr(self, "_dbg_step", 0)
@@ -707,8 +719,8 @@ class _IsaacLabVecEnv:
         obj_z = float(self.env.scene["object"].data.root_pos_w[0, 2])
 
         # Fingertip contact count for env 0
-        from envs.mdp.observations import fingertip_contact_binary
         n_contact = int(fingertip_contact_binary(self.env)[0].sum().item())
+        mask0 = int(contact_mask[0].item())
 
         print(f"[RWD step={_step_count:5d} env0] "
               f"orn={r_orn[0]:.3f}(×10={10*r_orn[0]:.2f}) "
@@ -716,7 +728,7 @@ class _IsaacLabVecEnv:
               f"jt={r_jt[0]:.3f}(×0.2={0.2*r_jt[0]:.2f}) "
               f"gb={r_gb[0]:.0f}(×10={10*r_gb[0]:.0f}) "
               f"reg={0.01*(r_wrk[0]+r_act[0]+r_trq[0]):.4f} "
-              f"total={total[0]:.3f} rew={rew[0]:.3f} | "
+              f"total={total[0]:.3f} rew={rew[0]:.3f} mask={mask0} | "
               f"pos_err={pos_err:.4f}m orn_err={orn_err:.3f}rad "
               f"obj_z={obj_z:.3f} contact={n_contact}/5")
 
@@ -768,6 +780,8 @@ class _IsaacLabVecEnv:
                 drop_ratio = float(term_manager.get_term("object_drop").float().mean().item())
             if "object_left_hand" in active:
                 left_hand_ratio = float(term_manager.get_term("object_left_hand").float().mean().item())
+            if "no_fingertip_contact" in active:
+                info["no_contact_ratio"] = float(term_manager.get_term("no_fingertip_contact").float().mean().item())
 
         info["drop_ratio"] = drop_ratio
         info["left_hand_ratio"] = left_hand_ratio

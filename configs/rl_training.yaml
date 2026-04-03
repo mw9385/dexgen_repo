@@ -17,6 +17,9 @@ env:
   actions_moving_average: 1.0    # 1.0=no smoothing, 0.3=strong smoothing
   decimation: 4                  # control at 30 Hz (120 Hz sim / 4)
 
+  terminations:
+    no_contact_patience: 30          # steps with 0 fingertip contact → reset (30 steps = 1s at 30Hz)
+
   rewards:
     # DexterityGen reward (arXiv:2502.04307 Eq. 4-9)
     # All terms normalized to [-1, 1]. Weights control importance.
@@ -160,7 +163,7 @@ domain_randomization:
 
   object_physics:
     mass_range:        [0.05, 0.15]   # kg  (narrowed from [0.03, 0.30])
-    friction_range:    [1.00, 2.00]   # -   high friction for stable grasps
+    friction_range:    [0.20, 0.60]   # -   realistic friction range
     restitution_range: [0.00, 0.20]   # -   (narrowed from [0.00, 0.40])
 
   robot_physics:

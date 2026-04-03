@@ -50,6 +50,30 @@ def object_left_hand(env, max_dist: float = 0.20) -> torch.Tensor:
     return dist > max_dist
 
 
+def no_fingertip_contact(env, patience: int = 30) -> torch.Tensor:
+    """Terminate when no fingertip touches the object for `patience` consecutive steps.
+
+    Uses a per-env counter stored in env.extras["_no_contact_steps"].
+    patience=30 at 30Hz control = 1 second grace period.
+    """
+    from .observations import fingertip_contact_binary
+
+    contact = fingertip_contact_binary(env)          # (N, num_fingers)
+    any_contact = contact.sum(dim=-1) > 0             # (N,)
+
+    # Lazily initialise counter
+    buf = env.extras.get("_no_contact_steps")
+    if buf is None:
+        buf = torch.zeros(env.num_envs, device=env.device, dtype=torch.long)
+        env.extras["_no_contact_steps"] = buf
+
+    # Reset counter where contact exists, increment where it doesn't
+    buf[any_contact] = 0
+    buf[~any_contact] += 1
+
+    return buf >= patience
+
+
 def _log_reset_reasons(env, env_ids: torch.Tensor, max_dist: float = 0.20) -> None:
     return
 
@@ -356,6 +380,10 @@ def reset_to_random_grasp(
     # Reset action buffers to current joint positions for reset envs
     env.extras["last_action"][env_ids] = current_action
     env.extras["current_action"][env_ids] = current_action
+
+    # Reset no-contact termination counter for reset envs
+    if "_no_contact_steps" in env.extras:
+        env.extras["_no_contact_steps"][env_ids] = 0
 
 # ---------------------------------------------------------------------------
 # Start grasp sampling + nearest-neighbor goal selection

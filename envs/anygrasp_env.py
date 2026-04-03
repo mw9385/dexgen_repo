@@ -129,13 +129,11 @@ def _build_object_spawner(object_pool_specs: Optional[List[dict]] = None):
     if not _ISAACLAB_AVAILABLE:
         return None
 
-    # High friction is critical for stable in-hand manipulation.
-    # PhysX default (0.5) is far too low — fingers can't grip the object.
     _DEFAULT_MATERIAL = sim_utils.RigidBodyMaterialCfg(
-        static_friction=1.5,
-        dynamic_friction=1.0,
+        static_friction=0.5,
+        dynamic_friction=0.4,
         restitution=0.0,
-        friction_combine_mode="max",  # use max of finger/object friction
+        friction_combine_mode="max",
     )
 
     if not object_pool_specs:
@@ -213,8 +211,8 @@ if _ISAACLAB_AVAILABLE:
                 mass_props=sim_utils.MassPropertiesCfg(mass=0.05),
                 collision_props=sim_utils.CollisionPropertiesCfg(),
                 physics_material=sim_utils.RigidBodyMaterialCfg(
-                    static_friction=1.5,
-                    dynamic_friction=1.0,
+                    static_friction=0.5,
+                    dynamic_friction=0.4,
                     restitution=0.0,
                     friction_combine_mode="max",
                 ),
@@ -449,13 +447,14 @@ if _ISAACLAB_AVAILABLE:
         time_out = DoneTerm(func=mdp_events.time_out, time_out=True)
         object_drop = DoneTerm(func=mdp_events.object_dropped, params={"min_height": 0.2})
         object_left_hand = DoneTerm(func=mdp_events.object_left_hand, params={"max_dist": 0.20})
+        no_fingertip_contact = DoneTerm(func=mdp_events.no_fingertip_contact, params={"patience": 30})
 
     @configclass
     class AnyGraspEventsCfg:
         randomize_object_physics = EventTerm(
             func=mdp_dr.randomize_object_physics,
             mode="reset",
-            params={"mass_range": (0.02, 0.10), "friction_range": (1.0, 2.0), "restitution_range": (0.00, 0.10)},
+            params={"mass_range": (0.02, 0.10), "friction_range": (0.2, 0.6), "restitution_range": (0.00, 0.10)},
         )
         randomize_robot_physics = EventTerm(
             func=mdp_dr.randomize_robot_physics,
