@@ -306,9 +306,13 @@ def reset_to_random_grasp(
             actual_pos = quat_apply_inverse(rq.unsqueeze(0), rel.unsqueeze(0))[0]
             stored_start = start_object_pos_hand_list[i]
             stored_goal  = goal_object_pos_hand_list[i]
-            print(f"[DIAG-POSE env{env_ids[i]}] actual_obj_pos_hand={actual_pos.cpu().numpy()}")
-            print(f"[DIAG-POSE env{env_ids[i]}] stored_start_pos_hand={stored_start}")
-            print(f"[DIAG-POSE env{env_ids[i]}] stored_goal_pos_hand ={stored_goal}")
+            delta = None
+            if stored_start is not None and stored_goal is not None:
+                delta = np.array(stored_goal) - np.array(stored_start)
+            rebased = actual_pos.cpu().numpy() + delta if delta is not None else actual_pos.cpu().numpy()
+            print(f"[DIAG-POSE env{env_ids[i]}] actual_start={actual_pos.cpu().numpy()}")
+            print(f"[DIAG-POSE env{env_ids[i]}] stored_start={stored_start}  stored_goal={stored_goal}")
+            print(f"[DIAG-POSE env{env_ids[i]}] delta={delta}  rebased_target={rebased}")
 
     for i in range(n):
         # Compute actual object pose in hand frame from sim
@@ -317,16 +321,39 @@ def reset_to_random_grasp(
         op_w = obj_for_goal.data.root_pos_w[env_ids[i]]     # (3,)
         oq_w = obj_for_goal.data.root_quat_w[env_ids[i]]    # (4,)
         rel  = op_w - rp_w
-        cur_obj_pos_hand = quat_apply_inverse(rq_w.unsqueeze(0), rel.unsqueeze(0))[0]
-        cur_obj_quat_hand = _quat_multiply(
+        actual_pos_hand = quat_apply_inverse(rq_w.unsqueeze(0), rel.unsqueeze(0))[0]
+        actual_quat_hand = _quat_multiply(
             _quat_conjugate(rq_w.unsqueeze(0)), oq_w.unsqueeze(0)
         )[0]
 
-        if goal_object_pos_hand_list[i] is None:
-            # No stored goal: use current sim state as target
-            env.extras["target_object_pos_hand"][env_ids[i]] = cur_obj_pos_hand.clone()
-        if goal_object_quat_hand_list[i] is None:
-            env.extras["target_object_quat_hand"][env_ids[i]] = cur_obj_quat_hand.clone()
+        # Rebase target: actual_start + (stored_goal - stored_start)
+        # The stored graph values were computed at a different wrist orientation,
+        # so they don't match the actual sim placement. Apply only the DELTA.
+        sp = start_object_pos_hand_list[i]
+        gp = goal_object_pos_hand_list[i]
+        sq = start_object_quat_hand_list[i]
+        gq = goal_object_quat_hand_list[i]
+
+        if gp is not None and sp is not None:
+            delta_pos = torch.tensor(gp, device=env.device, dtype=torch.float32) \
+                      - torch.tensor(sp, device=env.device, dtype=torch.float32)
+            env.extras["target_object_pos_hand"][env_ids[i]] = actual_pos_hand + delta_pos
+        else:
+            # No stored data: target = current (no position change expected)
+            env.extras["target_object_pos_hand"][env_ids[i]] = actual_pos_hand.clone()
+
+        if gq is not None and sq is not None:
+            # Relative rotation: delta_q = conj(start_q) * goal_q
+            sq_t = torch.tensor(sq, device=env.device, dtype=torch.float32).unsqueeze(0)
+            gq_t = torch.tensor(gq, device=env.device, dtype=torch.float32).unsqueeze(0)
+            delta_quat = _quat_multiply(_quat_conjugate(sq_t), gq_t)[0]
+            # Apply delta to actual: target = actual * delta
+            target_quat = _quat_multiply(actual_quat_hand.unsqueeze(0), delta_quat.unsqueeze(0))[0]
+            # Normalize
+            target_quat = target_quat / (torch.norm(target_quat) + 1e-8)
+            env.extras["target_object_quat_hand"][env_ids[i]] = target_quat
+        else:
+            env.extras["target_object_quat_hand"][env_ids[i]] = actual_quat_hand.clone()
 
     # ------------------------------------------------------------------
     # 8. Initialise action buffers (fixes last_action always being 0)
@@ -629,20 +656,37 @@ def update_rolling_goal(
                 num_dof,
             )
 
-        # Update target_object_pos/quat_hand only when the new goal grasp has a
-        # stored object pose. If none is stored, keep the existing value (which
-        # came from reset via the grasp graph). Overwriting with current sim
-        # state would make object_pose_goal_reward always 1.0 (goal = current).
+        # Rebase target: use delta between old goal (now start) and new goal,
+        # applied to the CURRENT actual sim object pose in hand frame.
+        # This avoids the systematic offset between stored graph values and
+        # the actual sim placement (palm-up + tilt noise changes the frame).
+        old_goal_grasp = g.grasp_set[cur_goal_idx]
+        old_goal_obj_pos  = getattr(old_goal_grasp, "object_pos_hand",  None)
+        old_goal_obj_quat = getattr(old_goal_grasp, "object_quat_hand", None)
         new_goal_obj_pos  = getattr(new_goal_grasp, "object_pos_hand",  None)
         new_goal_obj_quat = getattr(new_goal_grasp, "object_quat_hand", None)
-        if new_goal_obj_pos is not None and "target_object_pos_hand" in env.extras:
-            env.extras["target_object_pos_hand"][env_id] = torch.tensor(
-                new_goal_obj_pos, device=env.device, dtype=torch.float32
-            )
-        if new_goal_obj_quat is not None and "target_object_quat_hand" in env.extras:
-            env.extras["target_object_quat_hand"][env_id] = torch.tensor(
-                new_goal_obj_quat, device=env.device, dtype=torch.float32
-            )
+
+        # Current actual object pose in hand frame
+        _rp = robot.data.root_pos_w[env_id]
+        _rq = robot.data.root_quat_w[env_id]
+        _op = obj.data.root_pos_w[env_id]
+        _oq = obj.data.root_quat_w[env_id]
+        _actual_pos = quat_apply_inverse(_rq.unsqueeze(0), (_op - _rp).unsqueeze(0))[0]
+        _actual_quat = _qm(_qc(_rq.unsqueeze(0)), _oq.unsqueeze(0))[0]
+
+        if new_goal_obj_pos is not None and old_goal_obj_pos is not None \
+                and "target_object_pos_hand" in env.extras:
+            delta_pos = torch.tensor(new_goal_obj_pos, device=env.device, dtype=torch.float32) \
+                      - torch.tensor(old_goal_obj_pos, device=env.device, dtype=torch.float32)
+            env.extras["target_object_pos_hand"][env_id] = _actual_pos + delta_pos
+        if new_goal_obj_quat is not None and old_goal_obj_quat is not None \
+                and "target_object_quat_hand" in env.extras:
+            _sq = torch.tensor(old_goal_obj_quat, device=env.device, dtype=torch.float32).unsqueeze(0)
+            _gq = torch.tensor(new_goal_obj_quat, device=env.device, dtype=torch.float32).unsqueeze(0)
+            delta_quat = _qm(_qc(_sq), _gq)[0]
+            target_quat = _qm(_actual_quat.unsqueeze(0), delta_quat.unsqueeze(0))[0]
+            target_quat = target_quat / (torch.norm(target_quat) + 1e-8)
+            env.extras["target_object_quat_hand"][env_id] = target_quat
 
         # Update indices: old goal becomes new start
         env.extras["goal_grasp_idx"][env_id]  = new_goal_idx
