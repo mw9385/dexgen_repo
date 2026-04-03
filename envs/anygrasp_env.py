@@ -129,6 +129,13 @@ def _build_object_spawner(object_pool_specs: Optional[List[dict]] = None):
     if not _ISAACLAB_AVAILABLE:
         return None
 
+    _DEFAULT_MATERIAL = sim_utils.RigidBodyMaterialCfg(
+        static_friction=0.65,
+        dynamic_friction=0.55,
+        restitution=0.0,
+        friction_combine_mode="max",
+    )
+
     if not object_pool_specs:
         return sim_utils.CuboidCfg(
             size=(0.040, 0.040, 0.040),
@@ -137,6 +144,7 @@ def _build_object_spawner(object_pool_specs: Optional[List[dict]] = None):
             ),
             mass_props=sim_utils.MassPropertiesCfg(mass=0.05),
             collision_props=sim_utils.CollisionPropertiesCfg(),
+            physics_material=_DEFAULT_MATERIAL,
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.8, 0.2, 0.2)),
         )
 
@@ -147,13 +155,14 @@ def _build_object_spawner(object_pool_specs: Optional[List[dict]] = None):
         rp = sim_utils.RigidBodyPropertiesCfg(disable_gravity=False, max_depenetration_velocity=5.0)
         mp = sim_utils.MassPropertiesCfg(mass=spec.get("mass", 0.1))
         cp = sim_utils.CollisionPropertiesCfg()
+        pm = _DEFAULT_MATERIAL
         vm = sim_utils.PreviewSurfaceCfg(diffuse_color=color)
         if shape == "cube":
-            cfg = sim_utils.CuboidCfg(size=(s, s, s), rigid_props=rp, mass_props=mp, collision_props=cp, visual_material=vm)
+            cfg = sim_utils.CuboidCfg(size=(s, s, s), rigid_props=rp, mass_props=mp, collision_props=cp, physics_material=pm, visual_material=vm)
         elif shape == "sphere":
-            cfg = sim_utils.SphereCfg(radius=s/2, rigid_props=rp, mass_props=mp, collision_props=cp, visual_material=vm)
+            cfg = sim_utils.SphereCfg(radius=s/2, rigid_props=rp, mass_props=mp, collision_props=cp, physics_material=pm, visual_material=vm)
         elif shape == "cylinder":
-            cfg = sim_utils.CylinderCfg(radius=s/2, height=s, rigid_props=rp, mass_props=mp, collision_props=cp, visual_material=vm)
+            cfg = sim_utils.CylinderCfg(radius=s/2, height=s, rigid_props=rp, mass_props=mp, collision_props=cp, physics_material=pm, visual_material=vm)
         else:
             continue
         spawner_list.append(cfg)
@@ -201,6 +210,12 @@ if _ISAACLAB_AVAILABLE:
                 ),
                 mass_props=sim_utils.MassPropertiesCfg(mass=0.05),
                 collision_props=sim_utils.CollisionPropertiesCfg(),
+                physics_material=sim_utils.RigidBodyMaterialCfg(
+                    static_friction=0.65,
+                    dynamic_friction=0.55,
+                    restitution=0.0,
+                    friction_combine_mode="max",
+                ),
                 visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.8, 0.2, 0.2)),
             ),
             init_state=RigidObjectCfg.InitialStateCfg(
@@ -257,9 +272,12 @@ if _ISAACLAB_AVAILABLE:
 if _ISAACLAB_AVAILABLE:
     @configclass
     class AnyGraspObservationsCfg:
+        # All spatial observations in HAND ROOT (wrist) frame.
+        # Actor: 106 dims, Critic: 124 dims (actor + privileged)
+
         @configclass
         class PolicyObs(ObsGroup):
-            # Full observation: actor sees everything critic sees
+            # ── Proprioception (joint space) ──
             joint_pos = ObsTerm(
                 func=mdp_obs.joint_positions_normalized,
                 noise=GaussianNoise(std=0.005),
@@ -268,21 +286,23 @@ if _ISAACLAB_AVAILABLE:
                 func=mdp_obs.joint_velocities_normalized,
                 noise=GaussianNoise(std=0.04),
             )
+            # ── Fingertip state (hand frame) ──
             fingertip_pos = ObsTerm(
-                func=mdp_obs.fingertip_positions_in_object_frame,
+                func=mdp_obs.fingertip_positions_hand_frame,
                 noise=GaussianNoise(std=0.003),
             )
-            rel_fingertip_to_goal = ObsTerm(func=mdp_obs.relative_fingertip_to_goal)
-            fingertip_contact     = ObsTerm(func=mdp_obs.fingertip_contact_binary)
-            last_action           = ObsTerm(func=mdp_obs.last_action)
-
-            # Previously critic-only — now shared with actor
-            object_pos    = ObsTerm(func=mdp_obs.object_position_world)
-            object_quat   = ObsTerm(func=mdp_obs.object_orientation_world)
-            object_linvel = ObsTerm(func=mdp_obs.object_linear_velocity)
-            object_angvel = ObsTerm(func=mdp_obs.object_angular_velocity)
-            contact_forces = ObsTerm(func=mdp_obs.fingertip_contact_forces)
-            dr_params      = ObsTerm(func=mdp_obs.domain_randomization_params)
+            # ── Current object state (hand frame) ──
+            object_pos   = ObsTerm(func=mdp_obs.object_pos_in_hand_frame)
+            object_quat  = ObsTerm(func=mdp_obs.object_quat_in_hand_frame)
+            # ── Target object state (hand frame) ──
+            target_obj_pos  = ObsTerm(func=mdp_obs.target_object_pos_in_hand_frame)
+            target_obj_quat = ObsTerm(func=mdp_obs.target_object_quat_in_hand_frame)
+            # ── Object dynamics (hand frame) ──
+            object_linvel = ObsTerm(func=mdp_obs.object_lin_vel_hand_frame)
+            object_angvel = ObsTerm(func=mdp_obs.object_ang_vel_hand_frame)
+            # ── Tactile + action ──
+            fingertip_contact = ObsTerm(func=mdp_obs.fingertip_contact_binary)
+            last_action       = ObsTerm(func=mdp_obs.last_action)
 
             def __post_init__(self):
                 self.enable_corruption  = True
@@ -290,6 +310,7 @@ if _ISAACLAB_AVAILABLE:
 
         @configclass
         class CriticObs(ObsGroup):
+            # Same as actor + privileged info
             joint_pos = ObsTerm(
                 func=mdp_obs.joint_positions_normalized,
                 noise=GaussianNoise(std=0.005),
@@ -299,19 +320,20 @@ if _ISAACLAB_AVAILABLE:
                 noise=GaussianNoise(std=0.04),
             )
             fingertip_pos = ObsTerm(
-                func=mdp_obs.fingertip_positions_in_object_frame,
+                func=mdp_obs.fingertip_positions_hand_frame,
                 noise=GaussianNoise(std=0.003),
             )
-            rel_fingertip_to_goal = ObsTerm(func=mdp_obs.relative_fingertip_to_goal)
-            fingertip_contact     = ObsTerm(func=mdp_obs.fingertip_contact_binary)
-            last_action           = ObsTerm(func=mdp_obs.last_action)
-
-            object_pos   = ObsTerm(func=mdp_obs.object_position_world)
-            object_quat  = ObsTerm(func=mdp_obs.object_orientation_world)
-            object_linvel = ObsTerm(func=mdp_obs.object_linear_velocity)
-            object_angvel = ObsTerm(func=mdp_obs.object_angular_velocity)
+            object_pos   = ObsTerm(func=mdp_obs.object_pos_in_hand_frame)
+            object_quat  = ObsTerm(func=mdp_obs.object_quat_in_hand_frame)
+            target_obj_pos  = ObsTerm(func=mdp_obs.target_object_pos_in_hand_frame)
+            target_obj_quat = ObsTerm(func=mdp_obs.target_object_quat_in_hand_frame)
+            object_linvel = ObsTerm(func=mdp_obs.object_lin_vel_hand_frame)
+            object_angvel = ObsTerm(func=mdp_obs.object_ang_vel_hand_frame)
+            fingertip_contact = ObsTerm(func=mdp_obs.fingertip_contact_binary)
+            last_action       = ObsTerm(func=mdp_obs.last_action)
+            # ── Privileged ──
             contact_forces = ObsTerm(func=mdp_obs.fingertip_contact_forces)
-            dr_params = ObsTerm(func=mdp_obs.domain_randomization_params)
+            dr_params      = ObsTerm(func=mdp_obs.domain_randomization_params)
 
             def __post_init__(self):
                 self.enable_corruption  = True
@@ -356,56 +378,52 @@ if _ISAACLAB_AVAILABLE:
     @configclass
     class AnyGraspRewardsCfg:
         # ══════════════════════════════════════════════════════════════
-        # DexterityGen reward (arXiv:2502.04307 Eq. 4-9)
-        # All terms normalized to [-1, 1]. Weights control importance.
+        # Minimal reward: orientation only + goal bonus + regularization.
+        # Position reward removed — kNN goals have near-zero position
+        # error so it was effectively a free constant (step reward).
+        # In-hand reorientation reward.
+        # All alphas tuned so initial error gives reward ~0.3-0.7
+        # (useful gradient range, not saturated/zero)
+        #
+        # Expected initial errors (kNN goal, DIAG data):
+        #   pos ~ 5-10cm,  orn ~ 0.5-1.5rad,  jt ~ 1-3rad
         # ══════════════════════════════════════════════════════════════
 
-        # ── r_goal (Eq. 5-7) ────────────────────────────────────────
-        # Object position error (Eq. 5, pos part) → [0, 1]
-        object_position = RewTerm(
-            func=mdp_rewards.object_position_reward,
-            weight=1.0,
-            params={"alpha": 20.0},
-        )
-        # Object orientation error (Eq. 5, rot part) → [0, 1]
+        # Object orientation → [0, 1]  ★ PRIMARY
+        #   err=0.5rad→0.37, 1.0→0.14, 1.5→0.05
         object_orientation = RewTerm(
             func=mdp_rewards.object_orientation_reward,
-            weight=1.0,
-            params={"alpha": 10.0},
-        )
-        # Joint tracking (Eq. 6) → [-1, 0]
-        joint_tracking = RewTerm(
-            func=mdp_rewards.joint_tracking_reward,
-            weight=0.5,
+            weight=5.0,
             params={"alpha": 2.0},
         )
-        # Goal bonus (Eq. 7) → {0, 1}
+        # Object position → [0, 1]  (linear error)
+        #   err=3cm→0.74, 5cm→0.61, 10cm→0.37, 20cm→0.14
+        object_position = RewTerm(
+            func=mdp_rewards.object_position_reward,
+            weight=2.0,
+            params={"alpha": 10.0},
+        )
+        # Goal bonus → {0, 1}
         goal_bonus = RewTerm(
             func=mdp_rewards.goal_bonus,
-            weight=5.0,
+            weight=10.0,
             params={"pos_thresh": 0.02, "rot_thresh": 0.1},
         )
 
-        # ── r_style (Eq. 9) — DISABLED for Stage 1 ─────────────────
-        # fingertip_velocity = RewTerm(
-        #     func=mdp_rewards.fingertip_velocity_penalty,
-        #     weight=0.05,
-        # )
-
-        # ── r_reg (Eq. 8) ───────────────────────────────────────────
+        # ── r_reg ──────────────────────────────────────────────────
         work = RewTerm(
             func=mdp_rewards.work_penalty,
-            weight=0.001,
+            weight=0.01,
             params={"alpha": 0.01},
         )
         action = RewTerm(
             func=mdp_rewards.action_penalty,
-            weight=0.001,
+            weight=0.01,
             params={"alpha": 0.5},
         )
         torque = RewTerm(
             func=mdp_rewards.torque_penalty,
-            weight=0.001,
+            weight=0.01,
             params={"alpha": 0.005},
         )
 
@@ -421,13 +439,14 @@ if _ISAACLAB_AVAILABLE:
         time_out = DoneTerm(func=mdp_events.time_out, time_out=True)
         object_drop = DoneTerm(func=mdp_events.object_dropped, params={"min_height": 0.2})
         object_left_hand = DoneTerm(func=mdp_events.object_left_hand, params={"max_dist": 0.20})
+        no_fingertip_contact = DoneTerm(func=mdp_events.no_fingertip_contact, params={"patience": 30})
 
     @configclass
     class AnyGraspEventsCfg:
         randomize_object_physics = EventTerm(
             func=mdp_dr.randomize_object_physics,
             mode="reset",
-            params={"mass_range": (0.02, 0.10), "friction_range": (0.5, 1.0), "restitution_range": (0.00, 0.20)},
+            params={"mass_range": (0.03, 0.08), "friction_range": (0.50, 0.80), "restitution_range": (0.00, 0.10)},
         )
         randomize_robot_physics = EventTerm(
             func=mdp_dr.randomize_robot_physics,
@@ -514,7 +533,7 @@ if _ISAACLAB_AVAILABLE:
                     "object_rot_jitter_deg": 5.0,           # ±5° object orientation jitter
                     "wrist_pos_jitter_std": 0.0,            # no position jitter
                     "wrist_rot_std_deg": 15.0,              # ±15° wrist tilt for robustness
-                    "align_palm_up": False,                 # palm faces downward (-Z), hand grasps from above
+                    "align_palm_up": True,                  # palm faces upward (+Z), gravity keeps object in hand
                 }
 
             if self.reset_refinement is None:

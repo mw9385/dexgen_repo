@@ -49,17 +49,17 @@ def _obj_pose_in_hand_frame(env):
 # 1. GOAL REWARDS  (Eq. 5-7) — each [0, 1]
 # ═══════════════════════════════════════════════════════════
 
-def object_position_reward(env, alpha: float = 20.0) -> torch.Tensor:
+def object_position_reward(env, alpha: float = 40.0) -> torch.Tensor:
     """
-    Eq. 5 (position part): exp(-α * ||p_obj - p_target||²)
+    exp(-α * ||p_obj - p_target||)  — linear error for consistent gradient.
     Returns: (N,) in (0, 1]
     """
     cur_pos, _ = _obj_pose_in_hand_frame(env)
     target_pos = env.extras.get("target_object_pos_hand")
     if target_pos is None:
         return torch.zeros(env.num_envs, device=env.device)
-    pos_err_sq = ((cur_pos - target_pos) ** 2).sum(dim=-1)
-    return torch.exp(-alpha * pos_err_sq)
+    pos_err = torch.norm(cur_pos - target_pos, dim=-1)
+    return torch.exp(-alpha * pos_err)
 
 
 def object_orientation_reward(env, alpha: float = 10.0) -> torch.Tensor:
@@ -74,20 +74,6 @@ def object_orientation_reward(env, alpha: float = 10.0) -> torch.Tensor:
     dot = (cur_quat * target_quat).sum(dim=-1).abs().clamp(0.0, 1.0)
     orn_err = 2.0 * torch.acos(dot)
     return torch.exp(-alpha * orn_err)
-
-
-def joint_tracking_reward(env, alpha: float = 2.0) -> torch.Tensor:
-    """
-    Eq. 6: -α_hand * ||q - q_target||², normalized via tanh.
-    Returns: (N,) in [-1, 0]
-    """
-    robot = env.scene["robot"]
-    target_joints = env.extras.get("target_joint_angles")
-    if target_joints is None:
-        return torch.zeros(env.num_envs, device=env.device)
-    cur_joints = robot.data.joint_pos
-    joint_err = torch.norm(cur_joints - target_joints, dim=-1)
-    return -torch.tanh(alpha * joint_err)
 
 
 def goal_bonus(env, pos_thresh: float = 0.02, rot_thresh: float = 0.1) -> torch.Tensor:

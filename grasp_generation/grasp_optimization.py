@@ -39,13 +39,17 @@ from .hand_model import (
 
 def cal_energy(hand_model: DexGraspNetHandModel,
                object_model: PrimitiveObjectModel,
-               w_dis=100.0, w_pen=100.0, w_spen=10.0, w_joints=1.0,
-               w_pose=10.0):
+               w_dis=100.0, w_pen=100.0, w_spen=10.0, w_joints=1.0):
     """
-    Compute composite grasp energy (DexGraspNet formulation + E_pose).
+    Compute composite grasp energy (DexGraspNet original formulation).
+
+    E = E_fc + w_dis * E_dis + w_pen * E_pen + w_spen * E_spen + w_joints * E_joints
+
+    Exactly matches PKU-EPIC/DexGraspNet/grasp_generation/utils/energy.py.
+    No E_pose term — the original paper does not penalize joint pose deviation.
 
     Returns:
-        total_energy, E_fc, E_dis, E_pen, E_spen, E_joints, E_pose — all (B,)
+        total_energy, E_fc, E_dis, E_pen, E_spen, E_joints — all (B,)
     """
     device = hand_model.device
     batch_size, n_contact, _ = hand_model.contact_points.shape
@@ -88,24 +92,15 @@ def cal_energy(hand_model: DexGraspNetHandModel,
     if object_surface_points.shape[0] == 1:
         object_surface_points = object_surface_points.expand(batch_size, -1, -1)
     distances = hand_model.cal_distance(object_surface_points)
-    E_pen = torch.clamp(distances, min=0.0).sum(-1)
+    distances[distances <= 0] = 0
+    E_pen = distances.sum(-1)
 
     # E_spen: self-penetration
     E_spen = hand_model.self_penetration()
 
-    # E_pose: penalize deviation from natural grasp pose
-    # DexGraspNet canonical hand articulation — a relaxed power grasp
-    joint_angles_mu = torch.tensor(
-        [0.1, 0, 0.6, 0, 0, 0, 0.6, 0, -0.1, 0, 0.6, 0,
-         0, -0.2, 0, 0.6, 0, 0, 1.2, 0, -0.2, 0],
-        dtype=torch.float, device=device,
-    )
-    joint_diff = hand_model.hand_pose[:, 9:] - joint_angles_mu.unsqueeze(0)
-    E_pose = (joint_diff ** 2).sum(dim=-1)
-
     total = (E_fc + w_dis * E_dis + w_pen * E_pen + w_spen * E_spen
-             + w_joints * E_joints + w_pose * E_pose)
-    return total, E_fc, E_dis, E_pen, E_spen, E_joints, E_pose
+             + w_joints * E_joints)
+    return total, E_fc, E_dis, E_pen, E_spen, E_joints
 
 
 # ---------------------------------------------------------------------------
@@ -229,8 +224,8 @@ def initialize_grasp_poses(hand_model: DexGraspNetHandModel,
                            object_model: PrimitiveObjectModel,
                            batch_size: int,
                            n_contact: int = 4,
-                           distance_range=(0.12, 0.25),
-                           jitter_strength: float = 0.3,
+                           distance_range=(0.2, 0.3),
+                           jitter_strength: float = 0.1,
                            device: str = "cuda"):
     """
     Initialize hand poses around the object for Simulated Annealing.
@@ -242,7 +237,7 @@ def initialize_grasp_poses(hand_model: DexGraspNetHandModel,
     # Sample approach points from inflated convex hull
     hull = mesh.convex_hull
     vertices = hull.vertices.copy()
-    vertices += 0.15 * vertices / (np.linalg.norm(vertices, axis=1, keepdims=True) + 1e-8)
+    vertices += 0.2 * vertices / (np.linalg.norm(vertices, axis=1, keepdims=True) + 1e-8)
     inflated = trimesh.Trimesh(vertices=vertices, faces=hull.faces).convex_hull
 
     hull_points, _ = trimesh.sample.sample_surface(inflated, batch_size * 10)
@@ -352,10 +347,9 @@ class GraspOptimizer:
         w_pen: float = 100.0,
         w_spen: float = 10.0,
         w_joints: float = 1.0,
-        w_pose: float = 10.0,
         # SA optimizer params
-        n_iter: int = 2000,
-        batch_size: int = 128,
+        n_iter: int = 6000,
+        batch_size: int = 500,
         n_contact: int = 4,
         step_size: float = 0.005,
         starting_temperature: float = 18.0,
@@ -363,7 +357,7 @@ class GraspOptimizer:
         # Filtering thresholds
         thres_fc: float = 0.3,
         thres_dis: float = 0.005,
-        thres_pen: float = 0.02,
+        thres_pen: float = 0.001,
         # Device
         device: str = "cuda",
         # Unused params (for backward compat with CLI)
@@ -377,7 +371,7 @@ class GraspOptimizer:
         self.w_pen = w_pen
         self.w_spen = w_spen
         self.w_joints = w_joints
-        self.w_pose = w_pose
+        # No w_pose — original DexGraspNet does not use E_pose
         self.n_iter = n_iter
         self.batch_size = batch_size
         self.n_contact = n_contact
@@ -454,22 +448,22 @@ class GraspOptimizer:
         )
 
         # Compute initial energy
-        energy, E_fc, E_dis, E_pen, E_spen, E_joints, E_pose = cal_energy(
+        energy, E_fc, E_dis, E_pen, E_spen, E_joints = cal_energy(
             self.hand_model, self.object_model,
-            self.w_dis, self.w_pen, self.w_spen, self.w_joints, self.w_pose,
+            self.w_dis, self.w_pen, self.w_spen, self.w_joints,
         )
-        energy.sum().backward()
+        energy.sum().backward(retain_graph=True)
 
         # Main SA loop
         for step in range(1, self.n_iter + 1):
             optimizer.try_step()
             optimizer.zero_grad()
 
-            new_energy, new_fc, new_dis, new_pen, new_spen, new_joints, new_pose = cal_energy(
+            new_energy, new_fc, new_dis, new_pen, new_spen, new_joints = cal_energy(
                 self.hand_model, self.object_model,
-                self.w_dis, self.w_pen, self.w_spen, self.w_joints, self.w_pose,
+                self.w_dis, self.w_pen, self.w_spen, self.w_joints,
             )
-            new_energy.sum().backward()
+            new_energy.sum().backward(retain_graph=True)
 
             accept, temperature = optimizer.accept_step(energy, new_energy)
 
@@ -481,7 +475,6 @@ class GraspOptimizer:
                 E_pen[accept] = new_pen[accept].detach()
                 E_spen[accept] = new_spen[accept].detach()
                 E_joints[accept] = new_joints[accept].detach()
-                E_pose[accept] = new_pose[accept].detach()
 
             if step % 500 == 0 or step == 1:
                 n_good = int(((E_fc < self.thres_fc) & (E_dis < self.thres_dis)).sum())

@@ -17,21 +17,23 @@ env:
   actions_moving_average: 1.0    # 1.0=no smoothing, 0.3=strong smoothing
   decimation: 4                  # control at 30 Hz (120 Hz sim / 4)
 
+  terminations:
+    no_contact_patience: 30          # steps with 0 fingertip contact → reset (30 steps = 1s at 30Hz)
+
   rewards:
     # DexterityGen reward (arXiv:2502.04307 Eq. 4-9)
     # All terms normalized to [-1, 1]. Weights control importance.
     #
     # r_goal (Eq. 5-7)
-    object_position:     1.0     # exp(-α * ||pos_err||²)     [0, 1]
-    object_orientation:  1.0     # exp(-α * rot_err)           [0, 1]
-    joint_tracking:      0.5     # -tanh(α * ||q_err||)        [-1, 0]
-    goal_bonus:          5.0     # 1(goal achieved)            {0, 1}
+    object_orientation:  10.0    # exp(-α * rot_err)           [0, 1]  ★ PRIMARY
+    object_position:     0.5     # exp(-α * ||pos_err||)       [0, 1]  (near 1.0 after rebase)
+    goal_bonus:          10.0    # 1(goal achieved)            {0, 1}
     # r_style (Eq. 9) — disabled for Stage 1
     # fingertip_velocity: 0.05
     # r_reg (Eq. 8)
-    work:                0.001
-    action:              0.001
-    torque:              0.001
+    work:                0.01
+    action:              0.01
+    torque:              0.01
     # No termination penalty — drop/escape handled by DoneTerm only
 
 # ==============================================================================
@@ -159,8 +161,8 @@ logging:
 domain_randomization:
 
   object_physics:
-    mass_range:        [0.05, 0.15]   # kg  (narrowed from [0.03, 0.30])
-    friction_range:    [0.50, 1.00]   # -   (narrowed from [0.30, 1.20])
+    mass_range:        [0.03, 0.08]   # kg  tennis ball ~58g
+    friction_range:    [0.50, 0.80]   # -   tennis ball felt surface
     restitution_range: [0.00, 0.20]   # -   (narrowed from [0.00, 0.40])
 
   robot_physics:
