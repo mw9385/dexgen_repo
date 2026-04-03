@@ -288,31 +288,44 @@ def reset_to_random_grasp(
     _place_object_in_hand(env, env_ids, start_fps)
 
     # ------------------------------------------------------------------
-    # 7. Fill in target_object_pos/quat_hand for envs that had no stored
-    #    goal object pose in the grasp graph (goal_object_pos_hand is None).
-    #    For envs WITH a stored goal pose it was already written above at
-    #    lines ~200-208 and must NOT be overwritten with the start sim state.
-    #    Overwriting the goal with the start pose would make the reward always
-    #    fire at maximum from step 0, providing no learning signal.
+    # 7. Compute actual object pose in hand frame from sim state,
+    #    then use it to validate / override stored graph values.
     # ------------------------------------------------------------------
     robot_for_goal = env.scene["robot"]
     obj_for_goal   = env.scene["object"]
     obj_for_goal.update(0.0)
+
+    # Diagnostic: compare actual sim object_pos_hand with stored graph values
+    if not getattr(env, "_obj_pose_diag_logged", False):
+        env._obj_pose_diag_logged = True
+        for i in range(min(n, 3)):  # print first 3 envs
+            rp = robot_for_goal.data.root_pos_w[env_ids[i]]
+            rq = robot_for_goal.data.root_quat_w[env_ids[i]]
+            op = obj_for_goal.data.root_pos_w[env_ids[i]]
+            rel = op - rp
+            actual_pos = quat_apply_inverse(rq.unsqueeze(0), rel.unsqueeze(0))[0]
+            stored_start = start_object_pos_hand_list[i]
+            stored_goal  = goal_object_pos_hand_list[i]
+            print(f"[DIAG-POSE env{env_ids[i]}] actual_obj_pos_hand={actual_pos.cpu().numpy()}")
+            print(f"[DIAG-POSE env{env_ids[i]}] stored_start_pos_hand={stored_start}")
+            print(f"[DIAG-POSE env{env_ids[i]}] stored_goal_pos_hand ={stored_goal}")
+
     for i in range(n):
-        # Only fall back to start sim state when the grasp graph had no goal pose
-        if goal_object_pos_hand_list[i] is not None:
-            continue
+        # Compute actual object pose in hand frame from sim
         rp_w = robot_for_goal.data.root_pos_w[env_ids[i]]   # (3,)
         rq_w = robot_for_goal.data.root_quat_w[env_ids[i]]  # (4,)
         op_w = obj_for_goal.data.root_pos_w[env_ids[i]]     # (3,)
         oq_w = obj_for_goal.data.root_quat_w[env_ids[i]]    # (4,)
         rel  = op_w - rp_w
         cur_obj_pos_hand = quat_apply_inverse(rq_w.unsqueeze(0), rel.unsqueeze(0))[0]
-        env.extras["target_object_pos_hand"][env_ids[i]] = cur_obj_pos_hand.clone()
+        cur_obj_quat_hand = _quat_multiply(
+            _quat_conjugate(rq_w.unsqueeze(0)), oq_w.unsqueeze(0)
+        )[0]
+
+        if goal_object_pos_hand_list[i] is None:
+            # No stored goal: use current sim state as target
+            env.extras["target_object_pos_hand"][env_ids[i]] = cur_obj_pos_hand.clone()
         if goal_object_quat_hand_list[i] is None:
-            cur_obj_quat_hand = _quat_multiply(
-                _quat_conjugate(rq_w.unsqueeze(0)), oq_w.unsqueeze(0)
-            )[0]
             env.extras["target_object_quat_hand"][env_ids[i]] = cur_obj_quat_hand.clone()
 
     # ------------------------------------------------------------------
