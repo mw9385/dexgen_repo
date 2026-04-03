@@ -706,6 +706,10 @@ class _IsaacLabVecEnv:
         orn_err = float(2.0 * torch.acos(torch.tensor(dot).clamp(-1,1)))
         obj_z = float(self.env.scene["object"].data.root_pos_w[0, 2])
 
+        # Fingertip contact count for env 0
+        from envs.mdp.observations import fingertip_contact_binary
+        n_contact = int(fingertip_contact_binary(self.env)[0].sum().item())
+
         print(f"[RWD step={_step_count:5d} env0] "
               f"orn={r_orn[0]:.3f}(×10={10*r_orn[0]:.2f}) "
               f"pos={r_pos[0]:.3f}(×0.5={0.5*r_pos[0]:.2f}) "
@@ -713,12 +717,8 @@ class _IsaacLabVecEnv:
               f"gb={r_gb[0]:.0f}(×10={10*r_gb[0]:.0f}) "
               f"reg={0.01*(r_wrk[0]+r_act[0]+r_trq[0]):.4f} "
               f"total={total[0]:.3f} rew={rew[0]:.3f} | "
-              f"cur_pos=({cp[0]:.3f},{cp[1]:.3f},{cp[2]:.3f}) "
-              f"tgt_pos=({tp[0]:.3f},{tp[1]:.3f},{tp[2]:.3f}) "
-              f"pos_err={pos_err:.4f}m | "
-              f"cur_quat=({cq[0]:.2f},{cq[1]:.2f},{cq[2]:.2f},{cq[3]:.2f}) "
-              f"tgt_quat=({tq[0]:.2f},{tq[1]:.2f},{tq[2]:.2f},{tq[3]:.2f}) "
-              f"orn_err={orn_err:.3f}rad obj_z={obj_z:.3f}")
+              f"pos_err={pos_err:.4f}m orn_err={orn_err:.3f}rad "
+              f"obj_z={obj_z:.3f} contact={n_contact}/5")
 
         # Delta mode: re-initialise joint target for reset envs
         if self._action_mode == "delta" and done.any():
