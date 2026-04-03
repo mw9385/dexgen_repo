@@ -162,7 +162,7 @@ domain_randomization:
 
   object_physics:
     mass_range:        [0.05, 0.10]   # kg  50-100g (tennis ball ~58g)
-    friction_range:    [0.50, 0.80]   # -   tennis ball felt surface
+    friction_range:    [0.80, 1.20]   # -   high grip for stable manipulation
     restitution_range: [0.00, 0.20]   # -   (narrowed from [0.00, 0.40])
 
   robot_physics:
