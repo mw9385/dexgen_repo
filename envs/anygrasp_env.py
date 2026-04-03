@@ -446,7 +446,7 @@ if _ISAACLAB_AVAILABLE:
         randomize_object_physics = EventTerm(
             func=mdp_dr.randomize_object_physics,
             mode="reset",
-            params={"mass_range": (0.03, 0.08), "friction_range": (0.50, 0.80), "restitution_range": (0.00, 0.10)},
+            params={"mass_range": (0.05, 0.10), "friction_range": (0.50, 0.80), "restitution_range": (0.00, 0.10)},
         )
         randomize_robot_physics = EventTerm(
             func=mdp_dr.randomize_robot_physics,
