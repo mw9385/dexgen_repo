@@ -403,14 +403,6 @@ if _ISAACLAB_AVAILABLE:
             weight=2.0,
             params={"alpha": 10.0},
         )
-        # Finger joint tracking → [-1, 0]
-        #   err=1rad→-0.29, 2rad→-0.54, 3rad→-0.71
-        # Weight lowered: was dominating (jt*1.0=-0.83 > orn*5+pos*2=0.41)
-        joint_tracking = RewTerm(
-            func=mdp_rewards.joint_tracking_reward,
-            weight=0.2,
-            params={"alpha": 0.3},
-        )
         # Goal bonus → {0, 1}
         goal_bonus = RewTerm(
             func=mdp_rewards.goal_bonus,

@@ -27,7 +27,6 @@ env:
     # r_goal (Eq. 5-7)
     object_orientation:  10.0    # exp(-α * rot_err)           [0, 1]  ★ PRIMARY
     object_position:     0.5     # exp(-α * ||pos_err||)       [0, 1]  (near 1.0 after rebase)
-    joint_tracking:      0.2     # -tanh(α * ||q_err||)        [-1, 0]
     goal_bonus:          10.0    # 1(goal achieved)            {0, 1}
     # r_style (Eq. 9) — disabled for Stage 1
     # fingertip_velocity: 0.05

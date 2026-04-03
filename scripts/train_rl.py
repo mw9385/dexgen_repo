@@ -138,7 +138,6 @@ def apply_env_config(env_cfg, env_cfg_dict: dict):
         reward_terms = {
             "object_position": "object_position",
             "object_orientation": "object_orientation",
-            "joint_tracking": "joint_tracking",
             "goal_bonus": "goal_bonus",
             "fingertip_velocity": "fingertip_velocity",
             "work": "work",
@@ -697,12 +696,11 @@ class _IsaacLabVecEnv:
         self._dbg_step = _step_count + 1
         r_orn = mdp_rewards.object_orientation_reward(self.env, alpha=2.0)
         r_pos = mdp_rewards.object_position_reward(self.env, alpha=10.0)
-        r_jt  = mdp_rewards.joint_tracking_reward(self.env, alpha=0.3)
         r_gb  = mdp_rewards.goal_bonus(self.env, pos_thresh=0.02, rot_thresh=0.1)
         r_wrk = mdp_rewards.work_penalty(self.env, alpha=0.01)
         r_act = mdp_rewards.action_penalty(self.env, alpha=0.5)
         r_trq = mdp_rewards.torque_penalty(self.env, alpha=0.005)
-        total = (10.0*r_orn + 0.5*r_pos + 0.2*r_jt + 10.0*r_gb
+        total = (10.0*r_orn + 0.5*r_pos + 10.0*r_gb
                  + 0.01*r_wrk + 0.01*r_act + 0.01*r_trq)
 
         from envs.mdp.rewards import _obj_pose_in_hand_frame
@@ -725,7 +723,6 @@ class _IsaacLabVecEnv:
         print(f"[RWD step={_step_count:5d} env0] "
               f"orn={r_orn[0]:.3f}(×10={10*r_orn[0]:.2f}) "
               f"pos={r_pos[0]:.3f}(×0.5={0.5*r_pos[0]:.2f}) "
-              f"jt={r_jt[0]:.3f}(×0.2={0.2*r_jt[0]:.2f}) "
               f"gb={r_gb[0]:.0f}(×10={10*r_gb[0]:.0f}) "
               f"reg={0.01*(r_wrk[0]+r_act[0]+r_trq[0]):.4f} "
               f"total={total[0]:.3f} rew={rew[0]:.3f} mask={mask0} | "
