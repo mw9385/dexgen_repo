@@ -287,26 +287,6 @@ def reset_to_random_grasp(
     # the object pose that matches the grasp's fingertip-in-object-frame data.
     _place_object_in_hand(env, env_ids, start_fps)
 
-    # Step 5: Apply initial grip squeeze.
-    # DexGraspNet grasps are geometric — fingers are placed near the object
-    # but PD target = current position → zero torque → no grip force.
-    # With palm-down, gravity pulls the object out before the policy can act.
-    # Fix: offset the PD joint target slightly toward flexion (more closed)
-    # so the controller generates inward gripping force from substep 0.
-    squeeze_rad = float(cfg.get("reset_squeeze_rad", 0.05))  # ~3 degrees
-    if squeeze_rad > 0.0:
-        cur_q = robot.data.joint_pos[env_ids].clone()
-        q_low = robot.data.soft_joint_pos_limits[env_ids, :, 0]
-        q_high = robot.data.soft_joint_pos_limits[env_ids, :, 1]
-        # Squeeze = move toward more closed (higher joint angle for flexion).
-        # For Shadow Hand, flexion joints have positive = closed direction.
-        # Wrist joints [0:2] are excluded from squeezing.
-        squeeze_target = cur_q.clone()
-        squeeze_target[:, 2:] = (cur_q[:, 2:] + squeeze_rad).clamp(
-            q_low[:, 2:], q_high[:, 2:]
-        )
-        robot.set_joint_position_target(squeeze_target, env_ids=env_ids)
-
     # ------------------------------------------------------------------
     # 7. Fill in target_object_pos/quat_hand for envs that had no stored
     #    goal object pose in the grasp graph (goal_object_pos_hand is None).
