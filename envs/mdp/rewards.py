@@ -49,17 +49,17 @@ def _obj_pose_in_hand_frame(env):
 # 1. GOAL REWARDS  (Eq. 5-7) — each [0, 1]
 # ═══════════════════════════════════════════════════════════
 
-def object_position_reward(env, alpha: float = 20.0) -> torch.Tensor:
+def object_position_reward(env, alpha: float = 40.0) -> torch.Tensor:
     """
-    Eq. 5 (position part): exp(-α * ||p_obj - p_target||²)
+    exp(-α * ||p_obj - p_target||)  — linear error for consistent gradient.
     Returns: (N,) in (0, 1]
     """
     cur_pos, _ = _obj_pose_in_hand_frame(env)
     target_pos = env.extras.get("target_object_pos_hand")
     if target_pos is None:
         return torch.zeros(env.num_envs, device=env.device)
-    pos_err_sq = ((cur_pos - target_pos) ** 2).sum(dim=-1)
-    return torch.exp(-alpha * pos_err_sq)
+    pos_err = torch.norm(cur_pos - target_pos, dim=-1)
+    return torch.exp(-alpha * pos_err)
 
 
 def object_orientation_reward(env, alpha: float = 10.0) -> torch.Tensor:

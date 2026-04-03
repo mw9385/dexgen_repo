@@ -366,47 +366,56 @@ if _ISAACLAB_AVAILABLE:
         # Minimal reward: orientation only + goal bonus + regularization.
         # Position reward removed — kNN goals have near-zero position
         # error so it was effectively a free constant (step reward).
-        # Drop penalty not added — orientation naturally goes to 0 when
-        # object falls, providing implicit "hold to earn" incentive.
+        # In-hand reorientation reward.
+        # Priority: orientation >> position > joint_tracking > goal_bonus > reg
+        # The dominant signal must be "rotate the object toward the goal".
         # ══════════════════════════════════════════════════════════════
 
-        # Object orientation error → [0, 1]
-        # alpha=2.0: smooth gradient even at large errors
-        #   err=0.5rad → 0.37,  err=1.0rad → 0.14
+        # Object orientation → [0, 1]  ★ PRIMARY
+        # alpha=2.0: gradient alive at all error ranges
+        #   err=0.3rad→0.55, 0.5→0.37, 1.0→0.14, 1.5→0.05
         object_orientation = RewTerm(
             func=mdp_rewards.object_orientation_reward,
-            weight=2.0,
+            weight=5.0,
             params={"alpha": 2.0},
         )
+        # Object position → [0, 1]
+        # Linear error (not squared) for consistent gradient.
+        # Keeps object in place while rotating.
+        object_position = RewTerm(
+            func=mdp_rewards.object_position_reward,
+            weight=2.0,
+            params={"alpha": 40.0},
+        )
         # Finger joint tracking → [-1, 0]
-        # Guides fingers toward goal grasp configuration.
-        # Low weight so it doesn't block intermediate states.
+        # Guides fingers toward goal configuration.
         joint_tracking = RewTerm(
             func=mdp_rewards.joint_tracking_reward,
-            weight=0.2,
+            weight=1.0,
             params={"alpha": 1.0},
         )
         # Goal bonus → {0, 1}
+        # Sparse reward when target achieved.
         goal_bonus = RewTerm(
             func=mdp_rewards.goal_bonus,
-            weight=5.0,
+            weight=10.0,
             params={"pos_thresh": 0.02, "rot_thresh": 0.1},
         )
 
         # ── r_reg ──────────────────────────────────────────────────
         work = RewTerm(
             func=mdp_rewards.work_penalty,
-            weight=0.001,
+            weight=0.01,
             params={"alpha": 0.01},
         )
         action = RewTerm(
             func=mdp_rewards.action_penalty,
-            weight=0.001,
+            weight=0.01,
             params={"alpha": 0.5},
         )
         torque = RewTerm(
             func=mdp_rewards.torque_penalty,
-            weight=0.001,
+            weight=0.01,
             params={"alpha": 0.005},
         )
 
