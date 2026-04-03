@@ -520,10 +520,10 @@ if _ISAACLAB_AVAILABLE:
                 # Stage 0 data is valid for any wrist orientation because
                 # fingertip and object poses are stored in hand-relative frames.
                 self.reset_randomization = {
-                    "object_pos_jitter_std": 0.005,         # 5 mm position jitter
-                    "object_rot_jitter_deg": 5.0,           # ±5° object orientation jitter
+                    "object_pos_jitter_std": 0.0,           # no position jitter
+                    "object_rot_jitter_deg": 0.0,           # no rotation jitter
                     "wrist_pos_jitter_std": 0.0,            # no position jitter
-                    "wrist_rot_std_deg": 15.0,              # ±15° wrist tilt for robustness
+                    "wrist_rot_std_deg": 0.0,               # no wrist tilt
                     "align_palm_up": True,                  # palm faces upward (+Z), gravity keeps object in hand
                 }
 
