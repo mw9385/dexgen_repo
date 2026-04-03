@@ -140,7 +140,7 @@ def _build_object_spawner(object_pool_specs: Optional[List[dict]] = None):
         return sim_utils.CuboidCfg(
             size=(0.040, 0.040, 0.040),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                disable_gravity=False, max_depenetration_velocity=5.0,
+                disable_gravity=False, max_depenetration_velocity=0.5,
             ),
             mass_props=sim_utils.MassPropertiesCfg(mass=0.05),
             collision_props=sim_utils.CollisionPropertiesCfg(),
@@ -206,7 +206,7 @@ if _ISAACLAB_AVAILABLE:
             spawn=sim_utils.CuboidCfg(
                 size=(0.040, 0.040, 0.040),
                 rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                    disable_gravity=False, max_depenetration_velocity=5.0,
+                    disable_gravity=False, max_depenetration_velocity=0.5,
                 ),
                 mass_props=sim_utils.MassPropertiesCfg(mass=0.05),
                 collision_props=sim_utils.CollisionPropertiesCfg(),
