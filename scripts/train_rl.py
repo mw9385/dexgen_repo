@@ -690,7 +690,7 @@ class _IsaacLabVecEnv:
         r_wrk = mdp_rewards.work_penalty(self.env, alpha=0.01)
         r_act = mdp_rewards.action_penalty(self.env, alpha=0.5)
         r_trq = mdp_rewards.torque_penalty(self.env, alpha=0.005)
-        total = (5.0*r_orn + 2.0*r_pos + 0.2*r_jt + 10.0*r_gb
+        total = (10.0*r_orn + 0.5*r_pos + 0.2*r_jt + 10.0*r_gb
                  + 0.01*r_wrk + 0.01*r_act + 0.01*r_trq)
 
         from envs.mdp.rewards import _obj_pose_in_hand_frame
@@ -707,8 +707,8 @@ class _IsaacLabVecEnv:
         obj_z = float(self.env.scene["object"].data.root_pos_w[0, 2])
 
         print(f"[RWD step={_step_count:5d} env0] "
-              f"orn={r_orn[0]:.3f}(×5={5*r_orn[0]:.2f}) "
-              f"pos={r_pos[0]:.3f}(×2={2*r_pos[0]:.2f}) "
+              f"orn={r_orn[0]:.3f}(×10={10*r_orn[0]:.2f}) "
+              f"pos={r_pos[0]:.3f}(×0.5={0.5*r_pos[0]:.2f}) "
               f"jt={r_jt[0]:.3f}(×0.2={0.2*r_jt[0]:.2f}) "
               f"gb={r_gb[0]:.0f}(×10={10*r_gb[0]:.0f}) "
               f"reg={0.01*(r_wrk[0]+r_act[0]+r_trq[0]):.4f} "
