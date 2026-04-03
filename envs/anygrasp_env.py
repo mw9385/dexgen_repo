@@ -130,8 +130,8 @@ def _build_object_spawner(object_pool_specs: Optional[List[dict]] = None):
         return None
 
     _DEFAULT_MATERIAL = sim_utils.RigidBodyMaterialCfg(
-        static_friction=0.5,
-        dynamic_friction=0.4,
+        static_friction=0.65,
+        dynamic_friction=0.55,
         restitution=0.0,
         friction_combine_mode="max",
     )
@@ -211,8 +211,8 @@ if _ISAACLAB_AVAILABLE:
                 mass_props=sim_utils.MassPropertiesCfg(mass=0.05),
                 collision_props=sim_utils.CollisionPropertiesCfg(),
                 physics_material=sim_utils.RigidBodyMaterialCfg(
-                    static_friction=0.5,
-                    dynamic_friction=0.4,
+                    static_friction=0.65,
+                    dynamic_friction=0.55,
                     restitution=0.0,
                     friction_combine_mode="max",
                 ),
@@ -446,7 +446,7 @@ if _ISAACLAB_AVAILABLE:
         randomize_object_physics = EventTerm(
             func=mdp_dr.randomize_object_physics,
             mode="reset",
-            params={"mass_range": (0.02, 0.10), "friction_range": (0.2, 0.6), "restitution_range": (0.00, 0.10)},
+            params={"mass_range": (0.03, 0.08), "friction_range": (0.50, 0.80), "restitution_range": (0.00, 0.10)},
         )
         randomize_robot_physics = EventTerm(
             func=mdp_dr.randomize_robot_physics,

@@ -161,8 +161,8 @@ logging:
 domain_randomization:
 
   object_physics:
-    mass_range:        [0.05, 0.15]   # kg  (narrowed from [0.03, 0.30])
-    friction_range:    [0.20, 0.60]   # -   realistic friction range
+    mass_range:        [0.03, 0.08]   # kg  tennis ball ~58g
+    friction_range:    [0.50, 0.80]   # -   tennis ball felt surface
     restitution_range: [0.00, 0.20]   # -   (narrowed from [0.00, 0.40])
 
   robot_physics:

@@ -76,20 +76,6 @@ def object_orientation_reward(env, alpha: float = 10.0) -> torch.Tensor:
     return torch.exp(-alpha * orn_err)
 
 
-def joint_tracking_reward(env, alpha: float = 2.0) -> torch.Tensor:
-    """
-    Eq. 6: -α_hand * ||q - q_target||², normalized via tanh.
-    Returns: (N,) in [-1, 0]
-    """
-    robot = env.scene["robot"]
-    target_joints = env.extras.get("target_joint_angles")
-    if target_joints is None:
-        return torch.zeros(env.num_envs, device=env.device)
-    cur_joints = robot.data.joint_pos
-    joint_err = torch.norm(cur_joints - target_joints, dim=-1)
-    return -torch.tanh(alpha * joint_err)
-
-
 def goal_bonus(env, pos_thresh: float = 0.02, rot_thresh: float = 0.1) -> torch.Tensor:
     """
     Eq. 7: 1(goal achieved). pos < 2cm, rot < 0.1 rad (~5.7°).
