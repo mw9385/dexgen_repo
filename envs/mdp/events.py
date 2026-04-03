@@ -285,18 +285,24 @@ def reset_to_random_grasp(
     start_world = local_to_world_points(start_fps, obj_pos_w, obj_quat_w)
     goal_world = local_to_world_points(goal_fps, obj_pos_w, obj_quat_w)
 
-    # Step 3: Compute wrist pose from fingertip positions
-    wrist_pos, wrist_quat = compute_wrist_from_fingertips(
-        env, env_ids, start_world,
-    )
-    set_robot_root_pose(env, env_ids, wrist_pos, wrist_quat)
-
-    # Step 4: Set joints — direct if available, adaptive otherwise
     if has_joints:
+        # ── Solved graph path: joint_angles already validated by solve_grasp_graph ──
+        # Compute wrist, set stored joints, skip IK (already solved).
+        wrist_pos, wrist_quat = compute_wrist_from_fingertips(
+            env, env_ids, start_world,
+        )
+        set_robot_root_pose(env, env_ids, wrist_pos, wrist_quat)
         set_robot_joints_direct(env, env_ids, start_joints_list)
+        robot.update(0.0)
     else:
-        # Get object size from graph specs
-        obj_size = 0.06   # default
+        # ── Unsolved graph path: run per-finger IK at reset time ──
+        wrist_pos, wrist_quat = compute_wrist_from_fingertips(
+            env, env_ids, start_world,
+        )
+        set_robot_root_pose(env, env_ids, wrist_pos, wrist_quat)
+
+        # Adaptive initial joints based on object size
+        obj_size = 0.06
         graph = _load_grasp_graph(env)
         if graph is not None and hasattr(graph, "object_specs"):
             for name in sampled_obj_names[:1]:
@@ -305,22 +311,21 @@ def reset_to_random_grasp(
                     obj_size = float(spec["size"])
                     break
         set_adaptive_joint_pose(env, env_ids, obj_size)
+        robot.update(0.0)
 
-    # Step 5: FK update + differential IK (object stays fixed)
-    robot.update(0.0)
+        # Re-fix object during IK
+        obj_root_state = obj.data.default_root_state[env_ids].clone()
+        obj_root_state[:, :3] = obj_pos_w
+        obj_root_state[:, 3:7] = obj_quat_w
+        obj_root_state[:, 7:] = 0.0
+        obj.write_root_state_to_sim(obj_root_state, env_ids=env_ids)
+        obj.update(0.0)
 
-    # Re-fix object (robot.update may not affect it, but be safe)
-    obj_root_state = obj.data.default_root_state[env_ids].clone()
-    obj_root_state[:, :3] = obj_pos_w
-    obj_root_state[:, 3:7] = obj_quat_w
-    obj_root_state[:, 7:] = 0.0
-    obj.write_root_state_to_sim(obj_root_state, env_ids=env_ids)
-    obj.update(0.0)
+        # Per-finger differential IK
+        refine_hand_to_start_grasp(env, env_ids, start_fps)
+        robot.update(0.0)
 
-    refine_hand_to_start_grasp(env, env_ids, start_fps)
-    robot.update(0.0)
-
-    # Step 6: Rotate system to palm-up (hand + object together)
+    # Rotate system to palm-up (hand + object together)
     goal_world = apply_palm_up_transform(env, env_ids, goal_world)
 
     # Optional tilt noise after palm-up alignment
