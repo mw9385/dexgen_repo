@@ -240,7 +240,7 @@ def reset_to_random_grasp(
     # 2. Set object / robot initial state.
     #
     # Flow:
-    #   1. Place wrist at default position with palm-down + tilt noise
+    #   1. Place wrist at default position with palm-up + tilt noise
     #   2. Set joint angles from DexGraspNet grasp
     #   3. FK update (propagates joint angles through kinematic chain)
     #   4. Place object via fingertip rigid alignment (_place_object_in_hand)
@@ -258,10 +258,10 @@ def reset_to_random_grasp(
     obj = env.scene["object"]
     cfg = getattr(env.cfg, "reset_randomization", {}) or {}
 
-    # Step 1: Set wrist pose — palm-down with tilt noise
+    # Step 1: Set wrist pose — palm-up with tilt noise
     wrist_pos, wrist_quat = _sample_wrist_pose_world(env, env_ids, apply_noise=False)
-    # Always align palm down for grasping from above
-    wrist_quat = _align_wrist_palm_down(env, env_ids, wrist_quat)
+    # Palm-up: gravity keeps object in hand, ±15° tilt prevents passive balancing
+    wrist_quat = _align_wrist_palm_up(env, env_ids, wrist_quat)
     # Add wrist tilt noise for domain randomization
     rot_std = math.radians(float(cfg.get("wrist_rot_std_deg", 15.0)))
     if rot_std > 0.0:
