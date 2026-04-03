@@ -712,49 +712,9 @@ class _IsaacLabVecEnv:
         done = terminated | truncated
 
         # Contact reward masking: zero out reward when no fingertip touches the object.
-        # This prevents the policy from earning reward when the object sits on the wrist.
         from envs.mdp.observations import fingertip_contact_binary
         contact_mask = (fingertip_contact_binary(self.env).sum(dim=-1) > 0).float()
         rew = rew * contact_mask
-
-        # ── DEBUG: print per-term reward for env 0 ──
-        from envs.mdp import rewards as mdp_rewards
-        _step_count = getattr(self, "_dbg_step", 0)
-        self._dbg_step = _step_count + 1
-        r_orn = mdp_rewards.object_orientation_reward(self.env, alpha=2.0)
-        r_pos = mdp_rewards.object_position_reward(self.env, alpha=10.0)
-        r_gb  = mdp_rewards.goal_bonus(self.env, pos_thresh=0.02, rot_thresh=0.1)
-        r_wrk = mdp_rewards.work_penalty(self.env, alpha=0.01)
-        r_act = mdp_rewards.action_penalty(self.env, alpha=0.5)
-        r_trq = mdp_rewards.torque_penalty(self.env, alpha=0.005)
-        total = (10.0*r_orn + 0.5*r_pos + 10.0*r_gb
-                 + 0.01*r_wrk + 0.01*r_act + 0.01*r_trq)
-
-        from envs.mdp.rewards import _obj_pose_in_hand_frame
-        cur_p, cur_q = _obj_pose_in_hand_frame(self.env)
-        tgt_p = self.env.extras.get("target_object_pos_hand")
-        tgt_q = self.env.extras.get("target_object_quat_hand")
-        cp = cur_p[0].cpu()
-        cq = cur_q[0].cpu()
-        tp = tgt_p[0].cpu() if tgt_p is not None else torch.zeros(3)
-        tq = tgt_q[0].cpu() if tgt_q is not None else torch.tensor([1.,0.,0.,0.])
-        pos_err = float(torch.norm(cp - tp))
-        dot = float(torch.abs((cq * tq).sum()).clamp(0, 1))
-        orn_err = float(2.0 * torch.acos(torch.tensor(dot).clamp(-1,1)))
-        obj_z = float(self.env.scene["object"].data.root_pos_w[0, 2])
-
-        # Fingertip contact count for env 0
-        n_contact = int(fingertip_contact_binary(self.env)[0].sum().item())
-        mask0 = int(contact_mask[0].item())
-
-        print(f"[RWD step={_step_count:5d} env0] "
-              f"orn={r_orn[0]:.3f}(×10={10*r_orn[0]:.2f}) "
-              f"pos={r_pos[0]:.3f}(×0.5={0.5*r_pos[0]:.2f}) "
-              f"gb={r_gb[0]:.0f}(×10={10*r_gb[0]:.0f}) "
-              f"reg={0.01*(r_wrk[0]+r_act[0]+r_trq[0]):.4f} "
-              f"total={total[0]:.3f} rew={rew[0]:.3f} mask={mask0} | "
-              f"pos_err={pos_err:.4f}m orn_err={orn_err:.3f}rad "
-              f"obj_z={obj_z:.3f} contact={n_contact}/5")
 
         # Delta mode: re-initialise joint target for reset envs
         if self._action_mode == "delta" and done.any():
