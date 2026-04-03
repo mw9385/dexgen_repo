@@ -257,9 +257,12 @@ if _ISAACLAB_AVAILABLE:
 if _ISAACLAB_AVAILABLE:
     @configclass
     class AnyGraspObservationsCfg:
+        # All spatial observations in HAND ROOT (wrist) frame.
+        # Actor: 106 dims, Critic: 124 dims (actor + privileged)
+
         @configclass
         class PolicyObs(ObsGroup):
-            # Full observation: actor sees everything critic sees
+            # ── Proprioception (joint space) ──
             joint_pos = ObsTerm(
                 func=mdp_obs.joint_positions_normalized,
                 noise=GaussianNoise(std=0.005),
@@ -268,26 +271,23 @@ if _ISAACLAB_AVAILABLE:
                 func=mdp_obs.joint_velocities_normalized,
                 noise=GaussianNoise(std=0.04),
             )
+            # ── Fingertip state (hand frame) ──
             fingertip_pos = ObsTerm(
-                func=mdp_obs.fingertip_positions_in_object_frame,
+                func=mdp_obs.fingertip_positions_hand_frame,
                 noise=GaussianNoise(std=0.003),
             )
-            rel_fingertip_to_goal = ObsTerm(func=mdp_obs.relative_fingertip_to_goal)
-            fingertip_contact     = ObsTerm(func=mdp_obs.fingertip_contact_binary)
-            last_action           = ObsTerm(func=mdp_obs.last_action)
-
-            # Goal observations — policy needs to see target pose for rewards
-            target_obj_pos_hand  = ObsTerm(func=mdp_obs.target_object_pos_in_hand_frame)
-            target_obj_quat_hand = ObsTerm(func=mdp_obs.target_object_quat_in_hand_frame)
-            target_joint_angles  = ObsTerm(func=mdp_obs.target_joint_angles_normalized)
-
-            # Previously critic-only — now shared with actor
-            object_pos    = ObsTerm(func=mdp_obs.object_position_world)
-            object_quat   = ObsTerm(func=mdp_obs.object_orientation_world)
-            object_linvel = ObsTerm(func=mdp_obs.object_linear_velocity)
-            object_angvel = ObsTerm(func=mdp_obs.object_angular_velocity)
-            contact_forces = ObsTerm(func=mdp_obs.fingertip_contact_forces)
-            dr_params      = ObsTerm(func=mdp_obs.domain_randomization_params)
+            # ── Current object state (hand frame) ──
+            object_pos   = ObsTerm(func=mdp_obs.object_pos_in_hand_frame)
+            object_quat  = ObsTerm(func=mdp_obs.object_quat_in_hand_frame)
+            # ── Target object state (hand frame) ──
+            target_obj_pos  = ObsTerm(func=mdp_obs.target_object_pos_in_hand_frame)
+            target_obj_quat = ObsTerm(func=mdp_obs.target_object_quat_in_hand_frame)
+            # ── Object dynamics (hand frame) ──
+            object_linvel = ObsTerm(func=mdp_obs.object_lin_vel_hand_frame)
+            object_angvel = ObsTerm(func=mdp_obs.object_ang_vel_hand_frame)
+            # ── Tactile + action ──
+            fingertip_contact = ObsTerm(func=mdp_obs.fingertip_contact_binary)
+            last_action       = ObsTerm(func=mdp_obs.last_action)
 
             def __post_init__(self):
                 self.enable_corruption  = True
@@ -295,6 +295,7 @@ if _ISAACLAB_AVAILABLE:
 
         @configclass
         class CriticObs(ObsGroup):
+            # Same as actor + privileged info
             joint_pos = ObsTerm(
                 func=mdp_obs.joint_positions_normalized,
                 noise=GaussianNoise(std=0.005),
@@ -304,24 +305,20 @@ if _ISAACLAB_AVAILABLE:
                 noise=GaussianNoise(std=0.04),
             )
             fingertip_pos = ObsTerm(
-                func=mdp_obs.fingertip_positions_in_object_frame,
+                func=mdp_obs.fingertip_positions_hand_frame,
                 noise=GaussianNoise(std=0.003),
             )
-            rel_fingertip_to_goal = ObsTerm(func=mdp_obs.relative_fingertip_to_goal)
-            fingertip_contact     = ObsTerm(func=mdp_obs.fingertip_contact_binary)
-            last_action           = ObsTerm(func=mdp_obs.last_action)
-
-            # Goal observations
-            target_obj_pos_hand  = ObsTerm(func=mdp_obs.target_object_pos_in_hand_frame)
-            target_obj_quat_hand = ObsTerm(func=mdp_obs.target_object_quat_in_hand_frame)
-            target_joint_angles  = ObsTerm(func=mdp_obs.target_joint_angles_normalized)
-
-            object_pos   = ObsTerm(func=mdp_obs.object_position_world)
-            object_quat  = ObsTerm(func=mdp_obs.object_orientation_world)
-            object_linvel = ObsTerm(func=mdp_obs.object_linear_velocity)
-            object_angvel = ObsTerm(func=mdp_obs.object_angular_velocity)
+            object_pos   = ObsTerm(func=mdp_obs.object_pos_in_hand_frame)
+            object_quat  = ObsTerm(func=mdp_obs.object_quat_in_hand_frame)
+            target_obj_pos  = ObsTerm(func=mdp_obs.target_object_pos_in_hand_frame)
+            target_obj_quat = ObsTerm(func=mdp_obs.target_object_quat_in_hand_frame)
+            object_linvel = ObsTerm(func=mdp_obs.object_lin_vel_hand_frame)
+            object_angvel = ObsTerm(func=mdp_obs.object_ang_vel_hand_frame)
+            fingertip_contact = ObsTerm(func=mdp_obs.fingertip_contact_binary)
+            last_action       = ObsTerm(func=mdp_obs.last_action)
+            # ── Privileged ──
             contact_forces = ObsTerm(func=mdp_obs.fingertip_contact_forces)
-            dr_params = ObsTerm(func=mdp_obs.domain_randomization_params)
+            dr_params      = ObsTerm(func=mdp_obs.domain_randomization_params)
 
             def __post_init__(self):
                 self.enable_corruption  = True

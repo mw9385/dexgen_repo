@@ -87,8 +87,8 @@ def collect_episode_batch(env, policy, episode_length: int, device: str) -> list
         obj_quat = obj.data.root_quat_w.cpu().numpy()  # (N, 4)
         obj_pose = np.concatenate([obj_pos, obj_quat], axis=-1)   # (N, 7)
 
-        from envs.mdp.observations import fingertip_positions_in_object_frame
-        kp = fingertip_positions_in_object_frame(env).cpu().numpy()  # (N, 12)
+        from envs.mdp.observations import fingertip_positions_hand_frame
+        kp = fingertip_positions_hand_frame(env).cpu().numpy()  # (N, 15)
 
         kp_trajs.append(kp)
         jq_trajs.append(q)
