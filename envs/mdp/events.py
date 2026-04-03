@@ -1265,8 +1265,21 @@ def _refine_hand_to_start_grasp(
     start_fps_obj: torch.Tensor,   # (n, F, 3)
 ):
     """
-    Refine the hand joint state with a small multi-fingertip differential IK
-    pass so the reset hand actually matches the sampled Stage 0 grasp.
+    Per-finger differential IK with null-space projection.
+
+    Each finger is solved independently as a 4-5 DOF serial chain targeting
+    a 3D fingertip position. This avoids interference between fingers that
+    occurs when stacking all fingertip Jacobians into one system.
+
+    Null-space projection (Liegeois 1977) pushes joints toward the midpoint
+    of their limits, preventing reverse-joint and extreme poses.
+
+    SVD-based fallback (lstsq) handles singular/near-singular Jacobians
+    robustly when cuSOLVER fails.
+
+    References:
+      - Maciejewski & Klein (1988), SVD for robotics
+      - Siciliano & Khatib, Springer Handbook of Robotics (null-space)
     """
     cfg = getattr(env.cfg, "reset_refinement", {}) or {}
     if not bool(cfg.get("enabled", True)):
@@ -1279,67 +1292,125 @@ def _refine_hand_to_start_grasp(
     robot = env.scene["robot"]
     obj = env.scene["object"]
     n = len(env_ids)
+    device = env.device
 
     ft_ids = _get_fingertip_body_ids_from_env(robot, env)
-    jac_body_ids = [body_id - 1 if robot.is_fixed_base else body_id for body_id in ft_ids]
+    jac_body_ids = [
+        body_id - 1 if robot.is_fixed_base else body_id
+        for body_id in ft_ids
+    ]
     joint_count = robot.data.joint_pos.shape[-1]
-    joint_ids = torch.arange(joint_count, device=env.device, dtype=torch.long)
 
     step_gain = float(cfg.get("step_gain", 0.8))
     damping = float(cfg.get("damping", 0.05))
     max_delta = float(cfg.get("max_delta", 0.2))
     pos_threshold = float(cfg.get("pos_threshold", 0.005))
-    sim_dt = env.sim.get_physics_dt()
+    null_space_gain = float(cfg.get("null_space_gain", 0.1))
 
     joint_lower = robot.data.soft_joint_pos_limits[env_ids, :, 0]
     joint_upper = robot.data.soft_joint_pos_limits[env_ids, :, 1]
+    q_rest = (joint_lower + joint_upper) / 2.0
+
     target_obj_state = obj.data.root_state_w[env_ids].clone()
 
-    for _ in range(iterations):
-        # ── Kinematics-only update: do NOT call env.sim.step() here ──────────
-        # env.sim.step() advances ALL envs simultaneously, not just env_ids.
-        # Using dt=0.0 updates only the kinematic state (body transforms, FK)
-        # without running physics dynamics on non-reset envs.
+    # Shadow Hand 24-DOF USD finger→joint mapping.
+    # Wrist joints [0,1] are excluded (not modified by IK).
+    _FINGER_JOINT_IDS = [
+        [2, 3, 4, 5],          # FF: FFJ4(passive), FFJ3, FFJ2, FFJ1
+        [6, 7, 8, 9],          # MF: MFJ4(passive), MFJ3, MFJ2, MFJ1
+        [10, 11, 12, 13],      # RF: RFJ4(passive), RFJ3, RFJ2, RFJ1
+        [14, 15, 16, 17, 18],  # LF: LFJ5(passive), LFJ4, LFJ3, LFJ2, LFJ1
+        [19, 20, 21, 22, 23],  # TH: THJ4, THJ3, THJ2, THJ1, THJ0
+    ]
+    num_fingers = min(len(ft_ids), len(_FINGER_JOINT_IDS))
+
+    for _iter in range(iterations):
+        # Kinematics-only update (no physics step)
         robot.write_data_to_sim()
         robot.update(0.0)
         obj.update(0.0)
-        # ─────────────────────────────────────────────────────────────────────
 
-        # Keep the object fixed at the intended reset pose during refinement.
+        # Keep object fixed during IK
         obj.write_root_state_to_sim(target_obj_state, env_ids=env_ids)
         obj.update(0.0)
 
+        # Compute fingertip targets in world frame
         target_world = _local_to_world_points(
             start_fps_obj,
             target_obj_state[:, :3],
             target_obj_state[:, 3:7],
         )
         current_world = robot.data.body_pos_w[env_ids][:, ft_ids, :]
-        pos_error = target_world - current_world
+        pos_error = target_world - current_world   # (n, F, 3)
         mean_err = torch.norm(pos_error, dim=-1).mean(dim=-1)
         if torch.all(mean_err <= pos_threshold):
             break
 
-        jacobian = robot.root_physx_view.get_jacobians()[env_ids][:, jac_body_ids, :3, :][:, :, :, joint_ids]
-        jacobian = jacobian.reshape(n, -1, joint_count)
-        error_vec = pos_error.reshape(n, -1, 1)
+        # Full Jacobian from PhysX: (n, num_bodies, 6, num_joints)
+        full_jac = robot.root_physx_view.get_jacobians()[env_ids]
 
-        jt = jacobian.transpose(1, 2)
-        lhs = torch.bmm(jacobian, jt)
-        eye = torch.eye(lhs.shape[-1], device=env.device, dtype=lhs.dtype).unsqueeze(0).expand_as(lhs)
-        system = lhs + (damping**2) * eye
-        try:
-            solved = torch.linalg.solve(system, error_vec)
-        except RuntimeError:
-            # cuSOLVER can fail intermittently on these small reset-time batched systems.
-            # Fall back to CPU solve so reset remains robust instead of aborting the episode.
-            solved = torch.linalg.solve(system.cpu(), error_vec.cpu()).to(env.device)
-        delta = torch.bmm(jt, solved).squeeze(-1)
-        delta = (step_gain * delta).clamp(-max_delta, max_delta)
-
+        # Accumulate per-joint deltas from all fingers
         joint_pos = robot.data.joint_pos[env_ids].clone()
-        joint_pos = torch.clamp(joint_pos + delta, joint_lower, joint_upper)
-        robot.write_joint_state_to_sim(joint_pos, torch.zeros_like(joint_pos), env_ids=env_ids)
+        delta_all = torch.zeros_like(joint_pos)
+
+        for fi in range(num_fingers):
+            finger_joint_ids = _FINGER_JOINT_IDS[fi]
+            fj = torch.tensor(finger_joint_ids, device=device, dtype=torch.long)
+            ndof = len(finger_joint_ids)
+
+            # Extract sub-Jacobian for this finger: (n, 3, ndof)
+            # jac_body_ids[fi] = body index for this fingertip
+            # :3 = position rows only (not orientation)
+            # fj = column indices for this finger's joints
+            sub_jac = full_jac[:, jac_body_ids[fi], :3, :][:, :, fj]  # (n, 3, ndof)
+
+            # Fingertip error for this finger: (n, 3, 1)
+            err = pos_error[:, fi, :].unsqueeze(-1)  # (n, 3, 1)
+
+            # Damped least-squares: J^T (J J^T + λ²I)^{-1} e
+            jt = sub_jac.transpose(1, 2)                    # (n, ndof, 3)
+            jjt = torch.bmm(sub_jac, jt)                    # (n, 3, 3)
+            eye3 = torch.eye(3, device=device, dtype=jjt.dtype).unsqueeze(0).expand(n, -1, -1)
+            system = jjt + (damping ** 2) * eye3             # (n, 3, 3)
+
+            try:
+                solved = torch.linalg.solve(system, err)     # (n, 3, 1)
+                # Also compute J_star for null-space projection
+                system_inv_J = torch.linalg.solve(system, sub_jac)  # (n, 3, ndof)
+                J_star = system_inv_J.transpose(1, 2)        # (n, ndof, 3)
+            except RuntimeError:
+                # SVD-based robust fallback on CPU
+                solved = torch.linalg.lstsq(
+                    system.cpu(), err.cpu()
+                ).solution.to(device)
+                system_inv_J = torch.linalg.lstsq(
+                    system.cpu(), sub_jac.cpu()
+                ).solution.to(device)
+                J_star = system_inv_J.transpose(1, 2)
+
+            delta_primary = torch.bmm(jt, solved).squeeze(-1)  # (n, ndof)
+
+            # Null-space projection: (I - J⁺J) * k * (q_rest - q)
+            eye_ndof = torch.eye(ndof, device=device, dtype=jt.dtype).unsqueeze(0).expand(n, -1, -1)
+            null_proj = eye_ndof - torch.bmm(J_star, sub_jac)  # (n, ndof, ndof)
+
+            q_finger = joint_pos[:, fj]                        # (n, ndof)
+            q_rest_finger = q_rest[:, fj]                      # (n, ndof)
+            grad_rest = null_space_gain * (q_rest_finger - q_finger)
+            delta_null = torch.bmm(null_proj, grad_rest.unsqueeze(-1)).squeeze(-1)
+
+            # Combined delta for this finger
+            delta_finger = delta_primary + delta_null
+            delta_finger = (step_gain * delta_finger).clamp(-max_delta, max_delta)
+
+            # Scatter into full joint delta
+            delta_all[:, fj] += delta_finger
+
+        # Apply accumulated delta
+        joint_pos = torch.clamp(joint_pos + delta_all, joint_lower, joint_upper)
+        robot.write_joint_state_to_sim(
+            joint_pos, torch.zeros_like(joint_pos), env_ids=env_ids,
+        )
         robot.set_joint_position_target(joint_pos, env_ids=env_ids)
 
 def _add_tilt_noise(quat, std_rad, device, n):
