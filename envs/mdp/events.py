@@ -295,25 +295,6 @@ def reset_to_random_grasp(
     obj_for_goal   = env.scene["object"]
     obj_for_goal.update(0.0)
 
-    # Diagnostic: compare actual sim object_pos_hand with stored graph values
-    if not getattr(env, "_obj_pose_diag_logged", False):
-        env._obj_pose_diag_logged = True
-        for i in range(min(n, 3)):  # print first 3 envs
-            rp = robot_for_goal.data.root_pos_w[env_ids[i]]
-            rq = robot_for_goal.data.root_quat_w[env_ids[i]]
-            op = obj_for_goal.data.root_pos_w[env_ids[i]]
-            rel = op - rp
-            actual_pos = quat_apply_inverse(rq.unsqueeze(0), rel.unsqueeze(0))[0]
-            stored_start = start_object_pos_hand_list[i]
-            stored_goal  = goal_object_pos_hand_list[i]
-            delta = None
-            if stored_start is not None and stored_goal is not None:
-                delta = np.array(stored_goal) - np.array(stored_start)
-            rebased = actual_pos.cpu().numpy() + delta if delta is not None else actual_pos.cpu().numpy()
-            print(f"[DIAG-POSE env{env_ids[i]}] actual_start={actual_pos.cpu().numpy()}")
-            print(f"[DIAG-POSE env{env_ids[i]}] stored_start={stored_start}  stored_goal={stored_goal}")
-            print(f"[DIAG-POSE env{env_ids[i]}] delta={delta}  rebased_target={rebased}")
-
     for i in range(n):
         # Compute actual object pose in hand frame from sim
         rp_w = robot_for_goal.data.root_pos_w[env_ids[i]]   # (3,)
