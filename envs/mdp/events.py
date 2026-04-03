@@ -17,7 +17,7 @@ import os
 import pickle
 from itertools import combinations
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
 import torch
 import numpy as np
@@ -247,112 +247,101 @@ def reset_to_random_grasp(
             )
 
     # ------------------------------------------------------------------
-    # 2. Set object / robot initial state.
+    # 2. New reset flow: object fixed → wrist → IK → palm-up
     #
     # Flow:
-    #   1. Place wrist at default position with palm-up + tilt noise
-    #   2. Set joint angles from DexGraspNet grasp
-    #   3. FK update (propagates joint angles through kinematic chain)
-    #   4. Place object via fingertip rigid alignment (_place_object_in_hand)
-    #      — aligns object to where fingertips actually are in world space
-    #
-    # Note: object_pos/quat_hand from grasp data is stored separately for
-    # reward computation (target_object_pos_hand) but NOT used for placement.
-    # Fingertip rigid alignment is more robust because it uses the actual
-    # FK result rather than relying on root_pos_w being fresh after
-    # write_root_pose_to_sim.
+    #   1. Place object at fixed position near palm
+    #   2. Convert fingertip targets from object frame → world frame
+    #   3. Compute wrist pose from fingertip arrangement
+    #   4. Set joints to semi-closed pose (object-size adaptive)
+    #   5. Differential IK to refine fingertips toward targets
+    #   6. Rotate entire system to palm-up
+    #   7. Compute goal object pose in hand frame from sim state
     # ------------------------------------------------------------------
-    has_joints = any(j is not None for j in start_joints_list)
-
     robot = env.scene["robot"]
     obj = env.scene["object"]
     cfg = getattr(env.cfg, "reset_randomization", {}) or {}
+    has_joints = any(j is not None for j in start_joints_list)
 
-    # Step 1: Set wrist pose — palm-up with tilt noise
-    wrist_pos, wrist_quat = _sample_wrist_pose_world(env, env_ids, apply_noise=False)
-    # Palm-up: gravity keeps object in hand, ±15° tilt prevents passive balancing
-    wrist_quat = _align_wrist_palm_up(env, env_ids, wrist_quat)
-    # Add wrist tilt noise for domain randomization
-    rot_std = math.radians(float(cfg.get("wrist_rot_std_deg", 15.0)))
-    if rot_std > 0.0:
-        wrist_quat = _add_rotation_noise(wrist_quat, rot_std, env.device, len(env_ids))
-    # Small position jitter
-    pos_jitter_std = float(cfg.get("wrist_pos_jitter_std", 0.005))
-    if pos_jitter_std > 0.0:
-        wrist_pos = wrist_pos + torch.randn(n, 3, device=env.device) * pos_jitter_std
+    # Step 1: Place object at fixed known position
+    obj_pos_w, obj_quat_w = _place_object_fixed(env, env_ids)
+    obj.update(0.0)
 
+    # Step 2: Convert fingertip targets to world frame
+    start_world = _local_to_world_points(start_fps, obj_pos_w, obj_quat_w)
+    goal_world = _local_to_world_points(goal_fps, obj_pos_w, obj_quat_w)
+
+    # Step 3: Compute wrist pose from fingertip positions
+    wrist_pos, wrist_quat = _compute_wrist_from_fingertips(
+        env, env_ids, start_world,
+    )
     _set_robot_root_pose(env, env_ids, wrist_pos, wrist_quat)
 
-    # Step 2: Set joint angles from DexGraspNet
+    # Step 4: Set joints — direct if available, adaptive otherwise
     if has_joints:
         _set_robot_joints_direct(env, env_ids, start_joints_list)
     else:
-        _set_robot_to_fingertip_config(env, env_ids, start_fps)
+        # Get object size from graph specs
+        obj_size = 0.06   # default
+        graph = _load_grasp_graph(env)
+        if graph is not None and hasattr(graph, "object_specs"):
+            for name in sampled_obj_names[:1]:
+                spec = graph.object_specs.get(name, {})
+                if "size" in spec:
+                    obj_size = float(spec["size"])
+                    break
+        _set_adaptive_joint_pose(env, env_ids, obj_size)
 
-    # Step 3: FK update — propagates root pose + joint angles through chain
+    # Step 5: FK update + differential IK (object stays fixed)
     robot.update(0.0)
 
-    # Step 4: Place object via fingertip rigid alignment.
-    # This reads the actual fingertip world positions from FK and solves for
-    # the object pose that matches the grasp's fingertip-in-object-frame data.
-    _place_object_in_hand(env, env_ids, start_fps)
+    # Re-fix object (robot.update may not affect it, but be safe)
+    obj_root_state = obj.data.default_root_state[env_ids].clone()
+    obj_root_state[:, :3] = obj_pos_w
+    obj_root_state[:, 3:7] = obj_quat_w
+    obj_root_state[:, 7:] = 0.0
+    obj.write_root_state_to_sim(obj_root_state, env_ids=env_ids)
+    obj.update(0.0)
 
-    # ------------------------------------------------------------------
-    # 7. Compute actual object pose in hand frame from sim state,
-    #    then use it to validate / override stored graph values.
-    # ------------------------------------------------------------------
-    robot_for_goal = env.scene["robot"]
-    obj_for_goal   = env.scene["object"]
-    obj_for_goal.update(0.0)
+    _refine_hand_to_start_grasp(env, env_ids, start_fps)
+    robot.update(0.0)
+
+    # Step 6: Rotate system to palm-up (hand + object together)
+    goal_world = _apply_palm_up_transform(env, env_ids, goal_world)
+
+    # Optional tilt noise after palm-up alignment
+    rot_std = math.radians(float(cfg.get("wrist_rot_std_deg", 15.0)))
+    if rot_std > 0.0:
+        wrist_quat_now = robot.data.root_quat_w[env_ids].clone()
+        tilted = _add_rotation_noise(wrist_quat_now, rot_std, env.device, n)
+        wrist_pos_now = robot.data.root_pos_w[env_ids].clone()
+        _set_robot_root_pose(env, env_ids, wrist_pos_now, tilted)
+        robot.update(0.0)
+
+    # Step 7: Compute goal object pose in hand frame from actual sim state
+    robot.update(0.0)
+    obj.update(0.0)
 
     for i in range(n):
-        # Compute actual object pose in hand frame from sim
-        rp_w = robot_for_goal.data.root_pos_w[env_ids[i]]   # (3,)
-        rq_w = robot_for_goal.data.root_quat_w[env_ids[i]]  # (4,)
-        op_w = obj_for_goal.data.root_pos_w[env_ids[i]]     # (3,)
-        oq_w = obj_for_goal.data.root_quat_w[env_ids[i]]    # (4,)
-        rel  = op_w - rp_w
+        rp_w = robot.data.root_pos_w[env_ids[i]]
+        rq_w = robot.data.root_quat_w[env_ids[i]]
+        op_w = obj.data.root_pos_w[env_ids[i]]
+        oq_w = obj.data.root_quat_w[env_ids[i]]
+        rel = op_w - rp_w
         actual_pos_hand = quat_apply_inverse(rq_w.unsqueeze(0), rel.unsqueeze(0))[0]
         actual_quat_hand = _quat_multiply(
             _quat_conjugate(rq_w.unsqueeze(0)), oq_w.unsqueeze(0)
         )[0]
-
-        # Rebase target: actual_start + (stored_goal - stored_start)
-        # The stored graph values were computed at a different wrist orientation,
-        # so they don't match the actual sim placement. Apply only the DELTA.
-        sp = start_object_pos_hand_list[i]
-        gp = goal_object_pos_hand_list[i]
-        sq = start_object_quat_hand_list[i]
-        gq = goal_object_quat_hand_list[i]
-
-        if gp is not None and sp is not None:
-            delta_pos = torch.tensor(gp, device=env.device, dtype=torch.float32) \
-                      - torch.tensor(sp, device=env.device, dtype=torch.float32)
-            env.extras["target_object_pos_hand"][env_ids[i]] = actual_pos_hand + delta_pos
-        else:
-            # No stored data: target = current (no position change expected)
-            env.extras["target_object_pos_hand"][env_ids[i]] = actual_pos_hand.clone()
-
-        if gq is not None and sq is not None:
-            # Relative rotation: delta_q = conj(start_q) * goal_q
-            sq_t = torch.tensor(sq, device=env.device, dtype=torch.float32).unsqueeze(0)
-            gq_t = torch.tensor(gq, device=env.device, dtype=torch.float32).unsqueeze(0)
-            delta_quat = _quat_multiply(_quat_conjugate(sq_t), gq_t)[0]
-            # Apply delta to actual: target = actual * delta
-            target_quat = _quat_multiply(actual_quat_hand.unsqueeze(0), delta_quat.unsqueeze(0))[0]
-            # Normalize
-            target_quat = target_quat / (torch.norm(target_quat) + 1e-8)
-            env.extras["target_object_quat_hand"][env_ids[i]] = target_quat
-        else:
-            env.extras["target_object_quat_hand"][env_ids[i]] = actual_quat_hand.clone()
+        # For AnyGrasp-to-AnyGrasp with fixed object, goal object pose =
+        # current object pose (object doesn't move, only fingers change).
+        env.extras["target_object_pos_hand"][env_ids[i]] = actual_pos_hand.clone()
+        env.extras["target_object_quat_hand"][env_ids[i]] = actual_quat_hand.clone()
 
     # ------------------------------------------------------------------
-    # 8. Initialise action buffers (fixes last_action always being 0)
+    # 8. Initialise action buffers
     # ------------------------------------------------------------------
-    robot = env.scene["robot"]
-    current_q = robot.data.joint_pos[env_ids]  # (n, num_dof=24)
+    current_q = robot.data.joint_pos[env_ids]   # (n, num_dof=24)
     current_action_full = _joint_positions_to_normalized_action(robot, env_ids, current_q)
-    # Action space excludes wrist (WRJ1/WRJ0 at indices 0-1), so slice [2:] for finger joints
     action_dim = _get_action_dim(env, current_q.shape[-1])
     current_action = current_action_full[:, (current_q.shape[-1] - action_dim):]
     if "last_action" not in env.extras:
@@ -363,11 +352,10 @@ def reset_to_random_grasp(
         env.extras["current_action"] = torch.zeros(
             env.num_envs, action_dim, device=env.device
         )
-    # Reset action buffers to current joint positions for reset envs
     env.extras["last_action"][env_ids] = current_action
     env.extras["current_action"][env_ids] = current_action
 
-    # Reset no-contact termination counter for reset envs
+    # Reset no-contact termination counter
     if "_no_contact_steps" in env.extras:
         env.extras["_no_contact_steps"][env_ids] = 0
 
@@ -1397,6 +1385,182 @@ def _quat_from_two_vectors(v_from: torch.Tensor, v_to: torch.Tensor) -> torch.Te
     return quat / (torch.norm(quat, dim=-1, keepdim=True) + 1e-8)
 
 
+# ---------------------------------------------------------------------------
+# New reset helpers: object-fixed → wrist → IK → palm-up
+# ---------------------------------------------------------------------------
+
+def _place_object_fixed(
+    env,
+    env_ids: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Place the object at a fixed position near the hand's default position.
+
+    Returns (obj_pos_w, obj_quat_w) for later frame transforms.
+    """
+    robot = env.scene["robot"]
+    obj = env.scene["object"]
+
+    # Default wrist world position
+    wrist_default = (
+        robot.data.default_root_state[env_ids, :3].clone()
+        + env.scene.env_origins[env_ids]
+    )
+
+    # Place object near the palm (similar to NVIDIA IsaacGymEnvs)
+    # Shadow Hand default: palm along -Y, fingers along +Z
+    obj_pos = wrist_default.clone()
+    obj_pos[:, 1] -= 0.12   # in front of palm
+    obj_pos[:, 2] += 0.02   # slightly above
+
+    obj_quat = torch.zeros(len(env_ids), 4, device=env.device)
+    obj_quat[:, 0] = 1.0    # identity quaternion
+
+    root_state = obj.data.default_root_state[env_ids].clone()
+    root_state[:, :3] = obj_pos
+    root_state[:, 3:7] = obj_quat
+    root_state[:, 7:] = 0.0   # zero velocity
+    obj.write_root_state_to_sim(root_state, env_ids=env_ids)
+
+    return obj_pos, obj_quat
+
+
+def _compute_wrist_from_fingertips(
+    env,
+    env_ids: torch.Tensor,
+    target_world: torch.Tensor,   # (n, F, 3)
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Compute wrist pose so the hand is roughly positioned to reach
+    the target fingertip world positions.
+
+    Strategy: place wrist below the fingertip centroid (palm-up),
+    offset by approximate palm-to-fingertip distance.
+    """
+    robot = env.scene["robot"]
+    n = len(env_ids)
+
+    centroid = target_world.mean(dim=1)   # (n, 3)
+
+    # Wrist below centroid (palm-up: palm faces +Z, fingers extend upward)
+    wrist_pos = centroid.clone()
+    wrist_pos[:, 2] -= 0.13   # ~13cm below fingertip centroid
+
+    # Start from default orientation, then align palm-up
+    default_quat = robot.data.default_root_state[env_ids, 3:7].clone()
+    wrist_quat = _align_wrist_palm_up(env, env_ids, default_quat)
+
+    return wrist_pos, wrist_quat
+
+
+def _set_adaptive_joint_pose(
+    env,
+    env_ids: torch.Tensor,
+    object_size: float,
+):
+    """
+    Set hand joints to a semi-closed pose based on object size.
+
+    Smaller objects → more closed (higher scale).
+    Larger objects → more open (lower scale).
+    """
+    robot = env.scene["robot"]
+    n = len(env_ids)
+
+    # Map object size [0.04, 0.09] → scale [0.6, 0.3]
+    # (inverted: small object = more closed = higher joint values)
+    scale = 0.6 - ((object_size - 0.04) / 0.05) * 0.3
+    scale = max(0.2, min(0.8, scale))
+
+    q_low = robot.data.soft_joint_pos_limits[env_ids, :, 0]
+    q_high = robot.data.soft_joint_pos_limits[env_ids, :, 1]
+    joint_pos = q_low + scale * (q_high - q_low)
+
+    # Wrist joints (indices 0, 1) stay at zero
+    joint_pos[:, :2] = 0.0
+
+    robot.write_joint_state_to_sim(
+        joint_pos, torch.zeros_like(joint_pos), env_ids=env_ids,
+    )
+    robot.set_joint_position_target(joint_pos, env_ids=env_ids)
+
+
+def _apply_palm_up_transform(
+    env,
+    env_ids: torch.Tensor,
+    goal_world: torch.Tensor,   # (n, F, 3) goal fingertips in world frame
+) -> torch.Tensor:
+    """
+    Rotate the entire hand+object system so the palm faces upward (+Z).
+
+    After differential IK, the hand may be in an arbitrary orientation.
+    This function:
+      1. Computes the correction rotation (palm normal → +Z)
+      2. Rotates wrist root pose around the fingertip centroid
+      3. Rotates the object with the same rotation
+      4. Returns the transformed goal fingertip world positions
+
+    Joint angles are NOT changed — only the root pose is rotated,
+    so FK automatically places fingertips in the correct rotated positions.
+    """
+    robot = env.scene["robot"]
+    obj = env.scene["object"]
+    n = len(env_ids)
+
+    # Current wrist state
+    wrist_pos = robot.data.root_pos_w[env_ids].clone()
+    wrist_quat = robot.data.root_quat_w[env_ids].clone()
+
+    # Current palm normal in world frame
+    palm_normal_local = _get_local_palm_normal(robot, env).unsqueeze(0).expand(n, 3)
+    palm_normal_world = quat_apply(wrist_quat, palm_normal_local)
+
+    # Correction: rotate palm normal to point +Z
+    target_up = torch.tensor([0.0, 0.0, 1.0], device=env.device).expand(n, 3)
+    correction = _quat_from_two_vectors(palm_normal_world, target_up)
+
+    # Pivot = fingertip centroid (current actual positions from FK)
+    ft_ids = _get_fingertip_body_ids_from_env(robot, env)
+    ft_world = robot.data.body_pos_w[env_ids][:, ft_ids, :]
+    pivot = ft_world.mean(dim=1)   # (n, 3)
+
+    # Rotate wrist around pivot
+    new_wrist_quat = _quat_multiply(correction, wrist_quat)
+    new_wrist_quat = new_wrist_quat / (torch.norm(new_wrist_quat, dim=-1, keepdim=True) + 1e-8)
+    wrist_rel = wrist_pos - pivot
+    new_wrist_pos = quat_apply(correction, wrist_rel) + pivot
+
+    # Rotate object around same pivot
+    obj_pos = obj.data.root_pos_w[env_ids].clone()
+    obj_quat = obj.data.root_quat_w[env_ids].clone()
+    obj_rel = obj_pos - pivot
+    new_obj_pos = quat_apply(correction, obj_rel) + pivot
+    new_obj_quat = _quat_multiply(correction, obj_quat)
+    new_obj_quat = new_obj_quat / (torch.norm(new_obj_quat, dim=-1, keepdim=True) + 1e-8)
+
+    # Rotate goal fingertip world positions around same pivot
+    goal_rel = goal_world - pivot.unsqueeze(1)   # (n, F, 3)
+    correction_expanded = correction.unsqueeze(1).expand(-1, goal_world.shape[1], -1)
+    new_goal_world = quat_apply(
+        correction_expanded.reshape(-1, 4), goal_rel.reshape(-1, 3)
+    ).reshape_as(goal_world) + pivot.unsqueeze(1)
+
+    # Write to sim
+    _set_robot_root_pose(env, env_ids, new_wrist_pos, new_wrist_quat)
+
+    obj_root_state = obj.data.default_root_state[env_ids].clone()
+    obj_root_state[:, :3] = new_obj_pos
+    obj_root_state[:, 3:7] = new_obj_quat
+    obj_root_state[:, 7:] = 0.0
+    obj.write_root_state_to_sim(obj_root_state, env_ids=env_ids)
+
+    # FK update with new root pose (joint angles unchanged)
+    robot.update(0.0)
+    obj.update(0.0)
+
+    return new_goal_world
+
+
 def _place_object_in_hand(
     env,
     env_ids: torch.Tensor,
@@ -1481,7 +1645,7 @@ def _refine_hand_to_start_grasp(
     if not bool(cfg.get("enabled", True)):
         return
 
-    iterations = int(cfg.get("iterations", 3))
+    iterations = int(cfg.get("iterations", 15))
     if iterations <= 0:
         return
 
@@ -1494,7 +1658,7 @@ def _refine_hand_to_start_grasp(
     joint_count = robot.data.joint_pos.shape[-1]
     joint_ids = torch.arange(joint_count, device=env.device, dtype=torch.long)
 
-    step_gain = float(cfg.get("step_gain", 0.6))
+    step_gain = float(cfg.get("step_gain", 0.8))
     damping = float(cfg.get("damping", 0.05))
     max_delta = float(cfg.get("max_delta", 0.2))
     pos_threshold = float(cfg.get("pos_threshold", 0.005))
