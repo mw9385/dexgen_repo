@@ -684,7 +684,7 @@ class _IsaacLabVecEnv:
         if not getattr(self, "_reward_debug_off", False):
             _step_count = getattr(self, "_dbg_step", 0)
             self._dbg_step = _step_count + 1
-            if _step_count % 50 == 0:  # every 50 steps
+            if True:  # every step
                 r_orn = mdp_rewards.object_orientation_reward(self.env, alpha=2.0)
                 r_pos = mdp_rewards.object_position_reward(self.env, alpha=40.0)
                 r_jt  = mdp_rewards.joint_tracking_reward(self.env, alpha=1.0)
