@@ -1578,21 +1578,26 @@ def _add_tilt_noise(quat, std_rad, device, n):
 
 def _add_rotation_noise(quat, std_rad, device, n):
     """
-    Apply yaw-only (Z-axis) Gaussian rotation noise.
+    Apply random 3-axis rotation noise (X/Y tilt + Z yaw).
 
-    Stage 0 (grasp generation) jitters the wrist with Gaussian yaw around Z so
-    grasps only cover that distribution.  Stage 1 must use the SAME distribution
-    (yaw-only, Gaussian std = wrist_rot_std_deg) to avoid out-of-distribution
-    resets that Stage 0 data never covered.
+    For palm-up configuration, X/Y tilt is critical to prevent the policy
+    from converging to passive balancing (object just sits on flat palm).
+    Z yaw adds azimuthal variation for robustness.
+
+    Method: sample a random rotation axis (uniform on sphere) and
+    Gaussian angle, then compose as a small-angle quaternion.
     """
-    angle = torch.randn(n, device=device) * std_rad   # Gaussian yaw angle
-    half  = angle * 0.5
-    zero  = torch.zeros(n, device=device)
-    # Pure yaw quaternion (w, x, y, z) = (cos(θ/2), 0, 0, sin(θ/2))
-    noise_quat = torch.stack(
-        [torch.cos(half), zero, zero, torch.sin(half)], dim=-1
-    )
-    return _quat_multiply(quat, noise_quat)
+    # Random rotation axis (uniform on unit sphere)
+    axis = torch.randn(n, 3, device=device)
+    axis = axis / (torch.norm(axis, dim=-1, keepdim=True) + 1e-8)
+    # Gaussian rotation angle
+    angle = torch.randn(n, device=device) * std_rad
+    half = angle * 0.5
+    # Axis-angle to quaternion: (w, x, y, z) = (cos(θ/2), axis * sin(θ/2))
+    sin_half = torch.sin(half).unsqueeze(-1)
+    cos_half = torch.cos(half).unsqueeze(-1)
+    noise_quat = torch.cat([cos_half, axis * sin_half], dim=-1)
+    return _quat_multiply(noise_quat, quat)
 
 
 def _quat_multiply(q1, q2):
