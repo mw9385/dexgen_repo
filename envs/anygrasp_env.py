@@ -363,25 +363,19 @@ if _ISAACLAB_AVAILABLE:
     @configclass
     class AnyGraspRewardsCfg:
         # ══════════════════════════════════════════════════════════════
-        # Simplified reward for in-hand reorientation.
-        # Goal: position tracking + smooth orientation gradient + sparse bonus.
-        # Joint tracking removed — it penalizes intermediate configurations
-        # that are necessary for reorientation.
+        # Minimal reward: orientation only + goal bonus + regularization.
+        # Position reward removed — kNN goals have near-zero position
+        # error so it was effectively a free constant (step reward).
+        # Drop penalty not added — orientation naturally goes to 0 when
+        # object falls, providing implicit "hold to earn" incentive.
         # ══════════════════════════════════════════════════════════════
 
-        # Object position error → [0, 1]
-        object_position = RewTerm(
-            func=mdp_rewards.object_position_reward,
-            weight=1.0,
-            params={"alpha": 20.0},
-        )
         # Object orientation error → [0, 1]
-        # alpha=2.0 (was 10.0): smooth gradient even at large errors
-        #   err=0.5rad → exp(-1.0) = 0.37  (was 0.007)
-        #   err=1.0rad → exp(-2.0) = 0.14  (was 0.00005)
+        # alpha=2.0: smooth gradient even at large errors
+        #   err=0.5rad → 0.37,  err=1.0rad → 0.14
         object_orientation = RewTerm(
             func=mdp_rewards.object_orientation_reward,
-            weight=1.0,
+            weight=2.0,
             params={"alpha": 2.0},
         )
         # Goal bonus → {0, 1}
