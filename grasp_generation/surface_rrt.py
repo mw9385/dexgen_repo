@@ -23,6 +23,7 @@ import numpy as np
 import trimesh
 
 from .grasp_sampler import Grasp, GraspSet
+from .math_utils import quat_multiply_np, sample_quat_noise, grasp_distance
 from .net_force_optimization import NetForceOptimizer
 from .rrt_expansion import GraspGraph
 
@@ -254,55 +255,14 @@ class SurfaceRRTGraspExpander:
         """Perturb object_quat_hand with small rotation noise."""
         if getattr(parent, "object_quat_hand", None) is None:
             return None
-        delta = self._sample_quat_noise()
-        return self._quat_multiply(
+        delta = sample_quat_noise(self.rng)
+        return quat_multiply_np(
             np.asarray(parent.object_quat_hand, dtype=np.float32), delta
         )
-
-    def _sample_quat_noise(self) -> np.ndarray:
-        axis = self.rng.normal(size=3).astype(np.float32)
-        axis /= np.linalg.norm(axis) + 1e-8
-        angle = float(self.rng.normal(0.0, 0.25))
-        half = angle * 0.5
-        quat = np.array(
-            [np.cos(half), *(axis * np.sin(half))], dtype=np.float32
-        )
-        return quat / (np.linalg.norm(quat) + 1e-8)
-
-    def _quat_multiply(self, q1: np.ndarray, q2: np.ndarray) -> np.ndarray:
-        w1, x1, y1, z1 = q1
-        w2, x2, y2, z2 = q2
-        out = np.array([
-            w1*w2 - x1*x2 - y1*y2 - z1*z2,
-            w1*x2 + x1*w2 + y1*z2 - z1*y2,
-            w1*y2 - x1*z2 + y1*w2 + z1*x2,
-            w1*z2 + x1*y2 - y1*x2 + z1*w2,
-        ], dtype=np.float32)
-        return out / (np.linalg.norm(out) + 1e-8)
 
     # ------------------------------------------------------------------
     # Graph construction
     # ------------------------------------------------------------------
-
-    def _grasp_distance(self, ga: Grasp, gb: Grasp) -> float:
-        """Mean fingertip Euclidean distance + optional pose distance."""
-        tip_delta = ga.fingertip_positions - gb.fingertip_positions
-        dist = float(np.linalg.norm(tip_delta, axis=-1).mean())
-
-        if (getattr(ga, "object_pos_hand", None) is not None
-                and getattr(gb, "object_pos_hand", None) is not None):
-            dist += 0.25 * float(np.linalg.norm(
-                np.asarray(ga.object_pos_hand) - np.asarray(gb.object_pos_hand)
-            ))
-
-        if (getattr(ga, "object_quat_hand", None) is not None
-                and getattr(gb, "object_quat_hand", None) is not None):
-            qa = np.asarray(ga.object_quat_hand, dtype=np.float32)
-            qb = np.asarray(gb.object_quat_hand, dtype=np.float32)
-            dot = float(np.clip(abs(np.dot(qa, qb)), 0.0, 1.0))
-            dist += 0.01 * float(2.0 * np.arccos(dot))
-
-        return dist
 
     def _build_graph(self, grasp_set: GraspSet) -> GraspGraph:
         """Build connectivity graph from expanded grasp set."""
@@ -317,7 +277,7 @@ class SurfaceRRTGraspExpander:
         edges = []
         for i in range(N):
             for j in range(i + 1, N):
-                if self._grasp_distance(
+                if grasp_distance(
                     grasp_set.grasps[i], grasp_set.grasps[j]
                 ) < effective_delta_max:
                     edges.append((i, j))

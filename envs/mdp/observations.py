@@ -316,25 +316,6 @@ def _get_fingertip_contact_forces_world(env) -> torch.Tensor:
     return torch.stack(per_tip_forces, dim=1)
 
 
-def _quat_conjugate(q: torch.Tensor) -> torch.Tensor:
-    return torch.cat([q[..., :1], -q[..., 1:]], dim=-1)
-
-
-def _quat_multiply(q1: torch.Tensor, q2: torch.Tensor) -> torch.Tensor:
-    w1, x1, y1, z1 = q1.unbind(-1)
-    w2, x2, y2, z2 = q2.unbind(-1)
-    return torch.stack([
-        w1*w2 - x1*x2 - y1*y2 - z1*z2,
-        w1*x2 + x1*w2 + y1*z2 - z1*y2,
-        w1*y2 - x1*z2 + y1*w2 + z1*x2,
-        w1*z2 + x1*y2 - y1*x2 + z1*w2,
-    ], dim=-1)
-
-
-def _quat_rotate_batch(q: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
-    """Rotate vectors v by quaternion q. q:(N,4), v:(N,K,3) → (N,K,3)"""
-    q = q / (torch.norm(q, dim=-1, keepdim=True) + 1e-8)
-    w = q[:, 0:1].unsqueeze(-1)
-    xyz_b = q[:, 1:].unsqueeze(1)
-    t = 2.0 * torch.cross(xyz_b.expand_as(v), v, dim=-1)
-    return v + w * t + torch.cross(xyz_b.expand_as(t), t, dim=-1)
+from .math_utils import quat_conjugate as _quat_conjugate
+from .math_utils import quat_multiply as _quat_multiply
+from .math_utils import quat_rotate_batch as _quat_rotate_batch
