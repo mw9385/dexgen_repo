@@ -692,7 +692,7 @@ class _IsaacLabVecEnv:
                 r_wrk = mdp_rewards.work_penalty(self.env, alpha=0.01)
                 r_act = mdp_rewards.action_penalty(self.env, alpha=0.5)
                 r_trq = mdp_rewards.torque_penalty(self.env, alpha=0.005)
-                total = (5.0*r_orn + 2.0*r_pos + 1.0*r_jt + 10.0*r_gb
+                total = (5.0*r_orn + 2.0*r_pos + 0.2*r_jt + 10.0*r_gb
                          + 0.01*r_wrk + 0.01*r_act + 0.01*r_trq)
 
                 # Current & target object pose in hand frame
@@ -708,10 +708,13 @@ class _IsaacLabVecEnv:
                 dot = float(torch.abs((cq * tq).sum()).clamp(0, 1))
                 orn_err = float(2.0 * torch.acos(torch.tensor(dot).clamp(-1,1)))
 
+                # Object world Z for drop tracking
+                obj_z = float(self.env.scene["object"].data.root_pos_w[0, 2])
+
                 print(f"[RWD step={_step_count:5d} env0] "
                       f"orn={r_orn[0]:.3f}(×5={5*r_orn[0]:.2f}) "
                       f"pos={r_pos[0]:.3f}(×2={2*r_pos[0]:.2f}) "
-                      f"jt={r_jt[0]:.3f}(×1={r_jt[0]:.2f}) "
+                      f"jt={r_jt[0]:.3f}(×0.2={0.2*r_jt[0]:.2f}) "
                       f"gb={r_gb[0]:.0f}(×10={10*r_gb[0]:.0f}) "
                       f"reg={0.01*(r_wrk[0]+r_act[0]+r_trq[0]):.4f} "
                       f"total={total[0]:.3f} rew={rew[0]:.3f} | "
@@ -720,7 +723,7 @@ class _IsaacLabVecEnv:
                       f"pos_err={pos_err:.4f}m | "
                       f"cur_quat=({cq[0]:.2f},{cq[1]:.2f},{cq[2]:.2f},{cq[3]:.2f}) "
                       f"tgt_quat=({tq[0]:.2f},{tq[1]:.2f},{tq[2]:.2f},{tq[3]:.2f}) "
-                      f"orn_err={orn_err:.3f}rad")
+                      f"orn_err={orn_err:.3f}rad obj_z={obj_z:.3f}")
 
         # Delta mode: re-initialise joint target for reset envs
         if self._action_mode == "delta" and done.any():

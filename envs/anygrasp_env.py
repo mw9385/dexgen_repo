@@ -129,6 +129,15 @@ def _build_object_spawner(object_pool_specs: Optional[List[dict]] = None):
     if not _ISAACLAB_AVAILABLE:
         return None
 
+    # High friction is critical for stable in-hand manipulation.
+    # PhysX default (0.5) is far too low — fingers can't grip the object.
+    _DEFAULT_MATERIAL = sim_utils.RigidBodyMaterialCfg(
+        static_friction=1.5,
+        dynamic_friction=1.0,
+        restitution=0.0,
+        friction_combine_mode="max",  # use max of finger/object friction
+    )
+
     if not object_pool_specs:
         return sim_utils.CuboidCfg(
             size=(0.040, 0.040, 0.040),
@@ -137,6 +146,7 @@ def _build_object_spawner(object_pool_specs: Optional[List[dict]] = None):
             ),
             mass_props=sim_utils.MassPropertiesCfg(mass=0.05),
             collision_props=sim_utils.CollisionPropertiesCfg(),
+            physics_material=_DEFAULT_MATERIAL,
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.8, 0.2, 0.2)),
         )
 
@@ -147,13 +157,14 @@ def _build_object_spawner(object_pool_specs: Optional[List[dict]] = None):
         rp = sim_utils.RigidBodyPropertiesCfg(disable_gravity=False, max_depenetration_velocity=5.0)
         mp = sim_utils.MassPropertiesCfg(mass=spec.get("mass", 0.1))
         cp = sim_utils.CollisionPropertiesCfg()
+        pm = _DEFAULT_MATERIAL
         vm = sim_utils.PreviewSurfaceCfg(diffuse_color=color)
         if shape == "cube":
-            cfg = sim_utils.CuboidCfg(size=(s, s, s), rigid_props=rp, mass_props=mp, collision_props=cp, visual_material=vm)
+            cfg = sim_utils.CuboidCfg(size=(s, s, s), rigid_props=rp, mass_props=mp, collision_props=cp, physics_material=pm, visual_material=vm)
         elif shape == "sphere":
-            cfg = sim_utils.SphereCfg(radius=s/2, rigid_props=rp, mass_props=mp, collision_props=cp, visual_material=vm)
+            cfg = sim_utils.SphereCfg(radius=s/2, rigid_props=rp, mass_props=mp, collision_props=cp, physics_material=pm, visual_material=vm)
         elif shape == "cylinder":
-            cfg = sim_utils.CylinderCfg(radius=s/2, height=s, rigid_props=rp, mass_props=mp, collision_props=cp, visual_material=vm)
+            cfg = sim_utils.CylinderCfg(radius=s/2, height=s, rigid_props=rp, mass_props=mp, collision_props=cp, physics_material=pm, visual_material=vm)
         else:
             continue
         spawner_list.append(cfg)
@@ -201,6 +212,12 @@ if _ISAACLAB_AVAILABLE:
                 ),
                 mass_props=sim_utils.MassPropertiesCfg(mass=0.05),
                 collision_props=sim_utils.CollisionPropertiesCfg(),
+                physics_material=sim_utils.RigidBodyMaterialCfg(
+                    static_friction=1.5,
+                    dynamic_friction=1.0,
+                    restitution=0.0,
+                    friction_combine_mode="max",
+                ),
                 visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.8, 0.2, 0.2)),
             ),
             init_state=RigidObjectCfg.InitialStateCfg(
@@ -390,9 +407,10 @@ if _ISAACLAB_AVAILABLE:
         )
         # Finger joint tracking → [-1, 0]
         #   err=1rad→-0.29, 2rad→-0.54, 3rad→-0.71
+        # Weight lowered: was dominating (jt*1.0=-0.83 > orn*5+pos*2=0.41)
         joint_tracking = RewTerm(
             func=mdp_rewards.joint_tracking_reward,
-            weight=1.0,
+            weight=0.2,
             params={"alpha": 0.3},
         )
         # Goal bonus → {0, 1}
@@ -437,7 +455,7 @@ if _ISAACLAB_AVAILABLE:
         randomize_object_physics = EventTerm(
             func=mdp_dr.randomize_object_physics,
             mode="reset",
-            params={"mass_range": (0.02, 0.10), "friction_range": (0.5, 1.0), "restitution_range": (0.00, 0.20)},
+            params={"mass_range": (0.02, 0.10), "friction_range": (1.0, 2.0), "restitution_range": (0.00, 0.10)},
         )
         randomize_robot_physics = EventTerm(
             func=mdp_dr.randomize_robot_physics,
