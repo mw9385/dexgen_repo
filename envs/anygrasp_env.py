@@ -366,43 +366,35 @@ if _ISAACLAB_AVAILABLE:
     @configclass
     class AnyGraspRewardsCfg:
         # ══════════════════════════════════════════════════════════════
-        # DexterityGen reward (arXiv:2502.04307 Eq. 4-9)
-        # All terms normalized to [-1, 1]. Weights control importance.
+        # Simplified reward for in-hand reorientation.
+        # Goal: position tracking + smooth orientation gradient + sparse bonus.
+        # Joint tracking removed — it penalizes intermediate configurations
+        # that are necessary for reorientation.
         # ══════════════════════════════════════════════════════════════
 
-        # ── r_goal (Eq. 5-7) ────────────────────────────────────────
-        # Object position error (Eq. 5, pos part) → [0, 1]
+        # Object position error → [0, 1]
         object_position = RewTerm(
             func=mdp_rewards.object_position_reward,
             weight=1.0,
             params={"alpha": 20.0},
         )
-        # Object orientation error (Eq. 5, rot part) → [0, 1]
+        # Object orientation error → [0, 1]
+        # alpha=2.0 (was 10.0): smooth gradient even at large errors
+        #   err=0.5rad → exp(-1.0) = 0.37  (was 0.007)
+        #   err=1.0rad → exp(-2.0) = 0.14  (was 0.00005)
         object_orientation = RewTerm(
             func=mdp_rewards.object_orientation_reward,
             weight=1.0,
-            params={"alpha": 10.0},
-        )
-        # Joint tracking (Eq. 6) → [-1, 0]
-        joint_tracking = RewTerm(
-            func=mdp_rewards.joint_tracking_reward,
-            weight=0.5,
             params={"alpha": 2.0},
         )
-        # Goal bonus (Eq. 7) → {0, 1}
+        # Goal bonus → {0, 1}
         goal_bonus = RewTerm(
             func=mdp_rewards.goal_bonus,
             weight=5.0,
             params={"pos_thresh": 0.02, "rot_thresh": 0.1},
         )
 
-        # ── r_style (Eq. 9) — DISABLED for Stage 1 ─────────────────
-        # fingertip_velocity = RewTerm(
-        #     func=mdp_rewards.fingertip_velocity_penalty,
-        #     weight=0.05,
-        # )
-
-        # ── r_reg (Eq. 8) ───────────────────────────────────────────
+        # ── r_reg ──────────────────────────────────────────────────
         work = RewTerm(
             func=mdp_rewards.work_penalty,
             weight=0.001,
