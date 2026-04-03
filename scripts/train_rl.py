@@ -686,8 +686,8 @@ class _IsaacLabVecEnv:
             self._dbg_step = _step_count + 1
             if True:  # every step
                 r_orn = mdp_rewards.object_orientation_reward(self.env, alpha=2.0)
-                r_pos = mdp_rewards.object_position_reward(self.env, alpha=40.0)
-                r_jt  = mdp_rewards.joint_tracking_reward(self.env, alpha=1.0)
+                r_pos = mdp_rewards.object_position_reward(self.env, alpha=10.0)
+                r_jt  = mdp_rewards.joint_tracking_reward(self.env, alpha=0.3)
                 r_gb  = mdp_rewards.goal_bonus(self.env, pos_thresh=0.02, rot_thresh=0.1)
                 r_wrk = mdp_rewards.work_penalty(self.env, alpha=0.01)
                 r_act = mdp_rewards.action_penalty(self.env, alpha=0.5)

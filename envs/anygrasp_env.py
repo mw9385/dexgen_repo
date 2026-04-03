@@ -367,35 +367,35 @@ if _ISAACLAB_AVAILABLE:
         # Position reward removed — kNN goals have near-zero position
         # error so it was effectively a free constant (step reward).
         # In-hand reorientation reward.
-        # Priority: orientation >> position > joint_tracking > goal_bonus > reg
-        # The dominant signal must be "rotate the object toward the goal".
+        # All alphas tuned so initial error gives reward ~0.3-0.7
+        # (useful gradient range, not saturated/zero)
+        #
+        # Expected initial errors (kNN goal, DIAG data):
+        #   pos ~ 5-10cm,  orn ~ 0.5-1.5rad,  jt ~ 1-3rad
         # ══════════════════════════════════════════════════════════════
 
         # Object orientation → [0, 1]  ★ PRIMARY
-        # alpha=2.0: gradient alive at all error ranges
-        #   err=0.3rad→0.55, 0.5→0.37, 1.0→0.14, 1.5→0.05
+        #   err=0.5rad→0.37, 1.0→0.14, 1.5→0.05
         object_orientation = RewTerm(
             func=mdp_rewards.object_orientation_reward,
             weight=5.0,
             params={"alpha": 2.0},
         )
-        # Object position → [0, 1]
-        # Linear error (not squared) for consistent gradient.
-        # Keeps object in place while rotating.
+        # Object position → [0, 1]  (linear error)
+        #   err=3cm→0.74, 5cm→0.61, 10cm→0.37, 20cm→0.14
         object_position = RewTerm(
             func=mdp_rewards.object_position_reward,
             weight=2.0,
-            params={"alpha": 40.0},
+            params={"alpha": 10.0},
         )
         # Finger joint tracking → [-1, 0]
-        # Guides fingers toward goal configuration.
+        #   err=1rad→-0.29, 2rad→-0.54, 3rad→-0.71
         joint_tracking = RewTerm(
             func=mdp_rewards.joint_tracking_reward,
             weight=1.0,
-            params={"alpha": 1.0},
+            params={"alpha": 0.3},
         )
         # Goal bonus → {0, 1}
-        # Sparse reward when target achieved.
         goal_bonus = RewTerm(
             func=mdp_rewards.goal_bonus,
             weight=10.0,
