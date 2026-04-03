@@ -67,6 +67,14 @@ def main():
     env_cfg = AnyGraspEnvCfg(num_envs=1)
     env_cfg.scene.num_envs = 1
     env_cfg.grasp_graph_path = args.input
+    # Override depenetration velocity to HIGH so penetrating grasps
+    # produce visible ejection velocity (easy to detect).
+    # Training uses 0.05 to suppress ejection, but here we WANT it.
+    import isaaclab.sim as sim_utils
+    env_cfg.scene.object.spawn.rigid_props = sim_utils.RigidBodyPropertiesCfg(
+        disable_gravity=False, max_depenetration_velocity=5.0,
+    )
+
     env = ManagerBasedRLEnv(env_cfg)
 
     robot = env.scene["robot"]
