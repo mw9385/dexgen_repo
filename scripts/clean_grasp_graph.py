@@ -81,16 +81,16 @@ def main():
     obj = env.scene["object"]
     device = env.device
 
-    # Import placement helpers from events
-    from envs.mdp.events import (
-        _align_wrist_palm_up,
-        _sample_wrist_pose_world,
-        _set_robot_root_pose,
-        _set_robot_joints_direct,
-        _place_object_in_hand,
-        _get_fingertip_body_ids_from_env,
-        _pad_fingertip_positions,
-        _expand_grasp_joint_vector,
+    # Import placement helpers from sim_utils
+    from envs.mdp.sim_utils import (
+        align_wrist_palm_up,
+        sample_wrist_pose_world,
+        set_robot_root_pose,
+        set_robot_joints_direct,
+        place_object_in_hand,
+        get_fingertip_body_ids_from_env,
+        pad_fingertip_positions,
+        expand_grasp_joint_vector,
     )
 
     env_ids = torch.tensor([0], device=device, dtype=torch.long)
@@ -117,22 +117,22 @@ def main():
             if grasp.fingertip_positions is None or grasp.joint_angles is None:
                 continue
 
-            fp = _pad_fingertip_positions(grasp.fingertip_positions, env_num_fingers)
+            fp = pad_fingertip_positions(grasp.fingertip_positions, env_num_fingers)
             fp_tensor = torch.tensor(fp, device=device, dtype=torch.float32).unsqueeze(0)  # (1, F, 3)
 
             # Step 1: Set wrist palm-up
-            wrist_pos, wrist_quat = _sample_wrist_pose_world(env, env_ids, apply_noise=False)
-            wrist_quat = _align_wrist_palm_up(env, env_ids, wrist_quat)
-            _set_robot_root_pose(env, env_ids, wrist_pos, wrist_quat)
+            wrist_pos, wrist_quat = sample_wrist_pose_world(env, env_ids, apply_noise=False)
+            wrist_quat = align_wrist_palm_up(env, env_ids, wrist_quat)
+            set_robot_root_pose(env, env_ids, wrist_pos, wrist_quat)
 
             # Step 2: Set joint angles
-            _set_robot_joints_direct(env, env_ids, [grasp.joint_angles])
+            set_robot_joints_direct(env, env_ids, [grasp.joint_angles])
 
             # Step 3: FK update
             robot.update(0.0)
 
             # Step 4: Place object via rigid alignment
-            _place_object_in_hand(env, env_ids, fp_tensor)
+            place_object_in_hand(env, env_ids, fp_tensor)
 
             # Step 5: Settle — step physics
             for _ in range(args.settle_steps):
