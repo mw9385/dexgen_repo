@@ -140,10 +140,13 @@ def _build_object_spawner(object_pool_specs: Optional[List[dict]] = None):
         return sim_utils.CuboidCfg(
             size=(0.040, 0.040, 0.040),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                disable_gravity=False, max_depenetration_velocity=0.05,
+                disable_gravity=False, max_depenetration_velocity=1.0,
+                enable_gyroscopic_forces=True,
             ),
             mass_props=sim_utils.MassPropertiesCfg(mass=0.05),
-            collision_props=sim_utils.CollisionPropertiesCfg(),
+            collision_props=sim_utils.CollisionPropertiesCfg(
+                contact_offset=0.002, rest_offset=0.0,
+            ),
             physics_material=_DEFAULT_MATERIAL,
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.8, 0.2, 0.2)),
         )
@@ -152,9 +155,9 @@ def _build_object_spawner(object_pool_specs: Optional[List[dict]] = None):
     for spec in object_pool_specs:
         shape, s = spec["shape_type"], spec["size"]
         color = tuple(spec.get("color", (0.7, 0.7, 0.7)))
-        rp = sim_utils.RigidBodyPropertiesCfg(disable_gravity=False, max_depenetration_velocity=0.05)
+        rp = sim_utils.RigidBodyPropertiesCfg(disable_gravity=False, max_depenetration_velocity=1.0, enable_gyroscopic_forces=True)
         mp = sim_utils.MassPropertiesCfg(mass=spec.get("mass", 0.1))
-        cp = sim_utils.CollisionPropertiesCfg()
+        cp = sim_utils.CollisionPropertiesCfg(contact_offset=0.002, rest_offset=0.0)
         pm = _DEFAULT_MATERIAL
         vm = sim_utils.PreviewSurfaceCfg(diffuse_color=color)
         if shape == "cube":
@@ -206,10 +209,13 @@ if _ISAACLAB_AVAILABLE:
             spawn=sim_utils.CuboidCfg(
                 size=(0.040, 0.040, 0.040),
                 rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                    disable_gravity=False, max_depenetration_velocity=0.05,
+                    disable_gravity=False, max_depenetration_velocity=1.0,
+                    enable_gyroscopic_forces=True,
                 ),
                 mass_props=sim_utils.MassPropertiesCfg(mass=0.05),
-                collision_props=sim_utils.CollisionPropertiesCfg(),
+                collision_props=sim_utils.CollisionPropertiesCfg(
+                    contact_offset=0.002, rest_offset=0.0,
+                ),
                 physics_material=sim_utils.RigidBodyMaterialCfg(
                     static_friction=1.0,
                     dynamic_friction=0.8,
@@ -485,6 +491,8 @@ if _ISAACLAB_AVAILABLE:
             # scene.num_envs may be MISSING at config construction time, so guard it.
             _n = self.scene.num_envs if isinstance(self.scene.num_envs, int) else 4096
             self.sim.physx.gpu_max_rigid_patch_count = 4 * _n * 1024
+            # Enable CCD to prevent fast-moving objects tunneling through thin fingers
+            self.sim.physx.enable_ccd = True
 
             # Build multi-object spawner.
             # Priority: explicit object_pool_specs > default diverse pool.
