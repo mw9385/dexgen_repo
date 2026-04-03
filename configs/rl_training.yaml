@@ -22,16 +22,16 @@ env:
     # All terms normalized to [-1, 1]. Weights control importance.
     #
     # r_goal (Eq. 5-7)
-    object_position:     1.0     # exp(-α * ||pos_err||²)     [0, 1]
-    object_orientation:  1.0     # exp(-α * rot_err)           [0, 1]
-    joint_tracking:      0.5     # -tanh(α * ||q_err||)        [-1, 0]
-    goal_bonus:          5.0     # 1(goal achieved)            {0, 1}
+    object_orientation:  5.0     # exp(-α * rot_err)           [0, 1]  ★ PRIMARY
+    object_position:     2.0     # exp(-α * ||pos_err||)       [0, 1]
+    joint_tracking:      0.2     # -tanh(α * ||q_err||)        [-1, 0]
+    goal_bonus:          10.0    # 1(goal achieved)            {0, 1}
     # r_style (Eq. 9) — disabled for Stage 1
     # fingertip_velocity: 0.05
     # r_reg (Eq. 8)
-    work:                0.001
-    action:              0.001
-    torque:              0.001
+    work:                0.01
+    action:              0.01
+    torque:              0.01
     # No termination penalty — drop/escape handled by DoneTerm only
 
 # ==============================================================================
@@ -160,7 +160,7 @@ domain_randomization:
 
   object_physics:
     mass_range:        [0.05, 0.15]   # kg  (narrowed from [0.03, 0.30])
-    friction_range:    [0.50, 1.00]   # -   (narrowed from [0.30, 1.20])
+    friction_range:    [1.00, 2.00]   # -   high friction for stable grasps
     restitution_range: [0.00, 0.20]   # -   (narrowed from [0.00, 0.40])
 
   robot_physics:
