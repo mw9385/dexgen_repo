@@ -26,8 +26,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 def main():
     parser = argparse.ArgumentParser(description="Filter penetrating grasps from grasp graph")
-    parser.add_argument("--input", type=str, required=True, help="Input grasp graph .pkl")
-    parser.add_argument("--output", type=str, required=True, help="Output clean grasp graph .pkl")
+    parser.add_argument("--input", type=str, default="data/grasp_graph.pkl", help="Input grasp graph .pkl")
+    parser.add_argument("--output", type=str, default="data/grasp_graph_clean.pkl", help="Output clean grasp graph .pkl")
     parser.add_argument("--vel-threshold", type=float, default=0.5,
                         help="Max object velocity after placement (m/s). Above = penetration.")
     parser.add_argument("--settle-steps", type=int, default=10,

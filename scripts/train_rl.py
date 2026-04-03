@@ -56,7 +56,7 @@ def parse_args():
     AppLauncher.add_app_launcher_args(p)
     args = p.parse_args()
     if args.grasp_graph is None:
-        args.grasp_graph = ["data/grasp_graph.pkl"]
+        args.grasp_graph = ["data/grasp_graph_clean.pkl"]
     return args
 
 
