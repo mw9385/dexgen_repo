@@ -130,8 +130,8 @@ def _build_object_spawner(object_pool_specs: Optional[List[dict]] = None):
         return None
 
     _DEFAULT_MATERIAL = sim_utils.RigidBodyMaterialCfg(
-        static_friction=0.65,
-        dynamic_friction=0.55,
+        static_friction=1.0,
+        dynamic_friction=0.8,
         restitution=0.0,
         friction_combine_mode="max",
     )
@@ -140,10 +140,13 @@ def _build_object_spawner(object_pool_specs: Optional[List[dict]] = None):
         return sim_utils.CuboidCfg(
             size=(0.040, 0.040, 0.040),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                disable_gravity=False, max_depenetration_velocity=5.0,
+                disable_gravity=False, max_depenetration_velocity=0.05,
+                enable_gyroscopic_forces=True,
             ),
             mass_props=sim_utils.MassPropertiesCfg(mass=0.05),
-            collision_props=sim_utils.CollisionPropertiesCfg(),
+            collision_props=sim_utils.CollisionPropertiesCfg(
+                contact_offset=0.002, rest_offset=0.0,
+            ),
             physics_material=_DEFAULT_MATERIAL,
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.8, 0.2, 0.2)),
         )
@@ -152,9 +155,9 @@ def _build_object_spawner(object_pool_specs: Optional[List[dict]] = None):
     for spec in object_pool_specs:
         shape, s = spec["shape_type"], spec["size"]
         color = tuple(spec.get("color", (0.7, 0.7, 0.7)))
-        rp = sim_utils.RigidBodyPropertiesCfg(disable_gravity=False, max_depenetration_velocity=5.0)
+        rp = sim_utils.RigidBodyPropertiesCfg(disable_gravity=False, max_depenetration_velocity=0.05, enable_gyroscopic_forces=True)
         mp = sim_utils.MassPropertiesCfg(mass=spec.get("mass", 0.1))
-        cp = sim_utils.CollisionPropertiesCfg()
+        cp = sim_utils.CollisionPropertiesCfg(contact_offset=0.002, rest_offset=0.0)
         pm = _DEFAULT_MATERIAL
         vm = sim_utils.PreviewSurfaceCfg(diffuse_color=color)
         if shape == "cube":
@@ -206,13 +209,16 @@ if _ISAACLAB_AVAILABLE:
             spawn=sim_utils.CuboidCfg(
                 size=(0.040, 0.040, 0.040),
                 rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                    disable_gravity=False, max_depenetration_velocity=5.0,
+                    disable_gravity=False, max_depenetration_velocity=0.05,
+                    enable_gyroscopic_forces=True,
                 ),
                 mass_props=sim_utils.MassPropertiesCfg(mass=0.05),
-                collision_props=sim_utils.CollisionPropertiesCfg(),
+                collision_props=sim_utils.CollisionPropertiesCfg(
+                    contact_offset=0.002, rest_offset=0.0,
+                ),
                 physics_material=sim_utils.RigidBodyMaterialCfg(
-                    static_friction=0.65,
-                    dynamic_friction=0.55,
+                    static_friction=1.0,
+                    dynamic_friction=0.8,
                     restitution=0.0,
                     friction_combine_mode="max",
                 ),
@@ -273,7 +279,7 @@ if _ISAACLAB_AVAILABLE:
     @configclass
     class AnyGraspObservationsCfg:
         # All spatial observations in HAND ROOT (wrist) frame.
-        # Actor: 106 dims, Critic: 124 dims (actor + privileged)
+        # Actor: 91 dims, Critic: 109 dims (actor + privileged)
 
         @configclass
         class PolicyObs(ObsGroup):
@@ -285,11 +291,6 @@ if _ISAACLAB_AVAILABLE:
             joint_vel = ObsTerm(
                 func=mdp_obs.joint_velocities_normalized,
                 noise=GaussianNoise(std=0.04),
-            )
-            # ── Fingertip state (hand frame) ──
-            fingertip_pos = ObsTerm(
-                func=mdp_obs.fingertip_positions_hand_frame,
-                noise=GaussianNoise(std=0.003),
             )
             # ── Current object state (hand frame) ──
             object_pos   = ObsTerm(func=mdp_obs.object_pos_in_hand_frame)
@@ -318,10 +319,6 @@ if _ISAACLAB_AVAILABLE:
             joint_vel = ObsTerm(
                 func=mdp_obs.joint_velocities_normalized,
                 noise=GaussianNoise(std=0.04),
-            )
-            fingertip_pos = ObsTerm(
-                func=mdp_obs.fingertip_positions_hand_frame,
-                noise=GaussianNoise(std=0.003),
             )
             object_pos   = ObsTerm(func=mdp_obs.object_pos_in_hand_frame)
             object_quat  = ObsTerm(func=mdp_obs.object_quat_in_hand_frame)
@@ -446,7 +443,7 @@ if _ISAACLAB_AVAILABLE:
         randomize_object_physics = EventTerm(
             func=mdp_dr.randomize_object_physics,
             mode="reset",
-            params={"mass_range": (0.03, 0.08), "friction_range": (0.50, 0.80), "restitution_range": (0.00, 0.10)},
+            params={"mass_range": (0.05, 0.10), "friction_range": (0.80, 1.20), "restitution_range": (0.00, 0.10)},
         )
         randomize_robot_physics = EventTerm(
             func=mdp_dr.randomize_robot_physics,
@@ -494,6 +491,8 @@ if _ISAACLAB_AVAILABLE:
             # scene.num_envs may be MISSING at config construction time, so guard it.
             _n = self.scene.num_envs if isinstance(self.scene.num_envs, int) else 4096
             self.sim.physx.gpu_max_rigid_patch_count = 4 * _n * 1024
+            # Enable CCD to prevent fast-moving objects tunneling through thin fingers
+            self.sim.physx.enable_ccd = True
 
             # Build multi-object spawner.
             # Priority: explicit object_pool_specs > default diverse pool.
@@ -529,10 +528,10 @@ if _ISAACLAB_AVAILABLE:
                 # Stage 0 data is valid for any wrist orientation because
                 # fingertip and object poses are stored in hand-relative frames.
                 self.reset_randomization = {
-                    "object_pos_jitter_std": 0.005,         # 5 mm position jitter
-                    "object_rot_jitter_deg": 5.0,           # ±5° object orientation jitter
+                    "object_pos_jitter_std": 0.0,           # no position jitter
+                    "object_rot_jitter_deg": 0.0,           # no rotation jitter
                     "wrist_pos_jitter_std": 0.0,            # no position jitter
-                    "wrist_rot_std_deg": 15.0,              # ±15° wrist tilt for robustness
+                    "wrist_rot_std_deg": 0.0,               # no wrist tilt
                     "align_palm_up": True,                  # palm faces upward (+Z), gravity keeps object in hand
                 }
 

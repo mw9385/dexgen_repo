@@ -225,20 +225,6 @@ def reset_to_random_grasp(
         goal_idx_list, device=env.device, dtype=torch.long
     )
 
-    # Store goal joint angles for finger_joint_goal_reward
-    robot = env.scene["robot"]
-    num_dof = robot.data.default_joint_pos.shape[-1]
-    if "target_joint_angles" not in env.extras:
-        env.extras["target_joint_angles"] = robot.data.default_joint_pos[
-            :env.num_envs
-        ].clone()
-    for i, gj in enumerate(goal_joints_list):
-        if gj is not None:
-            env.extras["target_joint_angles"][env_ids[i]] = _expand_grasp_joint_vector(
-                torch.tensor(gj, device=env.device, dtype=torch.float32),
-                num_dof,
-            )
-
     # Store goal object pose in hand frame for object_pose_reward
     if "target_object_pos_hand" not in env.extras:
         env.extras["target_object_pos_hand"] = torch.zeros(
@@ -654,16 +640,6 @@ def update_rolling_goal(
         env.extras["target_fingertip_pos"][env_id] = torch.tensor(
             new_fps.reshape(fp_dim), device=env.device, dtype=torch.float32
         )
-
-        # Update goal joint angles
-        new_joints = getattr(new_goal_grasp, "joint_angles", None)
-        if new_joints is not None and "target_joint_angles" in env.extras:
-            robot = env.scene["robot"]
-            num_dof = robot.data.default_joint_pos.shape[-1]
-            env.extras["target_joint_angles"][env_id] = _expand_grasp_joint_vector(
-                torch.tensor(new_joints, device=env.device, dtype=torch.float32),
-                num_dof,
-            )
 
         # Rebase target: use delta between old goal (now start) and new goal,
         # applied to the CURRENT actual sim object pose in hand frame.
