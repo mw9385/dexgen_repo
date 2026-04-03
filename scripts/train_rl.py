@@ -680,6 +680,7 @@ class _IsaacLabVecEnv:
         done = terminated | truncated
 
         # ── DEBUG: print per-term reward for env 0 ──
+        from envs.mdp import rewards as mdp_rewards
         if not getattr(self, "_reward_debug_off", False):
             _step_count = getattr(self, "_dbg_step", 0)
             self._dbg_step = _step_count + 1
