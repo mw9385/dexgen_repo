@@ -38,7 +38,7 @@ nfo:
 # Grasp generation method:
 #   'optimization'      : DexGraspNet Simulated Annealing (recommended)
 #   'surface_sampling'  : legacy heuristic sampling + NFO
-method: optimization
+method: surface_rrt
 
 # ==============================================================================
 # DexGraspNet Simulated Annealing Optimization
@@ -106,6 +106,17 @@ optimization:
   thres_fc: 0.3
   thres_dis: 0.005
   thres_pen: 0.001
+
+# Surface-projected RRT (recommended — no penetration by construction)
+surface_rrt:
+  target_size: 300              # number of grasps to generate
+  num_seed_grasps: 500          # seed grasps from surface sampler
+  delta_pos: 0.008              # perturbation std dev (metres)
+  delta_max: 0.04               # max edge distance for graph (metres)
+  min_quality: 0.005            # NFO quality threshold
+  max_attempts_per_step: 30     # RRT attempts per expansion step
+  collision_threshold: 0.002    # max penetration depth (metres)
+  min_finger_spacing: 0.01      # min pairwise fingertip distance (metres)
 
 # RRT expansion (legacy, used when method=surface_sampling)
 rrt:

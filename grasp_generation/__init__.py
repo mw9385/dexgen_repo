@@ -3,6 +3,7 @@ from .net_force_optimization import NetForceOptimizer
 from .rrt_expansion import (
     RRTGraspExpander, GraspGraph, MultiObjectGraspGraph, build_graph_from_grasps,
 )
+from .surface_rrt import SurfaceRRTGraspExpander
 from .graph_io import load_merged_graph, parse_graph_paths
 from .isaac_refinement import refine_multi_object_graph_with_isaac
 from .hand_model import (
@@ -22,6 +23,7 @@ __all__ = [
     "GraspGraph",
     "MultiObjectGraspGraph",
     "build_graph_from_grasps",
+    "SurfaceRRTGraspExpander",
     "load_merged_graph",
     "parse_graph_paths",
     "refine_multi_object_graph_with_isaac",

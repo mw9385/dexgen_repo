@@ -42,6 +42,7 @@ if not _DEXGRASPNET_MJCF.exists():
 from grasp_generation import (
     NetForceOptimizer, ObjectPool, MultiObjectGraspGraph,
     GraspOptimizer, build_hand_model,
+    GraspSampler, SurfaceRRTGraspExpander,
 )
 
 
@@ -79,12 +80,74 @@ def parse_args():
     return p.parse_args()
 
 
+def generate_grasps_surface_rrt(spec, args, num_fingers, seed):
+    """Generate grasps for one object via surface-projected RRT."""
+    srrt_cfg = getattr(args, '_srrt_cfg', {})
+
+    print(f"\n{'='*55}")
+    print(f"  Object: {spec.name} ({spec.shape_type}, {spec.size:.3f}m)")
+    print(f"  Method: surface_rrt")
+    print(f"{'='*55}")
+
+    # 1. Sample seed grasps on mesh surface
+    num_seeds = int(srrt_cfg.get("num_seed_grasps", 500))
+    sampler = GraspSampler(
+        mesh=spec.mesh,
+        object_name=spec.name,
+        object_scale=spec.size / 0.06,
+        num_grasps=num_seeds,
+        num_candidates=max(5000, num_seeds * 10),
+        num_fingers=num_fingers,
+        seed=seed,
+    )
+    seed_set = sampler.sample()
+    if len(seed_set) < 2:
+        print(f"  [SurfaceRRT] Too few seeds ({len(seed_set)}), skipping")
+        return None, None
+
+    # 2. NFO pre-filter on seeds
+    nfo = NetForceOptimizer(
+        mu=args.mu, min_quality=args.min_quality, fast_mode=True,
+    )
+    seed_set = nfo.evaluate_set(seed_set, verbose=True)
+    if len(seed_set) < 2:
+        print(f"  [SurfaceRRT] Too few seeds after NFO ({len(seed_set)}), skipping")
+        return None, None
+
+    # 3. RRT expansion with surface projection
+    # Scale delta_pos with object size for better coverage
+    obj_size = float(np.max(spec.mesh.bounding_box.extents))
+    delta_pos = float(srrt_cfg.get("delta_pos", 0.008))
+    delta_pos = max(delta_pos, obj_size * 0.10)
+
+    expander = SurfaceRRTGraspExpander(
+        mesh=spec.mesh,
+        nfo=nfo,
+        delta_pos=delta_pos,
+        delta_max=float(srrt_cfg.get("delta_max", 0.04)),
+        min_quality=args.min_quality,
+        target_size=args.num_grasps,
+        max_attempts_per_step=int(srrt_cfg.get("max_attempts_per_step", 30)),
+        collision_threshold=float(srrt_cfg.get("collision_threshold", 0.002)),
+        min_finger_spacing=float(srrt_cfg.get("min_finger_spacing", 0.01)),
+        seed=seed,
+    )
+    graph = expander.expand(seed_set)
+    print(f"  [Done] {len(graph)} grasps, {graph.num_edges} edges")
+
+    return graph, {
+        "name": spec.name, "shape_type": spec.shape_type,
+        "size": spec.size, "mass": spec.mass, "color": spec.color,
+    }
+
+
 def generate_grasps(spec, args, num_fingers, num_dof, hand_name, device):
     """Generate grasps for one object via DexGraspNet optimization."""
     from grasp_generation.rrt_expansion import build_graph_from_grasps
 
     print(f"\n{'='*55}")
     print(f"  Object: {spec.name} ({spec.shape_type}, {spec.size:.3f}m)")
+    print(f"  Method: optimization")
     print(f"{'='*55}")
 
     hand_model = build_hand_model(hand_name, device=device)
@@ -209,9 +272,15 @@ def main():
     num_dof = hand_cfg.get("num_dof", 24)
     hand_name = hand_cfg.get("name", "shadow")
 
+    method = cfg_file.get("method", "optimization")
+    srrt_cfg = cfg_file.get("surface_rrt", {})
+    args._srrt_cfg = srrt_cfg
+
+    print(f"[Stage 0] Method: {method}")
     print(f"[Stage 0] Hand: {hand_name} (fingers={num_fingers}, dof={num_dof})")
     print(f"[Stage 0] Objects: {args.shapes}, size=({args.size_min:.3f}, {args.size_max:.3f})")
-    print(f"[Stage 0] Optimizer: iter={args.num_iterations}, batch={args.batch_size}")
+    if method == "optimization":
+        print(f"[Stage 0] Optimizer: iter={args.num_iterations}, batch={args.batch_size}")
     print(f"[Stage 0] Device: {args.device}")
 
     # Build object pool
@@ -230,13 +299,22 @@ def main():
             num_sizes=args.num_sizes, seed=args.seed,
         )
 
-    # ── Step 1: Generate grasps (pure PyTorch) ──
+    # ── Step 1: Generate grasps ──
     multi_graph = MultiObjectGraspGraph()
     for i, spec in enumerate(pool):
-        graph, isaac_spec = generate_grasps(
-            spec, args, num_fingers=num_fingers, num_dof=num_dof,
-            hand_name=hand_name, device=args.device,
-        )
+        if method == "surface_rrt":
+            # Surface-projected RRT (no GPU / hand model needed)
+            if args.num_grasps is None or args.num_grasps == 300:
+                args.num_grasps = int(srrt_cfg.get("target_size", 300))
+            graph, isaac_spec = generate_grasps_surface_rrt(
+                spec, args, num_fingers=num_fingers, seed=args.seed + i,
+            )
+        else:
+            # DexGraspNet SA optimization (GPU recommended)
+            graph, isaac_spec = generate_grasps(
+                spec, args, num_fingers=num_fingers, num_dof=num_dof,
+                hand_name=hand_name, device=args.device,
+            )
         if graph is None:
             continue
 
