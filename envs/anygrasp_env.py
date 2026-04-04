@@ -16,30 +16,31 @@ Shadow Hand E-Series: 5 fingers, 20 actuated DOF + 4 passive = 24 total USD join
 
 =======================================================================
   OBSERVATION SPLIT  (see mdp/observations.py for full details)
+  All spatial observations in HAND ROOT (wrist) frame.
 =======================================================================
 
-  ACTOR (policy) — 101 dims
+  ACTOR (policy) — 91 dims
   ─────────────────────────────────────────────────────────────────
   joint_pos_normalized       22   (finger joints only, excl. wrist)
   joint_vel_normalized       22   (finger joints only, excl. wrist)
-  fingertip_pos_obj_frame    15   (FK in object-centric frame, 5×3)
-  rel_fingertip_to_goal      15   (goal−current in obj frame, 5×3)
+  object_pos_hand             3   (current object position)
+  object_quat_hand            4   (current object quaternion)
+  target_object_pos_hand      3   (goal object position)
+  target_object_quat_hand     4   (goal object quaternion)
+  object_lin_vel_hand         3   (object linear velocity)
+  object_ang_vel_hand         3   (object angular velocity)
   fingertip_contact_binary    5   (tactile: binary contact per tip)
   last_action                22   (previous joint targets, excl. wrist)
   ─────────────────────────────────────────────────────────────────
-  Total: 22+22+15+15+5+22 = 101
+  Total: 22+22+3+4+3+4+3+3+5+22 = 91
 
-  CRITIC (privileged) — 132 dims
+  CRITIC (privileged) — 109 dims
   ─────────────────────────────────────────────────────────────────
-  [actor obs]               101   (incl. rel_fingertip_to_goal)
-  object_pos_world            3   (true 3-D position)
-  object_quat_world           4   (true orientation)
-  object_lin_vel              3   (true linear velocity)
-  object_ang_vel              3   (true angular velocity)
+  [actor obs]                91
   fingertip_contact_forces   15   (full 3-D forces per tip, 5×3)
   dr_params                   3   (mass / friction / damping)
   ─────────────────────────────────────────────────────────────────
-  Total: 101+3+4+3+3+15+3 = 132
+  Total: 91+15+3 = 109
 
 =======================================================================
   DOMAIN RANDOMIZATION  (see mdp/domain_rand.py for ranges)
@@ -53,7 +54,6 @@ Shadow Hand E-Series: 5 fingers, 20 actuated DOF + 4 passive = 24 total USD join
   Per step (obs corruption):
     - joint_pos noise:     N(0, 0.005) rad
     - joint_vel noise:     N(0, 0.04)  (normalised space)
-    - fingertip pos noise: N(0, 0.003) m
 =======================================================================
 """
 from __future__ import annotations

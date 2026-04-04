@@ -11,11 +11,10 @@ Observation functions – all spatial quantities in HAND ROOT (wrist) frame.
     - Target and current states are directly comparable
     - Invariant to where the hand is placed in the world
 
-  ACTOR (policy) — 106 dims
+  ACTOR (policy) — 91 dims
   ┌─────────────────────────────────────────────────────────────────┐
   │ joint_pos_normalized       22   finger joints (excl wrist)     │
   │ joint_vel_normalized       22   finger joints (excl wrist)     │
-  │ fingertip_pos_hand         15   fingertip positions, 5×3       │
   │ object_pos_hand             3   current object position        │
   │ object_quat_hand            4   current object quaternion      │
   │ target_object_pos_hand      3   goal object position           │
@@ -25,15 +24,15 @@ Observation functions – all spatial quantities in HAND ROOT (wrist) frame.
   │ fingertip_contact_binary    5   tactile: 1 if in contact       │
   │ last_action                22   previous joint targets         │
   └─────────────────────────────────────────────────────────────────┘
-  Total: 22+22+15+3+4+3+4+3+3+5+22 = 106
+  Total: 22+22+3+4+3+4+3+3+5+22 = 91
 
-  CRITIC (privileged) — 124 dims
+  CRITIC (privileged) — 109 dims
   ┌─────────────────────────────────────────────────────────────────┐
-  │ [All actor obs]           106                                   │
+  │ [All actor obs]            91                                   │
   │ fingertip_contact_forces   15   full 3-D force per tip, 5×3    │
   │ dr_params                   3   mass / obj_friction / damping  │
   └─────────────────────────────────────────────────────────────────┘
-  Total: 106 + 15 + 3 = 124
+  Total: 91 + 15 + 3 = 109
 
   Hand: Shadow Hand E-Series — 5 fingers, 24 total USD DOF
         Policy observes/controls 22 finger joints (wrist WRJ0/WRJ1 excluded)
@@ -120,6 +119,7 @@ def joint_velocities_normalized(env) -> torch.Tensor:
 def fingertip_positions_hand_frame(env) -> torch.Tensor:
     """
     Current fingertip positions in hand root frame.
+    Not used in the RL observation config, but called by scripts/collect_data.py.
     Returns: (N, num_fingers*3)
     """
     robot = env.scene["robot"]
