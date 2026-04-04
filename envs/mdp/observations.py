@@ -222,6 +222,7 @@ def fingertip_contact_forces(env) -> torch.Tensor:
 def domain_randomization_params(env) -> torch.Tensor:
     """
     Current DR parameter values (mass, friction, damping).
+    Not in the RL obs config; kept for logging / analysis only.
     Returns: (N, 3)
     """
     params = env.extras.get("dr_params")

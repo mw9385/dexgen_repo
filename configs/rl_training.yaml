@@ -45,9 +45,8 @@ env:
 #     joint_pos(22) + joint_vel(22) + obj_pose(7) + target_obj_pose(7)
 #     + obj_vel(6) + contact_forces(15) + last_action(22)
 #
-#   The central_value_config block enables the separate critic network.
 #   rl_games reads env observations["policy"] for actor and
-#   env observations["critic"] for the central value function.
+#   env observations["critic"] for critic (both 101-dim, symmetric).
 # ==============================================================================
 
 ppo:
@@ -105,10 +104,10 @@ ppo:
   max_iterations: 30000
 
 # ==============================================================================
-# Central Value Function (separate critic for asymmetric AC)
+# Central Value Function (symmetric: same 101-dim obs as actor)
 # ==============================================================================
-# Uses privileged 104-dim observations from env observations["critic"].
-# Larger network than actor since it processes more information.
+# Reads env observations["critic"] which mirrors observations["policy"].
+# Same architecture as actor (symmetric AC, no privileged info).
 # ==============================================================================
 
 central_value:

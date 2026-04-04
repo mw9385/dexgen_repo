@@ -87,7 +87,7 @@ Output: `data/grasp_graph_solved.pkl` — robot-state graph.
 
 ## Stage 1: RL Training
 
-Symmetric actor-critic PPO. Both actor and critic receive the same 161-dim observation.
+Symmetric actor-critic PPO. Both actor and critic receive the same 101-dim observation (all spatial quantities in hand root frame).
 
 Hand orientation: palm-up (object rests on palm). Wrist tilt randomization (+/-15 deg) forces the policy to learn active grasping instead of passive balancing.
 
@@ -98,25 +98,20 @@ Object pool: 3-5cm cube/sphere/cylinder (9 variants), mass 20-100g. Sized for si
     --grasp_graph data/grasp_graph_solved.pkl --num_envs 4096 --headless
 ```
 
-### Observation (161 dims)
+### Observation (101 dims, hand root frame)
 
-| Component | Dims |
-|-----------|------|
-| Joint positions (normalized) | 22 |
-| Joint velocities | 22 |
-| Fingertip positions (object frame) | 15 |
-| Relative fingertip to goal | 15 |
-| Fingertip contact binary | 5 |
-| Last action | 22 |
-| Target object pos (hand frame) | 3 |
-| Target object quat (hand frame) | 4 |
-| Target joint angles (normalized) | 22 |
-| Object position (world) | 3 |
-| Object quaternion | 4 |
-| Object linear velocity | 3 |
-| Object angular velocity | 3 |
-| Contact forces | 15 |
-| Domain randomization params | 3 |
+| Component | Dims | Description |
+|-----------|------|-------------|
+| Joint positions (normalized) | 22 | Finger joints, normalized to [-1, 1] |
+| Joint velocities (normalized) | 22 | Finger joints, clipped by 5 rad/s |
+| Object position | 3 | Current object pos in hand frame |
+| Object quaternion | 4 | Current object quat in hand frame |
+| Target object position | 3 | Goal object pos in hand frame |
+| Target object quaternion | 4 | Goal object quat in hand frame |
+| Object linear velocity | 3 | In hand frame |
+| Object angular velocity | 3 | In hand frame |
+| Fingertip contact forces | 15 | 3-D force per fingertip (5x3), normalized by 10N |
+| Last action | 22 | Previous joint position targets |
 
 ### Reward Function (DexterityGen Eq. 4-9)
 
@@ -136,6 +131,7 @@ All terms normalized to [-1,1] or [0,1]. Weights control relative importance.
 
 - `object_drop`: object height < 0.2m (no penalty, just terminates)
 - `object_left_hand`: palm-object distance > 20cm
+- `no_fingertip_contact`: no fingertip touches object for 30 consecutive steps (~1s)
 - `time_out`: episode length limit
 
 ### Rolling Goal
@@ -159,7 +155,7 @@ Two paths depending on graph type:
 3. Adaptive initial joints + per-finger differential IK
 4. Palm-up rotation + tilt noise
 
-The `has_stored_reset` check requires ALL grasps in the batch to have `joint_angles`, `object_pos_hand`, and `object_quat_hand`. Use `solve_grasp_graph.py` to prepare the graph.
+The `has_stored_reset` check requires ALL grasps in the batch to have `joint_angles`, `object_pos_hand`, `object_quat_hand`, and `object_pose_frame == "hand_root"`. Use `solve_grasp_graph.py` to prepare the graph.
 
 ### Resume Training
 
