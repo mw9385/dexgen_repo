@@ -89,9 +89,11 @@ Output: `data/grasp_graph_solved.pkl` — robot-state graph.
 
 Symmetric actor-critic PPO. Both actor and critic receive the same 101-dim observation (all spatial quantities in hand root frame).
 
-Hand orientation: palm-up (object rests on palm). Wrist tilt randomization (+/-15 deg) forces the policy to learn active grasping instead of passive balancing.
+Each episode samples a random start grasp and a nearby goal grasp from the grasp graph. The start and goal are distinct from step 0 — the policy must reorient the object toward the goal immediately. When the goal is achieved (pos < 2cm, rot < 0.1rad), a new nearby goal is selected via kNN (rolling goal).
 
-Object pool: 3-5cm cube/sphere/cylinder (9 variants), mass 20-100g. Sized for single-hand precision grasp and in-hand rotation.
+Hand orientation: palm-up base + diverse wrist poses (±15° tilt noise, 5mm position jitter). This forces the policy to learn active prehensile manipulation under varied gravity directions, not just passive balancing.
+
+Object pool: 3-5cm cube/sphere/cylinder (9 variants), mass 50-100g. Sized for single-hand precision grasp and in-hand rotation.
 
 ```bash
 /workspace/IsaacLab/isaaclab.sh -p scripts/train_rl.py \
@@ -139,20 +141,23 @@ When the object reaches the current goal (pos < 2cm, rot < 0.1rad), a new nearby
 
 ### Reset
 
-Two paths depending on graph type:
+Two paths depending on graph type, then common steps:
 
 **Solved graph** (`grasp_graph_solved.pkl`, recommended):
 1. Set wrist at default world position
 2. Set stored `joint_angles` directly (skip IK)
-3. FK update
-4. Compute object world pose from stored `object_pos_hand`/`object_quat_hand` (exact hand-relative pose)
-5. Palm-up rotation + tilt noise
+3. Compute object world pose from stored hand-relative pose
 
 **Unsolved graph** (`grasp_graph.pkl`, fallback):
 1. Place object at fixed position near palm
 2. Compute wrist from fingertip centroid
 3. Adaptive initial joints + per-finger differential IK
-4. Palm-up rotation + tilt noise
+
+**Common steps (both paths):**
+4. Palm-up rotation
+5. Wrist pose diversity: position jitter (5mm) + tilt noise (±15°)
+6. Compute goal object pose as delta(start→goal) applied to actual sim state
+   - Start ≠ goal from step 0; policy must reorient immediately
 
 The `has_stored_reset` check requires ALL grasps in the batch to have `joint_angles`, `object_pos_hand`, `object_quat_hand`, and `object_pose_frame == "hand_root"`. Use `solve_grasp_graph.py` to prepare the graph.
 

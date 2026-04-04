@@ -38,11 +38,13 @@ Shadow Hand E-Series: 5 fingers, 20 actuated DOF + 4 passive = 24 total USD join
   DOMAIN RANDOMIZATION  (see mdp/domain_rand.py for ranges)
 =======================================================================
   Per episode reset:
-    - Object mass:         Uniform(0.03, 0.30) kg
-    - Object friction:     Uniform(0.30, 1.20)
-    - Joint damping:       per-joint Uniform(0.01, 0.30)
-    - Joint armature:      per-joint Uniform(0.001, 0.03)
-    - Action delay:        0–2 steps
+    - Object mass:         Uniform(0.05, 0.10) kg
+    - Object friction:     Uniform(0.80, 1.20)
+    - Joint damping:       per-joint Uniform(0.01, 0.10)
+    - Joint armature:      per-joint Uniform(0.001, 0.01)
+    - Action delay:        0–1 steps
+    - Wrist tilt noise:    N(0, 15°) per axis
+    - Wrist pos jitter:    N(0, 5mm)
   Per step (obs corruption):
     - joint_pos noise:     N(0, 0.005) rad
     - joint_vel noise:     N(0, 0.04)  (normalised space)
@@ -512,16 +514,16 @@ if _ISAACLAB_AVAILABLE:
                 }
 
             if self.reset_randomization is None:
-                # Wrist jitter is intentionally non-zero so the policy learns to
-                # be robust to small variations in the initial grasp pose.
+                # Diverse wrist poses force the policy to learn active grasping
+                # under varied gravity directions, not just passive balancing.
                 # Stage 0 data is valid for any wrist orientation because
                 # fingertip and object poses are stored in hand-relative frames.
                 self.reset_randomization = {
-                    "object_pos_jitter_std": 0.0,           # no position jitter
-                    "object_rot_jitter_deg": 0.0,           # no rotation jitter
-                    "wrist_pos_jitter_std": 0.0,            # no position jitter
-                    "wrist_rot_std_deg": 0.0,               # no wrist tilt
-                    "align_palm_up": True,                  # palm faces upward (+Z), gravity keeps object in hand
+                    "object_pos_jitter_std": 0.0,           # no object position jitter
+                    "object_rot_jitter_deg": 0.0,           # no object rotation jitter
+                    "wrist_pos_jitter_std": 0.005,          # 5mm wrist position noise
+                    "wrist_rot_std_deg": 15.0,              # ±15° wrist tilt noise (paper: diverse wrist poses)
+                    "align_palm_up": True,                  # base pose is palm-up, then tilt noise is applied
                 }
 
             if self.reset_refinement is None:

@@ -1,17 +1,17 @@
 """
 Event (reset / randomisation) functions for the AnyGrasp-to-AnyGrasp env.
 
-Reset logic per episode:
-  1. Sample start/goal grasps from the GraspGraph
-  2. If solved graph (joint_angles + object_pos_hand + object_quat_hand):
-     a. Set wrist at default position, apply stored joints
-     b. Place object from stored hand-relative pose
-  3. If unsolved graph (contact-only):
-     a. Place object at fixed position near palm
-     b. Compute wrist from fingertip arrangement
-     c. Adaptive joints + per-finger differential IK
-  4. Rotate hand+object system to palm-up + tilt noise
-  5. Store goal fingertip/object pose in env.extras
+Reset logic per episode (DexterityGen §3.2):
+  1. Sample start grasp + nearby goal grasp from the GraspGraph
+  2. Set hand to START grasp configuration:
+     a. Solved graph: set stored joint_angles + place object from hand-relative pose
+     b. Unsolved graph: place object fixed, compute wrist, adaptive joints + IK
+  3. Apply palm-up transform + wrist pose diversity (position jitter + tilt noise)
+  4. Compute GOAL object pose as delta(start→goal) applied to actual sim state
+     → start ≠ goal from step 0; policy must reorient toward goal immediately
+
+Rolling goal: when current goal is achieved (pos < 2cm, rot < 0.1rad),
+  a new nearby goal is selected via kNN from the grasp graph.
 """
 
 from __future__ import annotations
@@ -371,7 +371,17 @@ def reset_to_random_grasp(
     # ── Common: palm-up rotation + noise ──────────────────────────────
     goal_world = apply_palm_up_transform(env, env_ids, goal_world)
 
-    # Optional tilt noise after palm-up alignment
+    # Wrist pose diversity (paper: diverse wrist poses throughout training)
+    # Position jitter
+    pos_jitter_std = float(cfg.get("wrist_pos_jitter_std", 0.005))
+    if pos_jitter_std > 0.0:
+        wrist_pos_now = robot.data.root_pos_w[env_ids].clone()
+        wrist_pos_now += torch.randn(n, 3, device=env.device) * pos_jitter_std
+        wrist_quat_now = robot.data.root_quat_w[env_ids].clone()
+        set_robot_root_pose(env, env_ids, wrist_pos_now, wrist_quat_now)
+        robot.update(0.0)
+
+    # Tilt noise
     rot_std = math.radians(float(cfg.get("wrist_rot_std_deg", 15.0)))
     if rot_std > 0.0:
         wrist_quat_now = robot.data.root_quat_w[env_ids].clone()
@@ -380,7 +390,12 @@ def reset_to_random_grasp(
         set_robot_root_pose(env, env_ids, wrist_pos_now, tilted)
         robot.update(0.0)
 
-    # Step 7: Compute goal object pose in hand frame from actual sim state
+    # Step 7: Compute goal object pose in hand frame.
+    #
+    # The goal grasp has a different object pose than the start grasp
+    # (the object needs to be reoriented). We compute the DELTA between
+    # start and goal graph poses, then apply it to the actual sim pose.
+    # This handles the frame mismatch from palm-up transform + tilt noise.
     robot.update(0.0)
     obj.update(0.0)
 
@@ -394,10 +409,33 @@ def reset_to_random_grasp(
         actual_quat_hand = quat_multiply(
             quat_conjugate(rq_w.unsqueeze(0)), oq_w.unsqueeze(0)
         )[0]
-        # For AnyGrasp-to-AnyGrasp with fixed object, goal object pose =
-        # current object pose (object doesn't move, only fingers change).
-        env.extras["target_object_pos_hand"][env_ids[i]] = actual_pos_hand.clone()
-        env.extras["target_object_quat_hand"][env_ids[i]] = actual_quat_hand.clone()
+
+        # Compute goal as delta from start grasp's stored object pose
+        s_pos = start_object_pos_hand_list[i]
+        s_quat = start_object_quat_hand_list[i]
+        g_pos = goal_object_pos_hand_list[i]
+        g_quat = goal_object_quat_hand_list[i]
+
+        if s_pos is not None and g_pos is not None \
+                and s_quat is not None and g_quat is not None:
+            # Position delta
+            delta_pos = torch.tensor(g_pos, device=env.device, dtype=torch.float32) \
+                      - torch.tensor(s_pos, device=env.device, dtype=torch.float32)
+            target_pos = actual_pos_hand + delta_pos
+
+            # Orientation delta: delta_q = conj(start_q) * goal_q
+            sq = torch.tensor(s_quat, device=env.device, dtype=torch.float32).unsqueeze(0)
+            gq = torch.tensor(g_quat, device=env.device, dtype=torch.float32).unsqueeze(0)
+            delta_quat = quat_multiply(quat_conjugate(sq), gq)[0]
+            target_quat = quat_multiply(actual_quat_hand.unsqueeze(0), delta_quat.unsqueeze(0))[0]
+            target_quat = target_quat / (torch.norm(target_quat) + 1e-8)
+
+            env.extras["target_object_pos_hand"][env_ids[i]] = target_pos
+            env.extras["target_object_quat_hand"][env_ids[i]] = target_quat
+        else:
+            # Fallback: no stored object poses → goal = current (legacy behavior)
+            env.extras["target_object_pos_hand"][env_ids[i]] = actual_pos_hand.clone()
+            env.extras["target_object_quat_hand"][env_ids[i]] = actual_quat_hand.clone()
 
     # ------------------------------------------------------------------
     # 8. Initialise action buffers
@@ -599,10 +637,6 @@ def update_rolling_goal(
     if goal_idx_buf is None or target_pos is None or target_quat is None:
         return 0
 
-    # Grace period
-    GRACE_STEPS = 20
-    step_buf = getattr(env, "episode_length_buf", None)
-
     # Object pose in hand frame
     robot = env.scene["robot"]
     obj = env.scene["object"]
@@ -626,9 +660,6 @@ def update_rolling_goal(
     orn_err = 2.0 * torch.acos(dot)
 
     success_mask = (pos_err < pos_threshold) & (orn_err < rot_threshold)
-
-    if step_buf is not None:
-        success_mask = success_mask & (step_buf >= GRACE_STEPS)
 
     success_mask = success_mask & ~object_dropped(env)
     success_mask = success_mask & ~object_left_hand(env)
