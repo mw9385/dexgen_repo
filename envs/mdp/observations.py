@@ -11,7 +11,7 @@ Observation functions – all spatial quantities in HAND ROOT (wrist) frame.
     - Target and current states are directly comparable
     - Invariant to where the hand is placed in the world
 
-  ACTOR = CRITIC — 106 dims (symmetric, no privileged info)
+  ACTOR = CRITIC — 101 dims (symmetric, no privileged info)
   ┌─────────────────────────────────────────────────────────────────┐
   │ joint_pos_normalized       22   finger joints (excl wrist)     │
   │ joint_vel_normalized       22   finger joints (excl wrist)     │
@@ -21,11 +21,10 @@ Observation functions – all spatial quantities in HAND ROOT (wrist) frame.
   │ target_object_quat_hand     4   goal object quaternion         │
   │ object_lin_vel_hand         3   object linear velocity         │
   │ object_ang_vel_hand         3   object angular velocity        │
-  │ fingertip_contact_binary    5   tactile: 1 if in contact       │
   │ fingertip_contact_forces   15   full 3-D force per tip, 5×3   │
   │ last_action                22   previous joint targets         │
   └─────────────────────────────────────────────────────────────────┘
-  Total: 22+22+3+4+3+4+3+3+5+15+22 = 106
+  Total: 22+22+3+4+3+4+3+3+15+22 = 101
 
   Hand: Shadow Hand E-Series — 5 fingers, 24 total USD DOF
         Policy observes/controls 22 finger joints (wrist WRJ0/WRJ1 excluded)
@@ -180,6 +179,8 @@ def fingertip_contact_binary(env) -> torch.Tensor:
     """
     Binary contact indicator per fingertip (1 = in contact).
     Threshold: force magnitude > 0.5 N.
+    Not in the RL obs config (redundant with contact_forces),
+    but used by termination (no_fingertip_contact) and reward masking.
     Returns: (N, num_fingers)
     """
     forces = _get_fingertip_contact_forces_world(env)

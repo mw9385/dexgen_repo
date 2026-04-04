@@ -19,7 +19,7 @@ Shadow Hand E-Series: 5 fingers, 20 actuated DOF + 4 passive = 24 total USD join
   All spatial observations in HAND ROOT (wrist) frame.
 =======================================================================
 
-  ACTOR = CRITIC — 106 dims (symmetric, no privileged info)
+  ACTOR = CRITIC — 101 dims (symmetric, no privileged info)
   ─────────────────────────────────────────────────────────────────
   joint_pos_normalized       22   (finger joints only, excl. wrist)
   joint_vel_normalized       22   (finger joints only, excl. wrist)
@@ -29,11 +29,10 @@ Shadow Hand E-Series: 5 fingers, 20 actuated DOF + 4 passive = 24 total USD join
   target_object_quat_hand     4   (goal object quaternion)
   object_lin_vel_hand         3   (object linear velocity)
   object_ang_vel_hand         3   (object angular velocity)
-  fingertip_contact_binary    5   (tactile: binary contact per tip)
   fingertip_contact_forces   15   (full 3-D forces per tip, 5×3)
   last_action                22   (previous joint targets, excl. wrist)
   ─────────────────────────────────────────────────────────────────
-  Total: 22+22+3+4+3+4+3+3+5+15+22 = 106
+  Total: 22+22+3+4+3+4+3+3+15+22 = 101
 
 =======================================================================
   DOMAIN RANDOMIZATION  (see mdp/domain_rand.py for ranges)
@@ -272,7 +271,7 @@ if _ISAACLAB_AVAILABLE:
     @configclass
     class AnyGraspObservationsCfg:
         # All spatial observations in HAND ROOT (wrist) frame.
-        # Actor = Critic = 106 dims (symmetric)
+        # Actor = Critic = 101 dims (symmetric)
 
         @configclass
         class PolicyObs(ObsGroup):
@@ -295,7 +294,6 @@ if _ISAACLAB_AVAILABLE:
             object_linvel = ObsTerm(func=mdp_obs.object_lin_vel_hand_frame)
             object_angvel = ObsTerm(func=mdp_obs.object_ang_vel_hand_frame)
             # ── Tactile + action ──
-            fingertip_contact = ObsTerm(func=mdp_obs.fingertip_contact_binary)
             contact_forces    = ObsTerm(func=mdp_obs.fingertip_contact_forces)
             last_action       = ObsTerm(func=mdp_obs.last_action)
 
@@ -320,7 +318,6 @@ if _ISAACLAB_AVAILABLE:
             target_obj_quat = ObsTerm(func=mdp_obs.target_object_quat_in_hand_frame)
             object_linvel = ObsTerm(func=mdp_obs.object_lin_vel_hand_frame)
             object_angvel = ObsTerm(func=mdp_obs.object_ang_vel_hand_frame)
-            fingertip_contact = ObsTerm(func=mdp_obs.fingertip_contact_binary)
             contact_forces    = ObsTerm(func=mdp_obs.fingertip_contact_forces)
             last_action       = ObsTerm(func=mdp_obs.last_action)
 
