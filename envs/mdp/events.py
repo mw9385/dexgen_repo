@@ -3,12 +3,15 @@ Event (reset / randomisation) functions for the AnyGrasp-to-AnyGrasp env.
 
 Reset logic per episode:
   1. Sample start/goal grasps from the GraspGraph
-  2. Place object at fixed position near palm
-  3. Compute wrist pose from fingertip arrangement
-  4. Set joints adaptively based on object size (or from stored joint_angles)
-  5. Differential IK to refine fingertips toward targets (object fixed)
-  6. Rotate entire hand+object system to palm-up
-  7. Store goal fingertip/object pose in env.extras for rewards/observations
+  2. If solved graph (joint_angles + object_pos_hand + object_quat_hand):
+     a. Set wrist at default position, apply stored joints
+     b. Place object from stored hand-relative pose
+  3. If unsolved graph (contact-only):
+     a. Place object at fixed position near palm
+     b. Compute wrist from fingertip arrangement
+     c. Adaptive joints + per-finger differential IK
+  4. Rotate hand+object system to palm-up + tilt noise
+  5. Store goal fingertip/object pose in env.extras
 """
 
 from __future__ import annotations
@@ -278,6 +281,7 @@ def reset_to_random_grasp(
         all(j is not None for j in start_joints_list)
         and all(p is not None for p in start_object_pos_hand_list)
         and all(q is not None for q in start_object_quat_hand_list)
+        and all(f == "hand_root" for f in start_object_pose_frame_list)
     )
 
     if has_stored_reset:
