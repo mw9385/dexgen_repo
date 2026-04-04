@@ -91,10 +91,4 @@ def grasp_distance(ga: Grasp, gb: Grasp) -> float:
         dot = float(np.clip(abs(np.dot(qa, qb)), 0.0, 1.0))
         dist += 0.01 * float(2.0 * np.arccos(dot))
 
-    if (getattr(ga, "joint_angles", None) is not None
-            and getattr(gb, "joint_angles", None) is not None):
-        q_a = np.asarray(ga.joint_angles, dtype=np.float32)
-        q_b = np.asarray(gb.joint_angles, dtype=np.float32)
-        dist += float(np.linalg.norm(q_a - q_b) / max(len(q_a) ** 0.5, 1.0))
-
     return dist

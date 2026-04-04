@@ -22,7 +22,6 @@ Usage:
 """
 
 import argparse
-import copy
 import pickle
 import sys
 from pathlib import Path

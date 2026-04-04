@@ -294,6 +294,14 @@ def reset_to_random_grasp(
         set_robot_root_pose(env, env_ids, wrist_pos, wrist_quat)
         set_robot_joints_direct(env, env_ids, start_joints_list)
         robot.update(0.0)
+
+        # Re-fix object (FK update may shift it)
+        obj_root_state = obj.data.default_root_state[env_ids].clone()
+        obj_root_state[:, :3] = obj_pos_w
+        obj_root_state[:, 3:7] = obj_quat_w
+        obj_root_state[:, 7:] = 0.0
+        obj.write_root_state_to_sim(obj_root_state, env_ids=env_ids)
+        obj.update(0.0)
     else:
         # ── Unsolved graph path: run per-finger IK at reset time ──
         wrist_pos, wrist_quat = compute_wrist_from_fingertips(
