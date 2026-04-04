@@ -7,10 +7,11 @@ Paper: [arXiv](https://arxiv.org/abs/2502.04307)
 ## Pipeline
 
 ```
-Stage 0    Grasp Generation (DexGraspNet SA)    ->  data/grasp_graph.pkl
-Stage 1    RL Policy Training (PPO)             ->  logs/rl/shadow_anygrasp_v1/
-Stage 2    Dataset Collection                   ->  data/dataset.h5
-Stage 3    DexGen Controller                    ->  logs/dexgen/
+Stage 0a   Grasp Generation (Surface RRT)          ->  data/grasp_graph.pkl
+Stage 0b   IK Solve + Validation (Isaac Sim)        ->  data/grasp_graph_solved.pkl
+Stage 1    RL Policy Training (PPO)                 ->  logs/rl/shadow_anygrasp_v1/
+Stage 2    Dataset Collection                       ->  data/dataset.h5
+Stage 3    DexGen Controller                        ->  logs/dexgen/
 ```
 
 ## Quick Start
@@ -24,30 +25,33 @@ Stage 3    DexGen Controller                    ->  logs/dexgen/
 /isaac-sim/python.sh -m pip install transforms3d transformations lxml
 git submodule update --init third_party/DexGraspNet
 
-# Stage 0: Generate grasps
+# Stage 0a: Generate contact-set grasp graph (Surface RRT)
 /isaac-sim/python.sh scripts/run_grasp_generation.py \
     --shapes cube --num_sizes 1 --size_min 0.04 --size_max 0.04
 
+# Stage 0b: Solve IK + validate grasps in Isaac Sim
+/isaac-sim/python.sh scripts/solve_grasp_graph.py \
+    --input data/grasp_graph.pkl \
+    --output data/grasp_graph_solved.pkl
+
 # Visualize
 /workspace/IsaacLab/isaaclab.sh -p scripts/visualize_env.py \
-    --grasp_graph data/grasp_graph.pkl
+    --grasp_graph data/grasp_graph_solved.pkl
 
-# Stage 1: Train RL
+# Stage 1: Train RL (use solved graph)
 /workspace/IsaacLab/isaaclab.sh -p scripts/train_rl.py \
-    --grasp_graph data/grasp_graph.pkl --num_envs 4096 --headless
+    --grasp_graph data/grasp_graph_solved.pkl --num_envs 4096 --headless
 ```
 
 ## Stage 0: Grasp Generation
 
-DexGraspNet simulated annealing optimization (pure PyTorch, full GPU).
-Generates grasp candidates, filters by force closure quality, and builds a kNN graph for RL training.
+### 0a: Surface-Projected RRT (`surface_rrt.py`)
 
-Energy function (matches PKU-EPIC/DexGraspNet exactly):
-```
-E = E_fc + 100*E_dis + 100*E_pen + 10*E_spen + 1*E_joints
-```
+Generates grasp candidates via RRT expansion with all fingertip positions
+constrained to the object mesh surface. Builds a connectivity graph for RL.
 
-DIP (J0) joints are zeroed during fingertip extraction to match Isaac Sim's joint layout (22 MJCF DOF -> 24 USD DOF mapping).
+Output: `data/grasp_graph.pkl` — contact-set graph (fingertip_positions +
+contact_normals only, no joint_angles).
 
 ```bash
 # Full pool (9 objects: cube/sphere/cylinder x 3 sizes)
@@ -58,34 +62,40 @@ DIP (J0) joints are zeroed during fingertip extraction to match Isaac Sim's join
     --shapes cube --num_sizes 1 --size_min 0.04 --size_max 0.04
 ```
 
-### Configuration
+### 0b: IK Solve + Validation (`solve_grasp_graph.py`)
 
-Key parameters in `configs/grasp_generation.yaml` (DexGraspNet defaults):
+Converts the contact-set graph into a robot-state graph by solving per-finger
+IK in Isaac Sim and validating physics stability.
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `num_iterations` | 6000 | SA optimization steps per batch |
-| `batch_size` | 500 | Parallel grasp candidates |
-| `n_contact` | 4 | Contact points per grasp |
-| `w_dis` | 100.0 | Contact distance weight |
-| `w_pen` | 100.0 | Penetration weight |
-| `w_spen` | 10.0 | Self-penetration weight |
-| `w_joints` | 1.0 | Joint limit violation weight |
-| `thres_fc` | 0.3 | Force closure threshold |
-| `thres_dis` | 0.005 | Contact distance threshold (5mm) |
-| `thres_pen` | 0.001 | Penetration threshold |
+Per grasp:
+1. Place object at fixed position, compute wrist from fingertip arrangement
+2. Adaptive initial joint pose based on object size
+3. Per-finger differential IK (null-space + SVD fallback)
+4. Fingertip error check (reject if mean > 8mm)
+5. Physics settle + object stability check (reject if ejected/dropped)
+6. Store: `joint_angles`, `object_pos_hand`, `object_quat_hand`, `reset_contact_error`
+
+Output: `data/grasp_graph_solved.pkl` — robot-state graph.
+
+```bash
+/isaac-sim/python.sh scripts/solve_grasp_graph.py \
+    --input data/grasp_graph.pkl \
+    --output data/grasp_graph_solved.pkl \
+    --error-threshold 0.008 \
+    --vel-threshold 0.3
+```
 
 ## Stage 1: RL Training
 
 Symmetric actor-critic PPO. Both actor and critic receive the same 161-dim observation.
 
-Hand orientation: palm-down (hand grasps from above). Wrist tilt randomization (+/-15 deg) forces the policy to learn active grasping instead of passive balancing.
+Hand orientation: palm-up (object rests on palm). Wrist tilt randomization (+/-15 deg) forces the policy to learn active grasping instead of passive balancing.
 
 Object pool: 3-5cm cube/sphere/cylinder (9 variants), mass 20-100g. Sized for single-hand precision grasp and in-hand rotation.
 
 ```bash
 /workspace/IsaacLab/isaaclab.sh -p scripts/train_rl.py \
-    --grasp_graph data/grasp_graph.pkl --num_envs 4096 --headless
+    --grasp_graph data/grasp_graph_solved.pkl --num_envs 4096 --headless
 ```
 
 ### Observation (161 dims)
@@ -134,14 +144,29 @@ When the object reaches the current goal (pos < 2cm, rot < 0.1rad), a new nearby
 
 ### Reset
 
-Object placement uses stored `object_pos_hand` / `object_quat_hand` from grasp optimization (exact hand-object relative pose), not fingertip rigid alignment.
+Two paths depending on graph type:
+
+**Solved graph** (`grasp_graph_solved.pkl`, recommended):
+1. Set wrist at default world position
+2. Set stored `joint_angles` directly (skip IK)
+3. FK update
+4. Compute object world pose from stored `object_pos_hand`/`object_quat_hand` (exact hand-relative pose)
+5. Palm-up rotation + tilt noise
+
+**Unsolved graph** (`grasp_graph.pkl`, fallback):
+1. Place object at fixed position near palm
+2. Compute wrist from fingertip centroid
+3. Adaptive initial joints + per-finger differential IK
+4. Palm-up rotation + tilt noise
+
+The `has_stored_reset` check requires ALL grasps in the batch to have `joint_angles`, `object_pos_hand`, and `object_quat_hand`. Use `solve_grasp_graph.py` to prepare the graph.
 
 ### Resume Training
 
 ```bash
 /workspace/IsaacLab/isaaclab.sh -p scripts/train_rl.py \
     --resume logs/rl/shadow_anygrasp_v1/checkpoints/model_10000.pt \
-    --grasp_graph data/grasp_graph.pkl --num_envs 4096 --headless
+    --grasp_graph data/grasp_graph_solved.pkl --num_envs 4096 --headless
 ```
 
 ### Evaluate Trained Policy
@@ -169,11 +194,11 @@ Object placement uses stored `object_pos_hand` / `object_quat_hand` from grasp o
 ```bash
 # Zero actions (default)
 /workspace/IsaacLab/isaaclab.sh -p scripts/visualize_env.py \
-    --grasp_graph data/grasp_graph.pkl
+    --grasp_graph data/grasp_graph_solved.pkl
 
 # Hold initial pose
 /workspace/IsaacLab/isaaclab.sh -p scripts/visualize_env.py \
-    --grasp_graph data/grasp_graph.pkl --action_mode hold
+    --grasp_graph data/grasp_graph_solved.pkl --action_mode hold
 ```
 
 ## Stage 2 & 3
@@ -201,4 +226,5 @@ git submodule update --init third_party/DexGraspNet
 | `DexGraspNet assets not found` | `git submodule update --init third_party/DexGraspNet` |
 | `ModuleNotFoundError: transformations` | `/isaac-sim/python.sh -m pip install transformations` |
 | GPU OOM during generation | Reduce `--batch_size` |
-| Object falls at reset | Check grasp generation quality, increase `--num_iterations` |
+| Object falls at reset | Use `grasp_graph_solved.pkl` (run `solve_grasp_graph.py`), or lower `--error-threshold` |
+| Low solve rate | Increase RRT `--num_grasps`, or relax `--error-threshold` |
