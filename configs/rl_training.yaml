@@ -41,11 +41,9 @@ env:
 # ==============================================================================
 #
 #   Shadow Hand (22 finger DOF, 5 fingers; wrist excluded from policy):
-#   Actor  network: MLP [1024, 512, 512, 256, 256]  input: 101-dim policy obs
-#     joint_pos(22) + joint_vel(22) + fingertip_pos(15) + target_fps(15)
-#     + contact_binary(5) + last_action(22)
-#   Critic network: MLP [1024, 512, 512, 256, 256]  input: 132-dim privileged obs
-#     [actor 101] + obj_pose(7) + obj_vel(6) + contact_forces(15) + dr_params(3)
+#   Actor = Critic: MLP [1024, 512, 512, 256, 256]  input: 106-dim obs (symmetric)
+#     joint_pos(22) + joint_vel(22) + obj_pose(7) + target_obj_pose(7)
+#     + obj_vel(6) + contact_binary(5) + contact_forces(15) + last_action(22)
 #
 #   The central_value_config block enables the separate critic network.
 #   rl_games reads env observations["policy"] for actor and

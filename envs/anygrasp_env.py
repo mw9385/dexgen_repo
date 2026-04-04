@@ -19,7 +19,7 @@ Shadow Hand E-Series: 5 fingers, 20 actuated DOF + 4 passive = 24 total USD join
   All spatial observations in HAND ROOT (wrist) frame.
 =======================================================================
 
-  ACTOR (policy) — 91 dims
+  ACTOR = CRITIC — 106 dims (symmetric, no privileged info)
   ─────────────────────────────────────────────────────────────────
   joint_pos_normalized       22   (finger joints only, excl. wrist)
   joint_vel_normalized       22   (finger joints only, excl. wrist)
@@ -30,17 +30,10 @@ Shadow Hand E-Series: 5 fingers, 20 actuated DOF + 4 passive = 24 total USD join
   object_lin_vel_hand         3   (object linear velocity)
   object_ang_vel_hand         3   (object angular velocity)
   fingertip_contact_binary    5   (tactile: binary contact per tip)
+  fingertip_contact_forces   15   (full 3-D forces per tip, 5×3)
   last_action                22   (previous joint targets, excl. wrist)
   ─────────────────────────────────────────────────────────────────
-  Total: 22+22+3+4+3+4+3+3+5+22 = 91
-
-  CRITIC (privileged) — 109 dims
-  ─────────────────────────────────────────────────────────────────
-  [actor obs]                91
-  fingertip_contact_forces   15   (full 3-D forces per tip, 5×3)
-  dr_params                   3   (mass / friction / damping)
-  ─────────────────────────────────────────────────────────────────
-  Total: 91+15+3 = 109
+  Total: 22+22+3+4+3+4+3+3+5+15+22 = 106
 
 =======================================================================
   DOMAIN RANDOMIZATION  (see mdp/domain_rand.py for ranges)
@@ -279,7 +272,7 @@ if _ISAACLAB_AVAILABLE:
     @configclass
     class AnyGraspObservationsCfg:
         # All spatial observations in HAND ROOT (wrist) frame.
-        # Actor: 91 dims, Critic: 109 dims (actor + privileged)
+        # Actor = Critic = 106 dims (symmetric)
 
         @configclass
         class PolicyObs(ObsGroup):
@@ -303,6 +296,7 @@ if _ISAACLAB_AVAILABLE:
             object_angvel = ObsTerm(func=mdp_obs.object_ang_vel_hand_frame)
             # ── Tactile + action ──
             fingertip_contact = ObsTerm(func=mdp_obs.fingertip_contact_binary)
+            contact_forces    = ObsTerm(func=mdp_obs.fingertip_contact_forces)
             last_action       = ObsTerm(func=mdp_obs.last_action)
 
             def __post_init__(self):
@@ -311,7 +305,7 @@ if _ISAACLAB_AVAILABLE:
 
         @configclass
         class CriticObs(ObsGroup):
-            # Same as actor + privileged info
+            # Same as actor (symmetric)
             joint_pos = ObsTerm(
                 func=mdp_obs.joint_positions_normalized,
                 noise=GaussianNoise(std=0.005),
@@ -327,10 +321,8 @@ if _ISAACLAB_AVAILABLE:
             object_linvel = ObsTerm(func=mdp_obs.object_lin_vel_hand_frame)
             object_angvel = ObsTerm(func=mdp_obs.object_ang_vel_hand_frame)
             fingertip_contact = ObsTerm(func=mdp_obs.fingertip_contact_binary)
+            contact_forces    = ObsTerm(func=mdp_obs.fingertip_contact_forces)
             last_action       = ObsTerm(func=mdp_obs.last_action)
-            # ── Privileged ──
-            contact_forces = ObsTerm(func=mdp_obs.fingertip_contact_forces)
-            dr_params      = ObsTerm(func=mdp_obs.domain_randomization_params)
 
             def __post_init__(self):
                 self.enable_corruption  = True
