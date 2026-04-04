@@ -128,18 +128,6 @@ def apply_action_delay(env, action: torch.Tensor) -> torch.Tensor:
     return delayed
 
 
-# ---------------------------------------------------------------------------
-# Observation noise (applied as Isaac Lab obs corruption)
-# ---------------------------------------------------------------------------
-
-OBS_NOISE = {
-    "joint_pos":     0.005,   # rad
-    "joint_vel":     0.2,     # rad/s  (before normalisation by 5)
-    "fingertip_pos": 0.003,   # m
-    "target_pos":    0.0,     # no noise on target (known exactly)
-    "contact":       0.0,     # no noise on binary contact
-    "last_action":   0.0,     # no noise on commanded action
-}
 
 
 # ---------------------------------------------------------------------------

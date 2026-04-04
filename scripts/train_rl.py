@@ -115,9 +115,6 @@ def apply_dr_config(env_cfg, dr_cfg: dict):
         if "joint_vel_std"     in noise:
             obs.policy.joint_vel.noise.std     = float(noise["joint_vel_std"])
             obs.critic.joint_vel.noise.std     = float(noise["joint_vel_std"])
-        if "fingertip_pos_std" in noise and hasattr(obs.policy, "fingertip_pos"):
-            obs.policy.fingertip_pos.noise.std = float(noise["fingertip_pos_std"])
-            obs.critic.fingertip_pos.noise.std = float(noise["fingertip_pos_std"])
 
 
 def apply_env_config(env_cfg, env_cfg_dict: dict):

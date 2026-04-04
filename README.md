@@ -119,13 +119,12 @@ All terms normalized to [-1,1] or [0,1]. Weights control relative importance.
 
 | Term | Range | Weight | Description |
 |------|-------|--------|-------------|
-| `object_position` | (0, 1] | 1.0 | exp(-20 * \|\|pos_err\|\|^2) in hand frame |
-| `object_orientation` | (0, 1] | 1.0 | exp(-10 * rot_err) in hand frame |
-| `joint_tracking` | [-1, 0] | 0.5 | -tanh(2 * \|\|q - q_target\|\|) |
-| `goal_bonus` | {0, 1} | 5.0 | 1 if pos < 2cm AND rot < 0.1rad |
-| `work` | [-1, 0] | 0.001 | -tanh(0.01 * \|torque\| * \|vel\|) |
-| `action` | [-1, 0] | 0.001 | -tanh(0.5 * \|\|a\|\|^2) |
-| `torque` | [-1, 0] | 0.001 | -tanh(0.005 * \|\|tau\|\|^2) |
+| `object_orientation` | (0, 1] | 10.0 | exp(-2 * rot_err) in hand frame (PRIMARY) |
+| `object_position` | (0, 1] | 0.5 | exp(-10 * \|\|pos_err\|\|) in hand frame |
+| `goal_bonus` | {0, 1} | 10.0 | 1 if pos < 2cm AND rot < 0.1rad |
+| `work` | [-1, 0] | 0.01 | -tanh(0.01 * \|torque\| * \|vel\|) |
+| `action` | [-1, 0] | 0.01 | -tanh(0.5 * \|\|a\|\|^2) |
+| `torque` | [-1, 0] | 0.01 | -tanh(0.005 * \|\|tau\|\|^2) |
 
 ### Termination
 

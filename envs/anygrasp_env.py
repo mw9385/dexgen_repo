@@ -364,32 +364,32 @@ if _ISAACLAB_AVAILABLE:
     @configclass
     class AnyGraspRewardsCfg:
         # ══════════════════════════════════════════════════════════════
-        # Minimal reward: orientation only + goal bonus + regularization.
-        # Position reward removed — kNN goals have near-zero position
-        # error so it was effectively a free constant (step reward).
-        # In-hand reorientation reward.
-        # All alphas tuned so initial error gives reward ~0.3-0.7
-        # (useful gradient range, not saturated/zero)
+        # In-hand reorientation reward (DexterityGen Eq. 4-9).
+        # r = r_goal (orientation + position + bonus) + r_reg (work + action + torque)
         #
-        # Expected initial errors (kNN goal, DIAG data):
-        #   pos ~ 5-10cm,  orn ~ 0.5-1.5rad,  jt ~ 1-3rad
+        # Orientation is the PRIMARY signal (weight 10.0); position is
+        # secondary (weight 0.5) to keep the object centered in hand.
+        # Goal bonus (weight 10.0) triggers rolling goal updates.
+        #
+        # All alphas tuned so initial error gives reward ~0.3-0.7
+        # (useful gradient range, not saturated/zero).
+        # Expected initial errors (kNN goal):
+        #   pos ~ 5-10cm,  orn ~ 0.5-1.5rad
         # ══════════════════════════════════════════════════════════════
 
         # Object orientation → [0, 1]  ★ PRIMARY
-        #   err=0.5rad→0.37, 1.0→0.14, 1.5→0.05
         object_orientation = RewTerm(
             func=mdp_rewards.object_orientation_reward,
-            weight=5.0,
+            weight=10.0,
             params={"alpha": 2.0},
         )
-        # Object position → [0, 1]  (linear error)
-        #   err=3cm→0.74, 5cm→0.61, 10cm→0.37, 20cm→0.14
+        # Object position → [0, 1]  (secondary, keep object centered)
         object_position = RewTerm(
             func=mdp_rewards.object_position_reward,
-            weight=2.0,
+            weight=0.5,
             params={"alpha": 10.0},
         )
-        # Goal bonus → {0, 1}
+        # Goal bonus → {0, 1}  (triggers rolling goal update)
         goal_bonus = RewTerm(
             func=mdp_rewards.goal_bonus,
             weight=10.0,
