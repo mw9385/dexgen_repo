@@ -263,47 +263,78 @@ def reset_to_random_grasp(
     # ------------------------------------------------------------------
     # 2. New reset flow: object fixed → wrist → IK → palm-up
     #
-    # Flow:
-    #   1. Place object at fixed position near palm
-    #   2. Convert fingertip targets from object frame → world frame
-    #   3. Compute wrist pose from fingertip arrangement
-    #   4. Set joints to semi-closed pose (object-size adaptive)
-    #   5. Differential IK to refine fingertips toward targets
-    #   6. Rotate entire system to palm-up
-    #   7. Compute goal object pose in hand frame from sim state
+    # Two paths:
+    #   A. Solved graph (has_joints + stored object pose):
+    #      Set wrist → set stored joints → FK → place object from stored
+    #      hand-relative pose → palm-up → done (no IK needed)
+    #   B. Unsolved graph (contact-only):
+    #      Place object fixed → compute wrist from fingertips → adaptive
+    #      joints → per-finger IK → palm-up
     # ------------------------------------------------------------------
     robot = env.scene["robot"]
     obj = env.scene["object"]
     cfg = getattr(env.cfg, "reset_randomization", {}) or {}
-    has_joints = all(j is not None for j in start_joints_list)
+    has_stored_reset = (
+        all(j is not None for j in start_joints_list)
+        and all(p is not None for p in start_object_pos_hand_list)
+        and all(q is not None for q in start_object_quat_hand_list)
+    )
 
-    # Step 1: Place object at fixed known position
-    obj_pos_w, obj_quat_w = place_object_fixed(env, env_ids)
-    obj.update(0.0)
+    if has_stored_reset:
+        # ── Solved graph path ──────────────────────────────────────────
+        # Use stored joint_angles + object_pos_hand/object_quat_hand
+        # to reproduce the exact solved configuration.
 
-    # Step 2: Convert fingertip targets to world frame
-    start_world = local_to_world_points(start_fps, obj_pos_w, obj_quat_w)
-    goal_world = local_to_world_points(goal_fps, obj_pos_w, obj_quat_w)
-
-    if has_joints:
-        # ── Solved graph path: joint_angles already validated by solve_grasp_graph ──
-        # Compute wrist, set stored joints, skip IK (already solved).
-        wrist_pos, wrist_quat = compute_wrist_from_fingertips(
-            env, env_ids, start_world,
+        # 1. Set wrist at default world position
+        wrist_pos = (
+            robot.data.default_root_state[env_ids, :3].clone()
+            + env.scene.env_origins[env_ids]
         )
+        wrist_quat = robot.data.default_root_state[env_ids, 3:7].clone()
         set_robot_root_pose(env, env_ids, wrist_pos, wrist_quat)
+
+        # 2. Set stored joint angles (validated by solve_grasp_graph)
         set_robot_joints_direct(env, env_ids, start_joints_list)
         robot.update(0.0)
 
-        # Re-fix object (FK update may shift it)
+        # 3. Compute object world pose from stored hand-relative pose
+        hand_pos_w = robot.data.root_pos_w[env_ids].clone()
+        hand_quat_w = robot.data.root_quat_w[env_ids].clone()
+
+        obj_pos_hand_t = torch.tensor(
+            np.stack(start_object_pos_hand_list),
+            device=env.device, dtype=torch.float32,
+        )
+        obj_quat_hand_t = torch.tensor(
+            np.stack(start_object_quat_hand_list),
+            device=env.device, dtype=torch.float32,
+        )
+        obj_pos_w = hand_pos_w + quat_apply(hand_quat_w, obj_pos_hand_t)
+        obj_quat_w = quat_multiply(hand_quat_w, obj_quat_hand_t)
+        obj_quat_w = obj_quat_w / (torch.norm(obj_quat_w, dim=-1, keepdim=True) + 1e-8)
+
+        # 4. Place object at computed world pose
         obj_root_state = obj.data.default_root_state[env_ids].clone()
         obj_root_state[:, :3] = obj_pos_w
         obj_root_state[:, 3:7] = obj_quat_w
         obj_root_state[:, 7:] = 0.0
         obj.write_root_state_to_sim(obj_root_state, env_ids=env_ids)
         obj.update(0.0)
+
+        # 5. Compute goal fingertip world positions from object world pose
+        goal_world = local_to_world_points(goal_fps, obj_pos_w, obj_quat_w)
+
     else:
-        # ── Unsolved graph path: run per-finger IK at reset time ──
+        # ── Unsolved graph path: place object fixed → IK ───────────────
+        # Place object at fixed position, compute wrist from fingertips,
+        # run per-finger IK to reach target contacts.
+
+        obj_pos_w, obj_quat_w = place_object_fixed(env, env_ids)
+        obj.update(0.0)
+
+        start_world = local_to_world_points(start_fps, obj_pos_w, obj_quat_w)
+        goal_world = local_to_world_points(goal_fps, obj_pos_w, obj_quat_w)
+
         wrist_pos, wrist_quat = compute_wrist_from_fingertips(
             env, env_ids, start_world,
         )
@@ -333,7 +364,7 @@ def reset_to_random_grasp(
         refine_hand_to_start_grasp(env, env_ids, start_fps)
         robot.update(0.0)
 
-    # Rotate system to palm-up (hand + object together)
+    # ── Common: palm-up rotation + noise ──────────────────────────────
     goal_world = apply_palm_up_transform(env, env_ids, goal_world)
 
     # Optional tilt noise after palm-up alignment
