@@ -2,7 +2,7 @@
 Stage 1 – AnyGrasp-to-AnyGrasp Isaac Lab Environment
 ======================================================
 Implements the core RL environment from DexterityGen §3.2 with:
-  - Asymmetric Actor-Critic (separate policy / critic observation groups)
+  - Symmetric Actor-Critic (policy and critic share the same 101-dim observation)
   - Tactile sensing via ContactSensorCfg on 5 fingertip links (Shadow Hand)
   - Domain Randomization (object physics, joint dynamics, action delay)
   - Random object pool (cube / sphere / cylinder, multiple sizes)
@@ -264,7 +264,7 @@ if _ISAACLAB_AVAILABLE:
 
 
 # ---------------------------------------------------------------------------
-# Asymmetric Actor-Critic Observation groups
+# Symmetric Actor-Critic Observation groups (101 dims each)
 # ---------------------------------------------------------------------------
 
 if _ISAACLAB_AVAILABLE:

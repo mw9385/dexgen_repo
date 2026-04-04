@@ -205,7 +205,7 @@ def last_action(env) -> torch.Tensor:
 
 
 # ---------------------------------------------------------------------------
-# Critic (privileged) observations — also in hand root frame
+# Additional observation functions (not in RL obs config, used elsewhere)
 # ---------------------------------------------------------------------------
 
 def fingertip_contact_forces(env) -> torch.Tensor:

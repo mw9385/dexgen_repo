@@ -2,7 +2,7 @@
 # Stage 1 – RL Training Configuration
 # ==============================================================================
 # Task:      AnyGrasp-to-AnyGrasp (DexterityGen §3.2)
-# Algorithm: Asymmetric Actor-Critic PPO via rl_games
+# Algorithm: Symmetric Actor-Critic PPO via rl_games
 # ==============================================================================
 
 env:
@@ -37,7 +37,7 @@ env:
     # No termination penalty — drop/escape handled by DoneTerm only
 
 # ==============================================================================
-# Asymmetric Actor-Critic PPO (rl_games)
+# Symmetric Actor-Critic PPO (rl_games)
 # ==============================================================================
 #
 #   Shadow Hand (22 finger DOF, 5 fingers; wrist excluded from policy):
