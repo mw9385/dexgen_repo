@@ -275,7 +275,7 @@ def reset_to_random_grasp(
     robot = env.scene["robot"]
     obj = env.scene["object"]
     cfg = getattr(env.cfg, "reset_randomization", {}) or {}
-    has_joints = any(j is not None for j in start_joints_list)
+    has_joints = all(j is not None for j in start_joints_list)
 
     # Step 1: Place object at fixed known position
     obj_pos_w, obj_quat_w = place_object_fixed(env, env_ids)
