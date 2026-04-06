@@ -27,7 +27,7 @@ git submodule update --init third_party/DexGraspNet
 
 # Stage 0a: Generate contact-set grasp graph (Surface RRT)
 /isaac-sim/python.sh scripts/run_grasp_generation.py \
-    --shapes cube --num_sizes 1 --size_min 0.04 --size_max 0.04
+    --shapes cube --num_sizes 1 --size_min 0.06 --size_max 0.06
 
 # Stage 0b: Solve IK + validate grasps in Isaac Sim
 /isaac-sim/python.sh scripts/solve_grasp_graph.py \
@@ -59,7 +59,7 @@ contact_normals only, no joint_angles).
 
 # Single object
 /isaac-sim/python.sh scripts/run_grasp_generation.py \
-    --shapes cube --num_sizes 1 --size_min 0.04 --size_max 0.04
+    --shapes cube --num_sizes 1 --size_min 0.06 --size_max 0.06
 ```
 
 ### 0b: IK Solve + Validation (`solve_grasp_graph.py`)
