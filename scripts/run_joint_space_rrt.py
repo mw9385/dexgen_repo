@@ -114,12 +114,13 @@ def main():
 
             # 1. Algorithm 3: HeuristicSample
             sampler = HeuristicSampler(
-                env=env,
                 mesh=mesh,
+                object_name=obj_name,
+                num_grasps=args.num_initial,
+                num_fingers=num_fingers,
                 nfo=nfo,
+                env=env,
                 ft_ids=ft_ids,
-                num_samples=args.num_initial,
-                num_fingers=num_fingers  # 명시적 전달
             )
             print("  [Step 1] Running Heuristic Sampling...")
             initial_grasp_set = sampler.sample()
