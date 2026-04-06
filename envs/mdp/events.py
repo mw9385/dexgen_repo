@@ -414,52 +414,22 @@ def reset_to_random_grasp(
         robot.update(0.0)
 
     # =========================================================================
-    # [버그 수정: 물체 동기화 코드 추가]
-    # 손목(Wrist)의 최종 위치와 회전 노이즈가 모두 적용된 후, 
-    # 물체를 최종 손목 위치를 기준으로 다시 따라가게(Tracking) 만듭니다.
+    # Object resync after palm-up + tilt noise.
+    # Use FK fingertip centroid (not stored obj_pos_hand which has frame mismatch).
     # =========================================================================
-    if has_stored_reset:
-        hand_pos_final = robot.data.root_pos_w[env_ids].clone()
-        hand_quat_final = robot.data.root_quat_w[env_ids].clone()
+    ft_ids_resync = get_fingertip_body_ids_from_env(robot, env)
+    # Need fresh FK after wrist rotation changes
+    env.sim.step(render=False)
+    env.scene.update(dt=env.physics_dt)
+    ft_pos_final = robot.data.body_pos_w[env_ids][:, ft_ids_resync, :]
+    obj_pos_final_w = ft_pos_final.mean(dim=1)
 
-        obj_pos_hand_t = torch.tensor(
-            np.stack(start_object_pos_hand_list),
-            device=env.device, dtype=torch.float32,
-        )
-        obj_quat_hand_t = torch.tensor(
-            np.stack(start_object_quat_hand_list),
-            device=env.device, dtype=torch.float32,
-        )
-        
-        # 손목의 최종 포즈 + RRT에 저장된 손목 상대 좌표(Local) = 최종 월드 좌표계
-        obj_pos_final_w = hand_pos_final + quat_apply(hand_quat_final, obj_pos_hand_t)
-        obj_quat_final_w = quat_multiply(hand_quat_final, obj_quat_hand_t)
-        obj_quat_final_w = obj_quat_final_w / (torch.norm(obj_quat_final_w, dim=-1, keepdim=True) + 1e-8)
-
-        obj_root_state = obj.data.default_root_state[env_ids].clone()
-        obj_root_state[:, :3] = obj_pos_final_w
-        obj_root_state[:, 3:7] = obj_quat_final_w
-        obj_root_state[:, 7:] = 0.0
-        obj.write_root_state_to_sim(obj_root_state, env_ids=env_ids)
-        obj.update(0.0)
-    else:
-        # Unsolved graph일 경우에도 튕겨나가지 않도록 손가락 중앙으로 재정렬
-        ft_ids = get_fingertip_body_ids_from_env(robot, env)
-        ft_pos_w = robot.data.body_pos_w[env_ids][:, ft_ids, :]
-        obj_pos_final_w = ft_pos_w.mean(dim=1)
-        
-        obj_root_state = obj.data.default_root_state[env_ids].clone()
-        obj_root_state[:, :3] = obj_pos_final_w
-        obj_root_state[:, 7:] = 0.0
-        obj.write_root_state_to_sim(obj_root_state, env_ids=env_ids)
-        obj.update(0.0)
-    # =========================================================================
-
-    # Step 7: Compute goal object pose in hand frame.
-    robot.update(0.0)
+    obj_root_state = obj.data.default_root_state[env_ids].clone()
+    obj_root_state[:, :3] = obj_pos_final_w
+    obj_root_state[:, 3:7] = robot.data.root_quat_w[env_ids].clone()
+    obj_root_state[:, 7:] = 0.0
+    obj.write_root_state_to_sim(obj_root_state, env_ids=env_ids)
     obj.update(0.0)
-    # ... (아래 로직은 그대로 유지) ...
-
 
     # Step 7: Compute goal object pose in hand frame.
     #
