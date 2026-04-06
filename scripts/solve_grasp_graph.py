@@ -129,9 +129,17 @@ def main():
         print(f"\n[SolveGraph] Solving {obj_name}: {n_grasps} grasps (size={obj_size:.3f}m)...")
 
         solved_indices = []
+        reject_no_fp = 0
+        reject_ik = 0
+        reject_physics = 0
+        ik_errors = []
+        settle_speeds = []
+        settle_heights = []
+
         for idx in range(n_grasps):
             grasp = grasp_set[idx]
             if grasp.fingertip_positions is None:
+                reject_no_fp += 1
                 continue
 
             fp = pad_fingertip_positions(grasp.fingertip_positions.copy(), env_num_fingers)
@@ -174,8 +182,10 @@ def main():
             tip_err = torch.norm(actual_tips - target_world, dim=-1)  # (1, F)
             mean_err = float(tip_err.mean().item())
             max_err = float(tip_err.max().item())
+            ik_errors.append(mean_err)
 
             if mean_err > args.error_threshold:
+                reject_ik += 1
                 continue  # IK failed
 
             # ── Step 7: Settle physics ──
@@ -187,8 +197,11 @@ def main():
             obj_vel = obj.data.root_lin_vel_w[0]
             speed = float(torch.norm(obj_vel).item())
             obj_z = float(obj.data.root_pos_w[0, 2].item())
+            settle_speeds.append(speed)
+            settle_heights.append(obj_z)
 
             if speed > args.vel_threshold or obj_z < 0.15:
+                reject_physics += 1
                 continue  # Object ejected or dropped
 
             # ── Step 9: Store results ──
@@ -219,6 +232,23 @@ def main():
             if (idx + 1) % 50 == 0 or idx == n_grasps - 1:
                 print(f"  [{idx+1}/{n_grasps}] solved: {len(solved_indices)} "
                       f"(last err: {mean_err:.4f}m)")
+
+        # ── Per-object rejection breakdown ─────────────────────────────
+        print(f"\n  Rejection breakdown for {obj_name}:")
+        print(f"    no fingertip data: {reject_no_fp}")
+        print(f"    IK error > {args.error_threshold}m: {reject_ik}")
+        print(f"    physics unstable:  {reject_physics}")
+        if ik_errors:
+            ik_arr = np.array(ik_errors)
+            print(f"    IK error stats:  mean={ik_arr.mean():.4f}m  "
+                  f"median={np.median(ik_arr):.4f}m  "
+                  f"min={ik_arr.min():.4f}m  max={ik_arr.max():.4f}m  "
+                  f"<threshold: {int((ik_arr <= args.error_threshold).sum())}/{len(ik_arr)}")
+        if settle_speeds:
+            sp_arr = np.array(settle_speeds)
+            hz_arr = np.array(settle_heights)
+            print(f"    settle speed:    mean={sp_arr.mean():.3f}m/s  max={sp_arr.max():.3f}m/s")
+            print(f"    settle height:   mean={hz_arr.mean():.3f}m  min={hz_arr.min():.3f}m")
 
         # Rebuild grasp set with only solved grasps
         old_to_new = {old: new for new, old in enumerate(solved_indices)}
