@@ -319,6 +319,19 @@ def reset_to_random_grasp(
         ft_ids = get_fingertip_body_ids_from_env(robot, env)
         ft_pos_w = robot.data.body_pos_w[env_ids][:, ft_ids, :]
         obj_pos_w = ft_pos_w.mean(dim=1)  # (n, 3)
+
+        # Debug: print once to verify FK is working
+        if not getattr(env, "_fk_debug_printed", False):
+            env._fk_debug_printed = True
+            _wrist = robot.data.root_pos_w[env_ids[0]]
+            _q = robot.data.joint_pos[env_ids[0]]
+            print(f"[DEBUG FK] wrist_pos={_wrist.tolist()}")
+            print(f"[DEBUG FK] joint_pos (first 10)={_q[:10].tolist()}")
+            print(f"[DEBUG FK] joint_pos (all nonzero)={(_q.abs() > 0.01).sum().item()}/{_q.shape[0]}")
+            for fi in range(len(ft_ids)):
+                print(f"[DEBUG FK] fingertip {fi}: {ft_pos_w[0, fi].tolist()}")
+            print(f"[DEBUG FK] centroid={obj_pos_w[0].tolist()}")
+            print(f"[DEBUG FK] stored joint_angles[0] len={len(start_joints_list[0]) if start_joints_list[0] is not None else 'None'}")
         obj_quat_w = robot.data.root_quat_w[env_ids].clone()
 
         obj_root_state = obj.data.default_root_state[env_ids].clone()
