@@ -140,15 +140,13 @@ def main():
         while sim_app.is_running():
             with torch.inference_mode():
                 if args.action_mode == "hold" or (steps < args.hold_steps):
-                    actions = torch.zeros(args.num_envs, action_dim,
-                                         device=env.unwrapped.device)
+                    # 수정: 0.0이 아닌, 리셋 시 계산된 현재 관절의 정규화된 행동 값을 입력
+                    actions = env.extras["current_action"].clone()
                 elif args.action_mode == "zero":
-                    actions = torch.zeros(args.num_envs, action_dim,
-                                         device=env.unwrapped.device)
+                    # 순수 0.0 입력 (관절이 중간값으로 펴지는 현상 확인용)
+                    actions = torch.zeros(args.num_envs, action_dim, device=env.unwrapped.device)
                 else:
-                    actions = torch.empty(args.num_envs, action_dim,
-                                          device=env.unwrapped.device).uniform_(-1, 1,
-                                          generator=rng)
+                    actions = torch.empty(args.num_envs, action_dim, device=env.unwrapped.device).uniform_(-1, 1, generator=rng)
 
                 obs, reward, terminated, truncated, info = env.step(actions)
 
