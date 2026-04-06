@@ -284,6 +284,17 @@ def reset_to_random_grasp(
         and all(f == "hand_root" for f in start_object_pose_frame_list)
     )
 
+    # ---- 디버깅 로그 삽입 ----
+    if not getattr(env, "_reset_debug_printed", False):
+        print("\n" + "="*60)
+        print(f"[DEBUG RESET] has_stored_reset: {has_stored_reset}")
+        print(f"[DEBUG RESET] start_joints valid: {start_joints_list[0] is not None}")
+        print(f"[DEBUG RESET] object_pos_hand valid: {start_object_pos_hand_list[0] is not None}")
+        print(f"[DEBUG RESET] object_pose_frame: '{start_object_pose_frame_list[0]}'")
+        print("="*60 + "\n")
+        env._reset_debug_printed = True
+    # --------------------------
+
     if has_stored_reset:
         # ── Solved graph path ──────────────────────────────────────────
         # Use stored joint_angles + object_pos_hand/object_quat_hand
@@ -396,6 +407,54 @@ def reset_to_random_grasp(
         wrist_pos_now = robot.data.root_pos_w[env_ids].clone()
         set_robot_root_pose(env, env_ids, wrist_pos_now, tilted)
         robot.update(0.0)
+
+    # =========================================================================
+    # [버그 수정: 물체 동기화 코드 추가]
+    # 손목(Wrist)의 최종 위치와 회전 노이즈가 모두 적용된 후, 
+    # 물체를 최종 손목 위치를 기준으로 다시 따라가게(Tracking) 만듭니다.
+    # =========================================================================
+    if has_stored_reset:
+        hand_pos_final = robot.data.root_pos_w[env_ids].clone()
+        hand_quat_final = robot.data.root_quat_w[env_ids].clone()
+
+        obj_pos_hand_t = torch.tensor(
+            np.stack(start_object_pos_hand_list),
+            device=env.device, dtype=torch.float32,
+        )
+        obj_quat_hand_t = torch.tensor(
+            np.stack(start_object_quat_hand_list),
+            device=env.device, dtype=torch.float32,
+        )
+        
+        # 손목의 최종 포즈 + RRT에 저장된 손목 상대 좌표(Local) = 최종 월드 좌표계
+        obj_pos_final_w = hand_pos_final + quat_apply(hand_quat_final, obj_pos_hand_t)
+        obj_quat_final_w = quat_multiply(hand_quat_final, obj_quat_hand_t)
+        obj_quat_final_w = obj_quat_final_w / (torch.norm(obj_quat_final_w, dim=-1, keepdim=True) + 1e-8)
+
+        obj_root_state = obj.data.default_root_state[env_ids].clone()
+        obj_root_state[:, :3] = obj_pos_final_w
+        obj_root_state[:, 3:7] = obj_quat_final_w
+        obj_root_state[:, 7:] = 0.0
+        obj.write_root_state_to_sim(obj_root_state, env_ids=env_ids)
+        obj.update(0.0)
+    else:
+        # Unsolved graph일 경우에도 튕겨나가지 않도록 손가락 중앙으로 재정렬
+        ft_ids = get_fingertip_body_ids_from_env(robot, env)
+        ft_pos_w = robot.data.body_pos_w[env_ids][:, ft_ids, :]
+        obj_pos_final_w = ft_pos_w.mean(dim=1)
+        
+        obj_root_state = obj.data.default_root_state[env_ids].clone()
+        obj_root_state[:, :3] = obj_pos_final_w
+        obj_root_state[:, 7:] = 0.0
+        obj.write_root_state_to_sim(obj_root_state, env_ids=env_ids)
+        obj.update(0.0)
+    # =========================================================================
+
+    # Step 7: Compute goal object pose in hand frame.
+    robot.update(0.0)
+    obj.update(0.0)
+    # ... (아래 로직은 그대로 유지) ...
+
 
     # Step 7: Compute goal object pose in hand frame.
     #
