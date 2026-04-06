@@ -28,17 +28,17 @@ class JointSpaceRRTConfig:
     min_seed_joint_dist: float = 0.20
 
     # Validation
-    contact_threshold: float = 0.018
-    seed_contact_threshold: float = 0.030
+    contact_threshold: float = 0.020
+    seed_contact_threshold: float = 0.020
     min_quality: float = 0.03
-    seed_min_quality: float = 0.010
-    min_contacts_seed: int = 3
+    seed_min_quality: float = 0.03
+    min_contacts_seed: int = 4
     min_contacts_expand: int = 4
 
     # Expansion
     max_expand_attempts_per_step: int = 60
     max_total_expand_attempts: int = 150000
-    joint_noise_std: float = 0.08
+    joint_noise_std: float = 0.03
     thumb_noise_scale: float = 1.25
     local_finger_move_prob: float = 0.75
 
@@ -133,15 +133,38 @@ class JointSpaceRRTGenerator:
         print(f"  [JointRRT] Expanding to {self.cfg.target_size} grasps...")
         grasps = list(seeds)
         total_attempts = 0
+        duplicate_rejects = 0  # 중복 폐기 카운터 추가
+        
+        total_track_reasons = {
+            'penetration': 0, 'low_contact': 0, 'low_quality': 0, 
+            'trimesh_error': 0, 'nfo_error': 0
+        }
 
         while len(grasps) < self.cfg.target_size:
-            new_grasp = self._expand_step(grasps)
-            if new_grasp is not None and not self._is_duplicate(grasps, new_grasp.joint_angles, self.cfg.min_seed_joint_dist * 0.75):
-                grasps.append(new_grasp)
-                if len(grasps) % 50 == 0:
-                    print(f"  [JointRRT] {len(grasps)}/{self.cfg.target_size} grasps")
+            new_grasp = self._expand_step(grasps, total_track_reasons)
+            
+            if new_grasp is not None:
+                # 수정: 중복(Duplicate) 기준을 현재 노이즈 스케일에 맞게 대폭 하향
+                # 0.03(noise) * 0.8 = 0.024 거리 이상이면 새로운 파지로 인정
+                expand_min_dist = self.cfg.joint_noise_std * 0.8 
+                
+                if not self._is_duplicate(grasps, new_grasp.joint_angles, expand_min_dist):
+                    grasps.append(new_grasp)
+                    if len(grasps) % 10 == 0:
+                        print(f"  [JointRRT] {len(grasps)}/{self.cfg.target_size} grasps (At attempt {total_attempts})")
+                else:
+                    duplicate_rejects += 1
 
             total_attempts += 1
+            
+            if total_attempts % 500 == 0:
+                print(f"    [Debug Heartbeat] Attempt: {total_attempts}/{self.cfg.max_total_expand_attempts} | "
+                      f"Current grasps: {len(grasps)} | "
+                      f"Fails -> Pen: {total_track_reasons['penetration']}, "
+                      f"Contact: {total_track_reasons['low_contact']}, "
+                      f"Qual: {total_track_reasons['low_quality']} | "
+                      f"Dup Rejects: {duplicate_rejects}")
+
             if total_attempts >= self.cfg.max_total_expand_attempts:
                 print(f"  [JointRRT] Stopping early at {len(grasps)} grasps ({total_attempts} attempts)")
                 break
@@ -156,6 +179,26 @@ class JointSpaceRRTGenerator:
             object_name=self.object_name,
             num_fingers=self.num_fingers,
         )
+
+
+    def _expand_step(self, grasps: List[Grasp], track_reasons: dict) -> Optional[Grasp]:
+        for _ in range(self.cfg.max_expand_attempts_per_step):
+            parent = self._sample_parent(grasps)
+            q_parent = torch.tensor(parent.joint_angles, device=self.device, dtype=torch.float32)
+            q_new = self._perturb_parent_q(q_parent)
+
+            grasp = self._evaluate_joint_config(
+                q=q_new,
+                contact_threshold=self.cfg.contact_threshold,
+                min_quality=self.cfg.min_quality,
+                min_contacts=self.cfg.min_contacts_expand,
+                track_reasons=track_reasons  # 추적용 딕셔너리 전달
+            )
+            if grasp is not None:
+                return grasp
+                
+        return None
+
 
     # ------------------------------------------------------------------
     # Setup
@@ -265,14 +308,23 @@ class JointSpaceRRTGenerator:
 
     def _setup_object_pose(self):
         """
-        Place object at the fingertip centroid of the first preshape.
-        This ensures the object is where the fingers naturally reach.
+        Place object at the fingertip centroid, but shifted outwards away from the palm
+        to prevent immediate deep penetration with the middle/proximal links.
         """
         q_seed = self.preshape_library[0].clone()
         self._set_joints(q_seed)
 
         ft_world = self._get_fingertip_world()  # (F, 3)
-        obj_pos = ft_world.mean(dim=0, keepdim=True)  # (1, 3)
+        centroid = ft_world.mean(dim=0, keepdim=True)  # (1, 3)
+        
+        # 손바닥에서 손가락 중심을 향하는 방향 계산
+        palm_pos = self.robot.data.body_pos_w[0, self.palm_body_id].unsqueeze(0)
+        direction = centroid - palm_pos
+        direction = direction / (torch.norm(direction, dim=-1, keepdim=True) + 1e-8)
+
+        # Config의 clearance 변수를 활용해 물체 크기에 비례하여 바깥쪽으로 배치
+        shift_dist = (self.object_size * self.cfg.object_clearance_scale) + self.cfg.object_clearance_bias
+        obj_pos = centroid + direction * shift_dist
 
         obj_quat = torch.zeros(1, 4, device=self.device)
         obj_quat[:, 0] = 1.0
@@ -286,6 +338,7 @@ class JointSpaceRRTGenerator:
 
         self.obj_pos_w = obj_pos
         self.obj_quat_w = obj_quat
+
 
     # ------------------------------------------------------------------
     # FK / validation
@@ -330,8 +383,9 @@ class JointSpaceRRTGenerator:
         link_obj = self._world_to_object_frame(link_world)
 
         try:
+            # trimesh signed_distance: 내부가 양수(+), 외부가 음수(-)
             signed = trimesh.proximity.signed_distance(self.mesh, link_obj)
-            # trimesh signed_distance: inside points are usually positive.
+            # 내부로 penetration_margin 보다 깊게 파고들었을 경우 거절
             if np.any(signed > self.cfg.penetration_margin):
                 return True
             return False
@@ -342,16 +396,19 @@ class JointSpaceRRTGenerator:
             except Exception:
                 return False
 
+
     def _evaluate_joint_config(
         self,
         q: torch.Tensor,
         contact_threshold: float,
         min_quality: float,
         min_contacts: int,
+        track_reasons: Optional[dict] = None  # 추적용 인자 추가
     ) -> Optional[Grasp]:
         self._set_joints(q)
 
         if self._penetration_violation():
+            if track_reasons is not None: track_reasons['penetration'] += 1
             return None
 
         ft_world = self._get_fingertip_world()
@@ -360,10 +417,12 @@ class JointSpaceRRTGenerator:
         try:
             closest, dists, face_idx = trimesh.proximity.closest_point(self.mesh, ft_obj)
         except Exception:
+            if track_reasons is not None: track_reasons['trimesh_error'] += 1
             return None
 
         active_contacts = self._count_active_contacts(dists, contact_threshold)
         if active_contacts < min_contacts:
+            if track_reasons is not None: track_reasons['low_contact'] += 1
             return None
 
         normals = self.mesh.face_normals[face_idx].astype(np.float32)
@@ -379,21 +438,21 @@ class JointSpaceRRTGenerator:
         try:
             quality = float(self.nfo.evaluate(grasp))
         except Exception:
+            if track_reasons is not None: track_reasons['nfo_error'] += 1
             return None
 
         if quality < min_quality:
+            if track_reasons is not None: track_reasons['low_quality'] += 1
             return None
 
+        # 통과 로직 (기존과 동일)
         rp = self.robot.data.root_pos_w[0]
         rq = self.robot.data.root_quat_w[0]
         op = self.obj_pos_w[0]
 
         rel = op - rp
         obj_pos_hand = quat_apply_inverse(rq.unsqueeze(0), rel.unsqueeze(0))[0]
-        obj_quat_hand = quat_multiply(
-            quat_conjugate(rq.unsqueeze(0)),
-            self.obj_quat_w,
-        )[0]
+        obj_quat_hand = quat_multiply(quat_conjugate(rq.unsqueeze(0)), self.obj_quat_w)[0]
 
         grasp.quality = quality
         grasp.joint_angles = q.detach().cpu().numpy().copy()
@@ -402,6 +461,7 @@ class JointSpaceRRTGenerator:
         grasp.object_pose_frame = "hand_root"
 
         return grasp
+
 
     # ------------------------------------------------------------------
     # Seed generation
@@ -443,19 +503,8 @@ class JointSpaceRRTGenerator:
             q = self._sample_from_preshape()
             self._set_joints(q)
 
-            # Physics-based penetration check: set joints, re-place object,
-            # run 1 physics step, check if object gets ejected (high velocity).
-            # This replaces geometric signed-distance checks which can't
-            # distinguish "finger wrapping around object" from "finger through object".
-            self._rewrite_object_state()
-            self.env.sim.step(render=False)
-            self.env.scene.update(dt=self.env.physics_dt)
-            obj_vel = self.obj.data.root_lin_vel_w[0]
-            obj_speed = float(torch.norm(obj_vel).item())
-            if obj_speed > 1.0:
-                reject_pen += 1
-                # Reset object for next attempt
-                self._rewrite_object_state()
+            if self._penetration_violation():
+                reject_pen +=1
                 continue
 
             ft_world = self._get_fingertip_world()
@@ -566,21 +615,6 @@ class JointSpaceRRTGenerator:
         idx = int(self.rng.choice(len(grasps), p=probs))
         return grasps[idx]
 
-    def _expand_step(self, grasps: List[Grasp]) -> Optional[Grasp]:
-        for _ in range(self.cfg.max_expand_attempts_per_step):
-            parent = self._sample_parent(grasps)
-            q_parent = torch.tensor(parent.joint_angles, device=self.device, dtype=torch.float32)
-            q_new = self._perturb_parent_q(q_parent)
-
-            grasp = self._evaluate_joint_config(
-                q=q_new,
-                contact_threshold=self.cfg.contact_threshold,
-                min_quality=self.cfg.min_quality,
-                min_contacts=self.cfg.min_contacts_expand,
-            )
-            if grasp is not None:
-                return grasp
-        return None
 
     # ------------------------------------------------------------------
     # Graph construction
