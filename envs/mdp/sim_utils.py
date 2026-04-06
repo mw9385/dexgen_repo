@@ -300,29 +300,24 @@ def set_adaptive_joint_pose(
     object_size: float,
 ):
     """
-    Set hand joints to a semi-closed pose based on object size.
+    Set hand joints to joint-limit midpoint as IK initial configuration.
 
-    Smaller objects → more closed (higher scale).
-    Larger objects → more open (lower scale).
+    This gives the IK solver maximum freedom to move in any direction.
+    Wrist joints are kept at zero (fixed during episode).
     """
     robot = env.scene["robot"]
-    n = len(env_ids)
-
-    # Map object size [0.04, 0.09] → scale [0.6, 0.3]
-    # (inverted: small object = more closed = higher joint values)
-    scale = 0.6 - ((object_size - 0.04) / 0.05) * 0.3
-    scale = max(0.2, min(0.8, scale))
 
     q_low = robot.data.soft_joint_pos_limits[env_ids, :, 0]
     q_high = robot.data.soft_joint_pos_limits[env_ids, :, 1]
-    joint_pos = q_low + scale * (q_high - q_low)
+    joint_pos = (q_low + q_high) / 2.0
 
-    # Wrist joints (indices 0, 1) stay at zero
+    # Wrist joints stay at zero
     joint_pos[:, :2] = 0.0
 
     robot.write_joint_state_to_sim(
         joint_pos, torch.zeros_like(joint_pos), env_ids=env_ids,
     )
+    robot.set_joint_position_target(joint_pos, env_ids=env_ids)
     robot.set_joint_position_target(joint_pos, env_ids=env_ids)
 
 
@@ -482,7 +477,7 @@ def refine_hand_to_start_grasp(
     if not bool(cfg.get("enabled", True)):
         return
 
-    iterations = int(cfg.get("iterations", 50))
+    iterations = int(cfg.get("iterations", 200))
     if iterations <= 0:
         return
 
