@@ -208,6 +208,7 @@ def main():
             has_stored_pose = (
                 getattr(grasp, "object_pos_hand", None) is not None
                 and getattr(grasp, "object_quat_hand", None) is not None
+                and getattr(grasp, "object_pose_frame", None) == "hand_root"
             )
 
             if has_stored_pose:
