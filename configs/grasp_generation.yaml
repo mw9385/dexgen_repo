@@ -32,8 +32,8 @@ sampler:
 nfo:
   mu: 0.5                  # friction coefficient
   num_friction_edges: 8
-  min_quality: 0.005
-  fast_mode: false
+  min_quality: 0.03        # LP force-closure quality (was 0.005, too lax)
+  fast_mode: false         # use LP ε-metric, not SVD approximation
 
 # Grasp generation method:
 #   'optimization'      : DexGraspNet Simulated Annealing (recommended)
@@ -113,7 +113,7 @@ surface_rrt:
   num_seed_grasps: 500          # seed grasps from surface sampler
   delta_pos: 0.008              # perturbation std dev (metres)
   delta_max: 0.04               # max edge distance for graph (metres)
-  min_quality: 0.005            # NFO quality threshold
+  min_quality: 0.03             # NFO quality threshold (matches nfo section)
   max_attempts_per_step: 30     # RRT attempts per expansion step
   collision_threshold: 0.002    # max penetration depth (metres)
   min_finger_spacing: 0.01      # min pairwise fingertip distance (metres)
