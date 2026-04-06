@@ -89,6 +89,9 @@ class JointSpaceRRTGenerator:
         self.q_low = self.robot.data.soft_joint_pos_limits[0, :, 0].clone()
         self.q_high = self.robot.data.soft_joint_pos_limits[0, :, 1].clone()
 
+        # All finger link body IDs for penetration check (excluding root/palm)
+        self.finger_body_ids = self._resolve_finger_body_ids()
+
         # Object world pose (set once in setup)
         self.obj_pos_w: Optional[torch.Tensor] = None
         self.obj_quat_w: Optional[torch.Tensor] = None
@@ -145,6 +148,42 @@ class JointSpaceRRTGenerator:
     # Setup
     # ------------------------------------------------------------------
 
+    def _resolve_finger_body_ids(self) -> List[int]:
+        """Get body IDs of all finger links (proximal through distal) for penetration check."""
+        # Shadow Hand finger link naming convention
+        _SHADOW_FINGER_LINKS = [
+            # FF
+            "robot0_ffknuckle", "robot0_ffproximal", "robot0_ffmiddle", "robot0_ffdistal",
+            # MF
+            "robot0_mfknuckle", "robot0_mfproximal", "robot0_mfmiddle", "robot0_mfdistal",
+            # RF
+            "robot0_rfknuckle", "robot0_rfproximal", "robot0_rfmiddle", "robot0_rfdistal",
+            # LF
+            "robot0_lfmetacarpal", "robot0_lfknuckle", "robot0_lfproximal",
+            "robot0_lfmiddle", "robot0_lfdistal",
+            # TH
+            "robot0_thbase", "robot0_thproximal", "robot0_thhub",
+            "robot0_thmiddle", "robot0_thdistal",
+        ]
+
+        body_ids = []
+        for name in _SHADOW_FINGER_LINKS:
+            try:
+                ids = self.robot.find_bodies(name)[0]
+                if len(ids) > 0:
+                    body_ids.append(int(ids[0]))
+            except Exception:
+                pass
+
+        if not body_ids:
+            # Fallback: use all bodies except first 2 (root + palm)
+            num_bodies = self.robot.data.body_pos_w.shape[1]
+            body_ids = list(range(2, num_bodies))
+
+        print(f"  [JointRRT] Finger link body IDs for penetration check: "
+              f"{len(body_ids)} bodies")
+        return body_ids
+
     def _setup_object_pose(self):
         """Place object at fingertip centroid of joint-midpoint pose."""
         # Set joints to midpoint
@@ -195,14 +234,25 @@ class JointSpaceRRTGenerator:
 
     def _evaluate_joint_config(self, q: torch.Tensor) -> Optional[Grasp]:
         """
-        Set joints, FK, check surface proximity, compute quality.
+        Set joints, FK, check penetration + surface proximity + quality.
         Returns Grasp if valid, None otherwise.
         """
         self._set_joints(q)
+
+        # Penetration check: no finger link should be inside the object mesh
+        finger_link_world = self.robot.data.body_pos_w[0, self.finger_body_ids, :]
+        finger_link_obj = self._world_to_object_frame(finger_link_world)
+        try:
+            inside = self.mesh.contains(finger_link_obj)
+            if np.any(inside):
+                return None
+        except Exception:
+            pass  # non-watertight mesh fallback
+
+        # Surface proximity check (fingertips only)
         ft_world = self._get_fingertip_world()  # (F, 3)
         ft_obj = self._world_to_object_frame(ft_world)  # (F, 3) numpy
 
-        # Surface proximity check
         closest, dists, face_idx = trimesh.proximity.closest_point(
             self.mesh, ft_obj,
         )
