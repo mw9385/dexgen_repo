@@ -436,6 +436,11 @@ class GraspSampler:
         opposition = (dirs * nrm).sum(axis=-1)
         thumb_idx = int(np.argmin(opposition))
 
+        # --- Shadow Hand constraint: validate thumb vs 4-finger geometry ---
+        if self.num_fingers == 5:
+            if not self._validate_thumb_opposition(pts, nrm, thumb_idx):
+                return None
+
         order = [i for i in range(self.num_fingers) if i != thumb_idx] + [thumb_idx]
         pts = pts[order]
         nrm = nrm[order]
@@ -450,6 +455,43 @@ class GraspSampler:
             object_quat_hand=self._sample_random_quaternion().astype(np.float32),
             object_pose_frame=None,
         )
+
+    def _validate_thumb_opposition(
+        self,
+        positions: np.ndarray,  # (5, 3)
+        normals: np.ndarray,    # (5, 3)
+        thumb_idx: int,
+    ) -> bool:
+        """
+        Shadow Hand constraint: thumb must genuinely oppose the 4-finger group.
+
+        Checks:
+          1. Thumb normal opposes the mean normal of the other 4 fingers
+             (dot product < -0.2).
+          2. The 4 non-thumb fingers are spatially clustered on one side of the
+             object (their centroid-to-finger directions are mutually consistent).
+        """
+        finger_mask = np.ones(5, dtype=bool)
+        finger_mask[thumb_idx] = False
+
+        thumb_n = normals[thumb_idx]
+        fingers_n = normals[finger_mask]
+
+        # 1. Thumb normal vs 4-finger mean normal: must be opposing
+        mean_finger_n = fingers_n.mean(axis=0)
+        mean_finger_n /= np.linalg.norm(mean_finger_n) + 1e-8
+        opposition = float(np.dot(thumb_n, mean_finger_n))
+        if opposition > -0.2:
+            return False
+
+        # 2. 4 fingers should be on the same side — their normals should
+        #    be roughly aligned (pairwise dot > 0 on average)
+        f_dots = fingers_n @ fingers_n.T
+        triu = np.triu_indices(4, k=1)
+        if f_dots[triu].mean() < 0.0:
+            return False
+
+        return True
 
     def _sample_object_pose_in_hand(self, points_obj: np.ndarray) -> np.ndarray:
         """

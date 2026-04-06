@@ -152,6 +152,11 @@ class SurfaceRRTGraspExpander:
             if not self._check_finger_spacing(p_candidate):
                 continue
 
+            # 7b. Shadow Hand: thumb must still oppose 4-finger group
+            if len(p_candidate) == 5:
+                if not self._check_thumb_opposition(p_candidate, normals_candidate):
+                    continue
+
             # 8. NFO quality check
             candidate = Grasp(
                 fingertip_positions=p_candidate,
@@ -239,6 +244,22 @@ class SurfaceRRTGraspExpander:
                 if dist < self.min_finger_spacing:
                     return False
         return True
+
+    def _check_thumb_opposition(
+        self,
+        positions: np.ndarray,  # (5, 3)
+        normals: np.ndarray,    # (5, 3)
+    ) -> bool:
+        """
+        Shadow Hand constraint: thumb (index 4, last) must oppose the
+        4-finger group (indices 0-3). Preserves the grasp topology
+        established by the seed sampler during RRT expansion.
+        """
+        thumb_n = normals[4]
+        fingers_n = normals[:4]
+        mean_fn = fingers_n.mean(axis=0)
+        mean_fn /= np.linalg.norm(mean_fn) + 1e-8
+        return float(np.dot(thumb_n, mean_fn)) < -0.2
 
     # ------------------------------------------------------------------
     # Pose perturbation helpers
