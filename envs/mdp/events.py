@@ -486,6 +486,11 @@ def _sample_start_and_nn_goal(
         g = graph
 
     N = len(g)
+    if N == 0:
+        raise RuntimeError(
+            f"Grasp graph for '{obj_name}' has 0 grasps. "
+            f"Run scripts/run_grasp_generation.py to generate grasps first."
+        )
     if N < 2:
         grasp = g.grasp_set[0]
         _pos  = getattr(grasp, "object_pos_hand",  None)
