@@ -225,7 +225,7 @@ def initialize_grasp_poses(hand_model: DexGraspNetHandModel,
                            batch_size: int,
                            n_contact: int = 4,
                            distance_range=(0.2, 0.3),
-                           jitter_strength: float = 0.3,
+                           jitter_strength: float = 0.1,
                            device: str = "cuda"):
     """
     Initialize hand poses around the object for Simulated Annealing.
@@ -294,41 +294,21 @@ def initialize_grasp_poses(hand_model: DexGraspNetHandModel,
             [0, 0, 1], dtype=torch.float, device=device))
         translation[j] = p[j] - distance[j] * approach_dir
 
-    # Initialize joint angles from multiple diverse preshapes + jitter.
-    # Each grasp in the batch starts from a randomly selected preshape,
-    # giving the SA optimizer diverse starting configurations.
-    _PRESHAPES = [
-        # 1. DexGraspNet canonical (gentle curl)
+    # Initialize joint angles (DexGraspNet original: single canonical pose + jitter)
+    joint_angles_mu = torch.tensor(
         [0.1, 0, 0.6, 0, 0, 0, 0.6, 0, -0.1, 0, 0.6, 0,
          0, -0.2, 0, 0.6, 0, 0, 1.2, 0, -0.2, 0],
-        # 2. Power grasp (more closed)
-        [0.2, 0, 1.0, 0, 0.1, 0, 1.0, 0, 0.0, 0, 1.0, 0,
-         0, -0.1, 0.2, 1.0, 0, 0, 1.4, 0.2, -0.1, 0],
-        # 3. Precision grasp (open fingers, thumb opposed)
-        [0.0, 0, 0.3, 0, 0, 0, 0.3, 0, -0.2, 0, 0.3, 0,
-         0, -0.3, 0, 0.3, 0, 0, 0.8, -0.2, -0.3, 0],
-        # 4. Spread grasp (fingers wide)
-        [0.3, 0, 0.4, 0, 0.1, 0, 0.4, 0, -0.3, 0, 0.4, 0,
-         0.1, -0.15, 0.1, 0.4, 0, 0, 1.0, 0.1, -0.15, 0],
-    ]
-    preshape_tensor = torch.tensor(_PRESHAPES, dtype=torch.float, device=device)
-    num_preshapes = preshape_tensor.shape[0]
-
-    # Randomly assign each batch element a preshape
-    preshape_idx = torch.randint(num_preshapes, (batch_size,), device=device)
-    joint_angles_mu = preshape_tensor[preshape_idx]  # (B, 22)
-
+        dtype=torch.float, device=device,
+    )
     joint_angles_sigma = jitter_strength * (hand_model.joints_upper - hand_model.joints_lower)
     joint_angles = torch.zeros(batch_size, hand_model.n_dofs, dtype=torch.float, device=device)
     for i in range(hand_model.n_dofs):
         torch.nn.init.trunc_normal_(
             joint_angles[:, i],
-            0.0, float(joint_angles_sigma[i]),
-            float(hand_model.joints_lower[i]) - float(joint_angles_mu[0, i]) - 1e-6,
-            float(hand_model.joints_upper[i]) - float(joint_angles_mu[0, i]) + 1e-6,
+            float(joint_angles_mu[i]), float(joint_angles_sigma[i]),
+            float(hand_model.joints_lower[i]) - 1e-6,
+            float(hand_model.joints_upper[i]) + 1e-6,
         )
-    joint_angles = joint_angles + joint_angles_mu
-    joint_angles = torch.clamp(joint_angles, hand_model.joints_lower, hand_model.joints_upper)
 
     # Assemble hand_pose: [translation(3) | rot6d(6) | joints(22)]
     rot6d = rotation.transpose(1, 2)[:, :2].reshape(-1, 6)
