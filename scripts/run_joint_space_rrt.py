@@ -31,8 +31,9 @@ def parse_args():
     p.add_argument("--num_sizes", type=int, default=1)
     
     # DexGen Algorithm 2 params
+    p.add_argument("--num_grasps", type=int, default=300, help="Total grasps (alias for --num_rrt_steps)")
     p.add_argument("--num_initial", type=int, default=50, help="N in HeuristicSample")
-    p.add_argument("--num_rrt_steps", type=int, default=300, help="N_RRT in GraspRRTExpand")
+    p.add_argument("--num_rrt_steps", type=int, default=None, help="N_RRT in GraspRRTExpand (defaults to --num_grasps)")
     
     p.add_argument("--output", type=str, default="data/grasp_graph.pkl")
 
@@ -61,6 +62,8 @@ def _make_mesh(shape: str, size: float) -> "trimesh.Trimesh":
 
 def main():
     args = parse_args()
+    if args.num_rrt_steps is None:
+        args.num_rrt_steps = args.num_grasps
 
     from isaaclab.app import AppLauncher
     app_launcher = AppLauncher(args)
