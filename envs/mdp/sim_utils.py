@@ -481,7 +481,7 @@ def refine_hand_to_start_grasp(
     if not bool(cfg.get("enabled", True)):
         return
 
-    iterations = int(cfg.get("iterations", 15))
+    iterations = int(cfg.get("iterations", 50))
     if iterations <= 0:
         return
 
