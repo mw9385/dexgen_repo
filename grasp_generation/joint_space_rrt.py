@@ -434,10 +434,9 @@ class JointSpaceRRTGenerator:
             q = self._sample_from_preshape()
             self._set_joints(q)
 
-            # Track rejection reason
-            if self._penetration_violation():
-                reject_pen += 1
-                continue
+            # Skip penetration check for seeds — curled fingers around the
+            # object naturally have middle links inside the mesh volume.
+            # Penetration is checked during RRT expansion where perturbations are small.
 
             ft_world = self._get_fingertip_world()
             ft_obj = self._world_to_object_frame(ft_world)
