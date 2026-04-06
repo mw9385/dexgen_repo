@@ -395,31 +395,28 @@ class GraspOptimizer:
         print(f"[GraspOptimizer] Ready: {shape_type} (size={size:.3f}m), "
               f"batch={batch_size}, iters={n_iter}")
 
-    def optimize(self, num_grasps: int = 300, verbose: bool = True, **kwargs) -> GraspSet:
-        """Run grasp optimization and return a GraspSet."""
+    def optimize(self, num_grasps: int = 300, verbose: bool = True,
+                 save_callback=None, **kwargs) -> GraspSet:
+        """Run grasp optimization and return a GraspSet.
+
+        Args:
+            save_callback: optional callable(grasps_so_far) called after each batch
+                           for incremental saving.
+        """
         all_grasps = []
-        # Oversample to account for filtering
-        num_batches = max(1, (num_grasps * 2) // self.batch_size + 1)
 
-        for batch_idx in range(num_batches):
-            # Free GPU memory between batches
-            torch.cuda.empty_cache()
+        try:
+            batch_grasps = self._optimize_batch()
+            all_grasps.extend(batch_grasps)
+        except Exception as e:
+            print(f"  [GraspOpt] WARNING: batch failed: {e}")
+            import traceback; traceback.print_exc()
 
-            if verbose:
-                print(f"  [GraspOpt] Batch {batch_idx + 1}/{num_batches}, "
-                      f"collected {len(all_grasps)} grasps")
+        if verbose:
+            print(f"  [GraspOpt] Got {len(all_grasps)} grasps from batch")
 
-            try:
-                batch_grasps = self._optimize_batch()
-                all_grasps.extend(batch_grasps)
-            except Exception as e:
-                print(f"  [GraspOpt] WARNING: batch {batch_idx+1} failed: {e}")
-                import traceback; traceback.print_exc()
-                torch.cuda.empty_cache()
-                continue
-
-            if len(all_grasps) >= num_grasps:
-                break
+        if save_callback and len(all_grasps) > 0:
+            save_callback(all_grasps)
 
         all_grasps.sort(key=lambda g: g.quality, reverse=True)
         all_grasps = all_grasps[:num_grasps]

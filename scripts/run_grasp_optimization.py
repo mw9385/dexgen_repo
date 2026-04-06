@@ -166,15 +166,39 @@ def main():
                 device=args.device,
             )
 
-            grasp_set = optimizer.optimize(num_grasps=args.num_grasps)
+            # Incremental save callback: convert + save after optimization
+            out_path = Path(args.output)
+
+            def _save_incremental(grasps_so_far):
+                converted = []
+                for g in grasps_so_far:
+                    if g.joint_angles is not None and len(g.joint_angles) == 22:
+                        g.joint_angles = _expand_joints_22_to_24(g.joint_angles)
+                    g.object_name = obj_name
+                    converted.append(g)
+                _graph = _build_graph(converted, obj_name, num_fingers, args.delta_max)
+                _mg = MultiObjectGraspGraph(graphs={}, object_specs={})
+                _mg.graphs[obj_name] = _graph
+                _mg.object_specs[obj_name] = {
+                    "name": obj_name, "shape_type": shape,
+                    "size": size, "num_fingers": num_fingers,
+                }
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(out_path, "wb") as f:
+                    pickle.dump(_mg, f)
+                print(f"  [Saved] {len(converted)} grasps → {out_path}")
+
+            grasp_set = optimizer.optimize(
+                num_grasps=args.num_grasps,
+                save_callback=_save_incremental,
+            )
             grasps = list(grasp_set.grasps)
 
             if len(grasps) == 0:
                 print(f"  WARNING: 0 grasps for {obj_name}")
                 continue
 
-            # Convert MJCF 22-DOF → Isaac 24-DOF
-            print(f"  Converting {len(grasps)} grasps: MJCF 22-DOF → Isaac 24-DOF...")
+            # Convert MJCF 22-DOF → Isaac 24-DOF (final pass for any unconverted)
             for g in grasps:
                 if g.joint_angles is not None and len(g.joint_angles) == 22:
                     g.joint_angles = _expand_joints_22_to_24(g.joint_angles)
