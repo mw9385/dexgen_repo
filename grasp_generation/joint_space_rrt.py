@@ -39,6 +39,7 @@ class JointSpaceRRTConfig:
 
     # Contact validation
     contact_threshold: float = 0.015   # max fingertip-to-surface distance (m)
+    penetration_margin: float = 0.008  # max allowed penetration depth for finger links (m)
 
     # RRT expansion
     joint_noise_std: float = 0.1       # std dev for joint perturbation (rad)
@@ -239,15 +240,21 @@ class JointSpaceRRTGenerator:
         """
         self._set_joints(q)
 
-        # Penetration check: no finger link should be inside the object mesh
+        # Penetration check: reject if any finger link penetrates the object
+        # beyond the allowed margin. Uses signed distance via surface normal.
         finger_link_world = self.robot.data.body_pos_w[0, self.finger_body_ids, :]
         finger_link_obj = self._world_to_object_frame(finger_link_world)
-        try:
-            inside = self.mesh.contains(finger_link_obj)
-            if np.any(inside):
-                return None
-        except Exception:
-            pass  # non-watertight mesh fallback
+        fl_closest, fl_dists, fl_face_idx = trimesh.proximity.closest_point(
+            self.mesh, finger_link_obj,
+        )
+        # Signed penetration: negative dot(to_point, normal) means inside
+        to_point = finger_link_obj - fl_closest
+        fl_normals = self.mesh.face_normals[fl_face_idx]
+        sign = np.sum(to_point * fl_normals, axis=-1)
+        # Penetration depth: only where sign < 0 (inside mesh)
+        penetration = np.where(sign < 0, fl_dists, 0.0)
+        if np.any(penetration > self.cfg.penetration_margin):
+            return None
 
         # Surface proximity check (fingertips only)
         ft_world = self._get_fingertip_world()  # (F, 3)
