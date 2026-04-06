@@ -115,10 +115,10 @@ def generate_grasps_surface_rrt(spec, args, num_fingers, seed):
         return None, None
 
     # 3. RRT expansion with surface projection
-    # Scale delta_pos with object size for better coverage
+    # [수정] delta_pos가 과도하게 커지는 논리적 오류 수정 (Contact manifold 이탈 방지)
     obj_size = float(np.max(spec.mesh.bounding_box.extents))
-    delta_pos = float(srrt_cfg.get("delta_pos", 0.008))
-    delta_pos = max(delta_pos, obj_size * 0.10)
+    base_delta = float(srrt_cfg.get("delta_pos", 0.002)) 
+    delta_pos = min(base_delta, obj_size * 0.05) # 물체 크기의 5%를 상한선으로 제한
 
     expander = SurfaceRRTGraspExpander(
         mesh=spec.mesh,
@@ -182,43 +182,16 @@ def generate_grasps(spec, args, num_fingers, num_dof, hand_name, device):
         g.object_name = spec.name
         g.object_scale = spec.size / 0.06
 
-    # 22 DOF → 24 DOF: remap DexGraspNet MJCF joints to Isaac Sim USD layout.
-    #
-    # DexGraspNet MJCF (22 DOF, shadow_hand_wrist_free.xml):
-    #   [0-3]   FF: FFJ3, FFJ2, FFJ1, FFJ0(coupled DIP)
-    #   [4-7]   MF: MFJ3, MFJ2, MFJ1, MFJ0(coupled DIP)
-    #   [8-11]  RF: RFJ3, RFJ2, RFJ1, RFJ0(coupled DIP)
-    #   [12-16] LF: LFJ4, LFJ3, LFJ2, LFJ1, LFJ0(coupled DIP)
-    #   [17-21] TH: THJ4, THJ3, THJ2, THJ1, THJ0
-    #
-    # Isaac Sim USD (24 DOF):
-    #   [0-1]   WR: WRJ1, WRJ0          (wrist, zeroed)
-    #   [2-5]   FF: FFJ4(passive), FFJ3, FFJ2, FFJ1
-    #   [6-9]   MF: MFJ4(passive), MFJ3, MFJ2, MFJ1
-    #   [10-13] RF: RFJ4(passive), RFJ3, RFJ2, RFJ1
-    #   [14-18] LF: LFJ5(passive), LFJ4, LFJ3, LFJ2, LFJ1
-    #   [19-23] TH: THJ4, THJ3, THJ2, THJ1, THJ0
-    #
-    # Key differences:
-    #   - MJCF has J0 (coupled DIP, driven by tendon) → not in Isaac (skip)
-    #   - Isaac has J4/J5 (passive spread) → not in MJCF (zero)
-    #   - Thumb: identical 5 joints in both (THJ4-THJ0)
     for g in grasp_set.grasps:
         if g.joint_angles is not None and len(g.joint_angles) == 22:
             q24 = np.zeros(num_dof, dtype=np.float32)
-            # FF: MJCF[0:3]=(FFJ3,2,1) → Isaac[3:6], skip MJCF[3]=FFJ0
             q24[3:6] = g.joint_angles[0:3]
-            # MF: MJCF[4:7]=(MFJ3,2,1) → Isaac[7:10], skip MJCF[7]=MFJ0
             q24[7:10] = g.joint_angles[4:7]
-            # RF: MJCF[8:11]=(RFJ3,2,1) → Isaac[11:14], skip MJCF[11]=RFJ0
             q24[11:14] = g.joint_angles[8:11]
-            # LF: MJCF[12:16]=(LFJ4,3,2,1) → Isaac[15:19], skip MJCF[16]=LFJ0
             q24[15:19] = g.joint_angles[12:16]
-            # TH: MJCF[17:22]=(THJ4,3,2,1,0) → Isaac[19:24] (direct match)
             q24[19:24] = g.joint_angles[17:22]
             g.joint_angles = q24
 
-    # NFO post-filter
     nfo = NetForceOptimizer(mu=args.mu, min_quality=args.min_quality, fast_mode=True)
     grasp_set = nfo.evaluate_set(grasp_set, verbose=True)
     if len(grasp_set) < 2:
@@ -239,7 +212,6 @@ def generate_grasps(spec, args, num_fingers, num_dof, hand_name, device):
 def main():
     args = parse_args()
 
-    # Load config
     cfg_file = {}
     cfg_path = Path(args.config)
     if cfg_path.exists():
@@ -250,7 +222,6 @@ def main():
     opt_cfg = cfg_file.get("optimization", {})
     args._opt_cfg = opt_cfg
 
-    # Resolve params
     pool_cfg = cfg_file.get("object_pool", {})
     nfo_cfg = cfg_file.get("nfo", {})
     args.shapes = args.shapes or pool_cfg.get("shapes", ["cube", "sphere", "cylinder"])
@@ -283,7 +254,6 @@ def main():
         print(f"[Stage 0] Optimizer: iter={args.num_iterations}, batch={args.batch_size}")
     print(f"[Stage 0] Device: {args.device}")
 
-    # Build object pool
     if args.mesh_path:
         import trimesh
         from grasp_generation.grasp_sampler import ObjectSpec
@@ -299,18 +269,15 @@ def main():
             num_sizes=args.num_sizes, seed=args.seed,
         )
 
-    # ── Step 1: Generate grasps ──
     multi_graph = MultiObjectGraspGraph()
     for i, spec in enumerate(pool):
         if method == "surface_rrt":
-            # Surface-projected RRT (no GPU / hand model needed)
             if args.num_grasps is None or args.num_grasps == 300:
                 args.num_grasps = int(srrt_cfg.get("target_size", 300))
             graph, isaac_spec = generate_grasps_surface_rrt(
                 spec, args, num_fingers=num_fingers, seed=args.seed + i,
             )
         else:
-            # DexGraspNet SA optimization (GPU recommended)
             graph, isaac_spec = generate_grasps(
                 spec, args, num_fingers=num_fingers, num_dof=num_dof,
                 hand_name=hand_name, device=args.device,
