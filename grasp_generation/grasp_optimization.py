@@ -362,7 +362,7 @@ class GraspOptimizer:
         # Filtering thresholds
         thres_fc: float = 0.3,
         thres_dis: float = 0.005,
-        thres_pen: float = 0.001,
+        thres_pen: float = 0.0,
         # Device
         device: str = "cuda",
         # Unused params (for backward compat with CLI)
