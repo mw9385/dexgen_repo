@@ -107,11 +107,21 @@ def _build_graph(grasps, object_name, num_fingers, delta_max):
 
 
 def _expand_joints_22_to_24(joint_angles_22):
-    """Convert MJCF 22-DOF to Isaac Sim 24-DOF."""
-    from envs.mdp.sim_utils import expand_grasp_joint_vector
-    import torch
-    q = torch.tensor(joint_angles_22, dtype=torch.float32)
-    return expand_grasp_joint_vector(q, 24).numpy()
+    """Convert MJCF 22-DOF to Isaac Sim 24-DOF. No Isaac Sim dependency."""
+    import numpy as np
+    out = np.zeros(24, dtype=np.float32)
+    j = joint_angles_22
+    # FF: in[0:3]=(FFJ3,2,1) → out[3:6], skip in[3]=FFJ0
+    out[3:6] = j[0:3]
+    # MF: in[4:7]=(MFJ3,2,1) → out[7:10], skip in[7]=MFJ0
+    out[7:10] = j[4:7]
+    # RF: in[8:11]=(RFJ3,2,1) → out[11:14], skip in[11]=RFJ0
+    out[11:14] = j[8:11]
+    # LF: in[12:16]=(LFJ4,3,2,1) → out[15:19], skip in[16]=LFJ0
+    out[15:19] = j[12:16]
+    # TH: in[17:22]=(THJ4,3,2,1,0) → out[19:24]
+    out[19:24] = j[17:22]
+    return out
 
 
 def main():
