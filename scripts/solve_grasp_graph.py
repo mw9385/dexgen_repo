@@ -172,7 +172,11 @@ def main():
             obj.write_root_state_to_sim(obj_root_state, env_ids=env_ids)
             obj.update(0.0)
 
-            # ── Step 4: Measure fingertip error (no IK — adaptive joints suffice) ──
+            # ── Step 4: Per-finger IK to match grasp-specific targets ──
+            refine_hand_to_start_grasp(env, env_ids, fp_tensor)
+            robot.update(0.0)
+
+            # ── Step 5: Measure fingertip error ──
             actual_tips = robot.data.body_pos_w[env_ids][:, ft_ids, :]
             target_world = local_to_world_points(fp_tensor, obj_pos_w, obj_quat_w)
             tip_err = torch.norm(actual_tips - target_world, dim=-1)  # (1, F)
