@@ -265,15 +265,14 @@ class JointSpaceRRTGenerator:
 
     def _setup_object_pose(self):
         """
-        Place object above the palm using a size-aware offset.
-        This is much more stable for Shadow Hand than fingertip-centroid placement.
+        Place object at the fingertip centroid of the first preshape.
+        This ensures the object is where the fingers naturally reach.
         """
         q_seed = self.preshape_library[0].clone()
         self._set_joints(q_seed)
 
-        palm_pos = self.robot.data.body_pos_w[0:1, self.palm_body_id, :].clone()
-        obj_pos = palm_pos.clone()
-        obj_pos[:, 2] += self.cfg.object_clearance_scale * self.object_size + self.cfg.object_clearance_bias
+        ft_world = self._get_fingertip_world()  # (F, 3)
+        obj_pos = ft_world.mean(dim=0, keepdim=True)  # (1, 3)
 
         obj_quat = torch.zeros(1, 4, device=self.device)
         obj_quat[:, 0] = 1.0
