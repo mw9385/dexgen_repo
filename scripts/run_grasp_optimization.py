@@ -134,6 +134,9 @@ def main():
     sizes = np.linspace(args.size_min, args.size_max, args.num_sizes)
     multi_graph = MultiObjectGraspGraph(graphs={}, object_specs={})
 
+    # Build hand model once (reused across all objects)
+    hand_model = build_hand_model(hand_name="shadow", device=args.device)
+
     for shape in args.shapes:
         for size in sizes:
             size = float(round(size, 3))
@@ -146,6 +149,7 @@ def main():
             mesh = _make_mesh(shape, size)
 
             optimizer = GraspOptimizer(
+                hand_model=hand_model,
                 mesh=mesh,
                 shape_type=shape,
                 size=size,
