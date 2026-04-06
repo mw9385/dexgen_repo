@@ -312,21 +312,14 @@ def reset_to_random_grasp(
         set_robot_joints_direct(env, env_ids, start_joints_list)
         robot.update(0.0)
 
-        # 3. Compute object world pose from stored hand-relative pose
-        hand_pos_w = robot.data.root_pos_w[env_ids].clone()
-        hand_quat_w = robot.data.root_quat_w[env_ids].clone()
-
-        obj_pos_hand_t = torch.tensor(
-            np.stack(start_object_pos_hand_list),
-            device=env.device, dtype=torch.float32,
-        )
-        obj_quat_hand_t = torch.tensor(
-            np.stack(start_object_quat_hand_list),
-            device=env.device, dtype=torch.float32,
-        )
-        obj_pos_w = hand_pos_w + quat_apply(hand_quat_w, obj_pos_hand_t)
-        obj_quat_w = quat_multiply(hand_quat_w, obj_quat_hand_t)
-        obj_quat_w = obj_quat_w / (torch.norm(obj_quat_w, dim=-1, keepdim=True) + 1e-8)
+        # 3. Place object at actual fingertip centroid from FK.
+        # This is more robust than stored object pose which has frame
+        # mismatch issues (optimizer uses rotated hand frame, Isaac uses identity).
+        ft_ids = get_fingertip_body_ids_from_env(robot, env)
+        ft_world = robot.data.body_pos_w[env_ids][:, ft_ids, :]  # (n, F, 3)
+        obj_pos_w = ft_world.mean(dim=1)  # (n, 3)
+        obj_quat_w = torch.zeros(n, 4, device=env.device)
+        obj_quat_w[:, 0] = 1.0  # identity
 
         # 4. Place object at computed world pose
         obj_root_state = obj.data.default_root_state[env_ids].clone()
