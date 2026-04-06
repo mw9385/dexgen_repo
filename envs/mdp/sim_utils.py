@@ -241,24 +241,28 @@ def place_object_fixed(
     env_ids: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
-    Place the object at a fixed position near the hand's default position.
+    Place the object at a fixed position in front of the palm.
+
+    Uses the palm normal direction so it works regardless of
+    the hand's default orientation.
 
     Returns (obj_pos_w, obj_quat_w) for later frame transforms.
     """
     robot = env.scene["robot"]
     obj = env.scene["object"]
+    n = len(env_ids)
 
-    # Default wrist world position
+    # Default wrist world position and orientation
     wrist_default = (
         robot.data.default_root_state[env_ids, :3].clone()
         + env.scene.env_origins[env_ids]
     )
+    wrist_quat = robot.data.default_root_state[env_ids, 3:7].clone()
 
-    # Place object near the palm (similar to NVIDIA IsaacGymEnvs)
-    # Shadow Hand default: palm along -Y, fingers along +Z
-    obj_pos = wrist_default.clone()
-    obj_pos[:, 1] -= 0.12   # in front of palm
-    obj_pos[:, 2] += 0.02   # slightly above
+    # Place object along palm normal direction (in front of palm)
+    palm_normal_local = get_local_palm_normal(robot, env)  # (3,)
+    palm_normal_world = quat_apply(wrist_quat, palm_normal_local.unsqueeze(0).expand(n, 3))
+    obj_pos = wrist_default + palm_normal_world * 0.12  # ~12cm in front of palm
 
     obj_quat = torch.zeros(len(env_ids), 4, device=env.device)
     obj_quat[:, 0] = 1.0    # identity quaternion
@@ -281,21 +285,31 @@ def compute_wrist_from_fingertips(
     Compute wrist pose so the hand is roughly positioned to reach
     the target fingertip world positions.
 
-    Strategy: place wrist below the fingertip centroid (palm-up),
-    offset by approximate palm-to-fingertip distance.
+    Strategy:
+      1. Place wrist at fingertip centroid
+      2. Orient wrist so palm faces toward the centroid (palm-up alignment)
+      3. Offset wrist along the negative palm normal (away from fingertips)
+         so fingers can naturally extend toward the targets.
     """
     robot = env.scene["robot"]
     n = len(env_ids)
 
     centroid = target_world.mean(dim=1)   # (n, 3)
 
-    # Wrist below centroid (palm-up: palm faces +Z, fingers extend upward)
-    wrist_pos = centroid.clone()
-    wrist_pos[:, 2] -= 0.13   # ~13cm below fingertip centroid
-
-    # Start from default orientation, then align palm-up
+    # Start from default orientation
     default_quat = robot.data.default_root_state[env_ids, 3:7].clone()
-    wrist_quat = align_wrist_palm_up(env, env_ids, default_quat)
+
+    # Compute palm normal in world frame using default orientation
+    palm_normal_local = get_local_palm_normal(robot, env)  # (3,)
+    palm_normal_world = quat_apply(default_quat, palm_normal_local.unsqueeze(0).expand(n, 3))
+
+    # Wrist = centroid offset OPPOSITE to palm normal direction
+    # (palm points toward object, wrist is behind the palm)
+    wrist_pos = centroid - palm_normal_world * 0.10  # ~10cm behind palm
+
+    # Keep default orientation (no palm-up rotation here — that happens
+    # later in apply_palm_up_transform during the common reset path)
+    wrist_quat = default_quat
 
     return wrist_pos, wrist_quat
 
