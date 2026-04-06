@@ -2,9 +2,9 @@
 Solve Grasp Graph — Fill joint_angles + object_pose via Isaac Sim IK.
 
 For each grasp in the graph:
-  1. Place object at fixed position
-  2. Compute target fingertip positions in world frame
-  3. Compute and set wrist pose from fingertip arrangement
+  1. Place object at fixed position (z=0.5m to avoid floor collision)
+  2. Transform target fingertip positions to world frame
+  3. Compute wrist pose from fingertip arrangement and set robot root
   4. Set joints to adaptive initial pose
   5. Run per-finger differential IK (null-space + SVD fallback)
   6. Measure fingertip error → reject if too high
@@ -15,10 +15,10 @@ This converts a "contact-set graph" (fingertip positions only) into a
 "robot-state graph" (joint_angles + object_pose) usable for RL reset.
 
 Usage:
-    /isaac-sim/python.sh scripts/solve_grasp_graph.py \\
-        --input data/grasp_graph.pkl \\
-        --output data/grasp_graph_solved.pkl \\
-        --error-threshold 0.008 \\
+    /isaac-sim/python.sh scripts/solve_grasp_graph.py \
+        --input data/grasp_graph.pkl \
+        --output data/grasp_graph_solved.pkl \
+        --error-threshold 0.008 \
         --vel-threshold 0.3
 """
 
@@ -120,6 +120,7 @@ def main():
         total_before += n_grasps
         env_num_fingers = subgraph.num_fingers
 
+        # Get object size for adaptive joint pose
         obj_size = 0.06
         if hasattr(graph, "object_specs"):
             spec = graph.object_specs.get(obj_name, {})
@@ -147,34 +148,36 @@ def main():
                 fp, device=device, dtype=torch.float32,
             ).unsqueeze(0)  # (1, F, 3)
 
-            # [수정] Step 1: 물체를 Default 위치에 배치하여 기준 좌표계 생성
+            # ── 수정된 Step 1: 객체를 월드 좌표계의 안전한 위치(공중)에 고정 ──
+            # 바닥과의 간섭을 배제하기 위해 z축으로 0.5m 이격시켜 접촉 역학만 평가
+            obj_pos_w = env.scene.env_origins[env_ids] + torch.tensor([[0.0, 0.0, 0.5]], device=device)
+            obj_quat_w = torch.tensor([[1.0, 0.0, 0.0, 0.0]], device=device)
+
             obj_root_state = obj.data.default_root_state[env_ids].clone()
-            obj_pos_w = obj_root_state[:, :3]
-            obj_quat_w = obj_root_state[:, 3:7]
+            obj_root_state[:, :3] = obj_pos_w
+            obj_root_state[:, 3:7] = obj_quat_w
+            obj_root_state[:, 7:] = 0.0
             obj.write_root_state_to_sim(obj_root_state, env_ids=env_ids)
             obj.update(0.0)
 
-            # [수정] Step 2: 물체 기준 지역 좌표계를 월드 좌표계 상의 목표 지점(Target)으로 변환
+            # ── 수정된 Step 2: 목표 파지점을 월드 좌표계(World Frame)로 변환 ──
             target_world = local_to_world_points(fp_tensor, obj_pos_w, obj_quat_w)
 
-            # [수정] Step 3: 목표 접촉점을 기반으로 로봇 손목의 SE(3) Pose 역산
-            try:
-                # compute_wrist_from_fingertips의 시그니처 대응
-                wrist_pos, wrist_quat = compute_wrist_from_fingertips(env, env_ids, target_world)
-            except TypeError:
-                wrist_pos, wrist_quat = compute_wrist_from_fingertips(target_world)
-                
+            # ── 수정된 Step 3: 목표 파지점 기반 손목(Wrist) 6D 포즈 역산 및 적용 ──
+            wrist_pos, wrist_quat = compute_wrist_from_fingertips(
+                target_world, env_num_fingers
+            )
             set_robot_root_pose(env, env_ids, wrist_pos, wrist_quat)
 
-            # Step 4: Adaptive initial joint pose
+            # ── Step 4: 객체 크기에 맞춘 초기 관절 각도 세팅 ──
             set_adaptive_joint_pose(env, env_ids, obj_size)
             robot.update(0.0)
 
-            # Step 5: Per-finger IK 실행
+            # ── 수정된 Step 5: IK (Inverse Kinematics) 수행 ──
             refine_hand_to_start_grasp(env, env_ids, fp_tensor)
             robot.update(0.0)
 
-            # Step 6: Measure fingertip error
+            # ── 수정된 Step 6: 손가락 끝 오차 측정 (기준점 통일) ──
             actual_tips = robot.data.body_pos_w[env_ids][:, ft_ids, :]
             tip_err = torch.norm(actual_tips - target_world, dim=-1)  # (1, F)
             mean_err = float(tip_err.mean().item())
@@ -183,14 +186,14 @@ def main():
 
             if mean_err > args.error_threshold:
                 reject_ik += 1
-                continue
+                continue  # IK failed
 
-            # Step 7: Settle physics
+            # ── Step 7: Settle physics ──
             for _ in range(args.settle_steps):
                 env.sim.step(render=False)
                 env.scene.update(dt=env.physics_dt)
 
-            # Step 8: Check object stability
+            # ── Step 8: Check object stability ──
             obj_vel = obj.data.root_lin_vel_w[0]
             speed = float(torch.norm(obj_vel).item())
             obj_z = float(obj.data.root_pos_w[0, 2].item())
@@ -199,12 +202,13 @@ def main():
 
             if speed > args.vel_threshold or obj_z < 0.15:
                 reject_physics += 1
-                continue 
+                continue  # Object ejected or dropped
 
-            # Step 9: Store results
+            # ── Step 9: Store results ──
             joint_pos = robot.data.joint_pos[0].cpu().numpy()
             grasp.joint_angles = joint_pos.copy()
 
+            # Compute object pose in hand frame
             rp_w = robot.data.root_pos_w[0]
             rq_w = robot.data.root_quat_w[0]
             op_w = obj.data.root_pos_w[0]
@@ -229,6 +233,7 @@ def main():
                 print(f"  [{idx+1}/{n_grasps}] solved: {len(solved_indices)} "
                       f"(last err: {mean_err:.4f}m)")
 
+        # ── Per-object rejection breakdown ─────────────────────────────
         print(f"\n  Rejection breakdown for {obj_name}:")
         print(f"    no fingertip data: {reject_no_fp}")
         print(f"    IK error > {args.error_threshold}m: {reject_ik}")
@@ -245,9 +250,11 @@ def main():
             print(f"    settle speed:    mean={sp_arr.mean():.3f}m/s  max={sp_arr.max():.3f}m/s")
             print(f"    settle height:   mean={hz_arr.mean():.3f}m  min={hz_arr.min():.3f}m")
 
+        # Rebuild grasp set with only solved grasps
         old_to_new = {old: new for new, old in enumerate(solved_indices)}
         new_grasps = [grasp_set[i] for i in solved_indices]
 
+        # Rebuild edges
         new_edges = []
         for i, j in subgraph.edges:
             if i in old_to_new and j in old_to_new:
@@ -257,4 +264,44 @@ def main():
         subgraph.edges = new_edges
 
         n_solved = len(new_grasps)
-        total_solved +=
+        total_solved += n_solved
+        print(f"[SolveGraph] {obj_name}: {n_solved}/{n_grasps} solved "
+              f"({n_grasps - n_solved} rejected, {len(new_edges)} edges)")
+
+    # ── Final summary ──────────────────────────────────────────────────
+    print("\n" + "=" * 60)
+    print(f"  SOLVE SUMMARY")
+    print("=" * 60)
+    for obj_name in graph.object_names:
+        sg = graph.graphs[obj_name]
+        n = len(sg.grasp_set)
+        e = len(sg.edges)
+        print(f"  {obj_name:30s}  {n:4d} grasps  {e:4d} edges")
+    print("-" * 60)
+    print(f"  {'TOTAL':30s}  {total_solved:4d}/{total_before} solved "
+          f"({total_before - total_solved} rejected)")
+    print("=" * 60)
+
+    if total_solved == 0:
+        print("\n[WARNING] 0 grasps solved! Check:")
+        print("  - Object size may be too small for the hand")
+        print("  - Try relaxing --error-threshold (current: "
+              f"{args.error_threshold}m)")
+        print("  - Try increasing --settle-steps (current: "
+              f"{args.settle_steps})")
+        print("  - Ensure grasp_graph.pkl has grasps "
+              "(run scripts/run_grasp_generation.py first)")
+
+    # Save
+    output_path = Path(args.output)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, "wb") as f:
+        pickle.dump(graph, f)
+    print(f"[SolveGraph] Saved to: {output_path}")
+
+    env.close()
+    sim_app.close()
+
+
+if __name__ == "__main__":
+    main()
