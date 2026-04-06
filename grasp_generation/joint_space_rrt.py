@@ -426,29 +426,94 @@ class JointSpaceRRTGenerator:
 
     def _generate_seeds(self) -> List[Grasp]:
         seeds: List[Grasp] = []
+        reject_pen = 0
+        reject_contact = 0
+        reject_quality = 0
+        dist_samples = []
 
         for i in range(self.cfg.num_seed_attempts):
             q = self._sample_from_preshape()
-            grasp = self._evaluate_joint_config(
-                q=q,
-                contact_threshold=self.cfg.seed_contact_threshold,
-                min_quality=self.cfg.seed_min_quality,
-                min_contacts=self.cfg.min_contacts_seed,
-            )
-            if grasp is None:
+            self._set_joints(q)
+
+            # Track rejection reason
+            if self._penetration_violation():
+                reject_pen += 1
                 continue
+
+            ft_world = self._get_fingertip_world()
+            ft_obj = self._world_to_object_frame(ft_world)
+            try:
+                closest, dists, face_idx = trimesh.proximity.closest_point(self.mesh, ft_obj)
+            except Exception:
+                continue
+
+            active_contacts = self._count_active_contacts(dists, self.cfg.seed_contact_threshold)
+            dist_samples.append(dists.copy())
+
+            if active_contacts < self.cfg.min_contacts_seed:
+                reject_contact += 1
+                continue
+
+            normals = self.mesh.face_normals[face_idx].astype(np.float32)
+            grasp = Grasp(
+                fingertip_positions=closest.astype(np.float32),
+                contact_normals=normals,
+                quality=0.0,
+                object_name=self.object_name,
+                object_scale=self.object_size,
+            )
+            try:
+                quality = float(self.nfo.evaluate(grasp))
+            except Exception:
+                continue
+
+            if quality < self.cfg.seed_min_quality:
+                reject_quality += 1
+                continue
+
+            # Build full grasp
+            rp = self.robot.data.root_pos_w[0]
+            rq = self.robot.data.root_quat_w[0]
+            op = self.obj_pos_w[0]
+            rel = op - rp
+            obj_pos_hand = quat_apply_inverse(rq.unsqueeze(0), rel.unsqueeze(0))[0]
+            obj_quat_hand = quat_multiply(
+                quat_conjugate(rq.unsqueeze(0)), self.obj_quat_w,
+            )[0]
+
+            grasp.quality = quality
+            grasp.joint_angles = q.detach().cpu().numpy().copy()
+            grasp.object_pos_hand = obj_pos_hand.detach().cpu().numpy().copy()
+            grasp.object_quat_hand = obj_quat_hand.detach().cpu().numpy().copy()
+            grasp.object_pose_frame = "hand_root"
 
             if self._is_duplicate(seeds, grasp.joint_angles, self.cfg.min_seed_joint_dist):
                 continue
 
             seeds.append(grasp)
             seeds.sort(key=lambda g: float(g.quality), reverse=True)
-
             if len(seeds) > self.cfg.max_seed_keep:
                 seeds = seeds[: self.cfg.max_seed_keep]
 
             if len(seeds) % 10 == 0:
                 print(f"    seeds: {len(seeds)} (attempt {i + 1})")
+
+        # Rejection breakdown
+        if dist_samples:
+            all_dists = np.stack(dist_samples)  # (N, F)
+            mean_min = float(all_dists.min(axis=1).mean())
+            mean_mean = float(all_dists.mean())
+            print(f"  [SEED DIAG] reject: penetration={reject_pen}  "
+                  f"contact={reject_contact}  quality={reject_quality}")
+            print(f"  [SEED DIAG] fingertip-surface dist: "
+                  f"mean={mean_mean:.4f}m  mean_closest={mean_min:.4f}m  "
+                  f"(threshold={self.cfg.seed_contact_threshold}m)")
+        else:
+            print(f"  [SEED DIAG] reject: penetration={reject_pen}  "
+                  f"contact={reject_contact}  quality={reject_quality}  "
+                  f"(no distance samples)")
+
+        return seeds
 
         return seeds
 
