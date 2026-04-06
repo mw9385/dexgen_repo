@@ -1,14 +1,16 @@
 """
-Joint-Space RRT Grasp Generation — runs inside Isaac Sim.
+DexGen-style Grasp Generation — runs inside Isaac Sim.
 
-Generates kinematically feasible grasps by exploring joint space via FK.
-Every grasp in the output has valid joint_angles + object_pose — no
-separate solve step needed.
+Pipeline strictly follows DexGen Appendix B:
+  1. HeuristicSample (Algorithm 3): Surface sampling + Net Force Optimization (Algorithm 4)
+  2. GraspRRTExpand (Algorithm 5): NN interpolation in (q, p) space + collision fix
+
+Every grasp in the output has valid joint_angles (q) + object_pose (p).
 
 Usage:
-    /workspace/IsaacLab/isaaclab.sh -p scripts/run_joint_space_rrt.py \
+    /workspace/IsaacLab/isaaclab.sh -p scripts/run_dexgen_grasp_generation.py \
         --shapes cube --size_min 0.08 --size_max 0.08 \
-        --num_grasps 300 --output data/grasp_graph.pkl
+        --num_initial 50 --num_rrt_steps 300 --output data/grasp_graph.pkl
 """
 
 import argparse
@@ -22,33 +24,31 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Joint-space RRT grasp generation")
+    p = argparse.ArgumentParser(description="DexGen Pipeline Grasp Generation")
     p.add_argument("--shapes", nargs="+", default=["cube"])
     p.add_argument("--size_min", type=float, default=0.06)
     p.add_argument("--size_max", type=float, default=0.08)
     p.add_argument("--num_sizes", type=int, default=1)
-    p.add_argument("--num_grasps", type=int, default=300)
+    
+    # DexGen Algorithm 2 params
+    p.add_argument("--num_initial", type=int, default=50, help="N in HeuristicSample")
+    p.add_argument("--num_rrt_steps", type=int, default=300, help="N_RRT in GraspRRTExpand")
+    
     p.add_argument("--output", type=str, default="data/grasp_graph.pkl")
 
-    # Validation thresholds
-    p.add_argument("--contact_threshold", type=float, default=0.015)
-    p.add_argument("--min_quality", type=float, default=0.03)
-    p.add_argument("--joint_noise_std", type=float, default=0.1)
-    p.add_argument("--seed_attempts", type=int, default=5000)
-
+    # Algorithm 4 (GraspAnalysis) Validation thresholds
+    p.add_argument("--f_thresh", type=float, default=0.03, help="Threshold for Net Force Opt")
+    
     # Isaac Sim args
     p.add_argument("--headless", action="store_true", default=True)
     p.add_argument("--num_envs", type=int, default=1)
     p.add_argument("--device", type=str, default="cuda:0")
-    p.add_argument("--physics_gpu", type=int, default=0)
-    p.add_argument("--multi_gpu", action="store_true", default=False)
     return p.parse_args()
 
 
 def _make_mesh(shape: str, size: float) -> "trimesh.Trimesh":
     """Create a trimesh primitive for the given shape and size."""
     import trimesh
-
     if shape == "cube":
         return trimesh.creation.box(extents=[size, size, size])
     elif shape == "sphere":
@@ -66,18 +66,18 @@ def main():
     app_launcher = AppLauncher(args)
     sim_app = app_launcher.app
 
-    import torch
     import trimesh
     from isaaclab.envs import ManagerBasedRLEnv
-
     from envs.anygrasp_env import AnyGraspEnvCfg
     from envs.mdp.sim_utils import get_fingertip_body_ids_from_env
-    from grasp_generation.joint_space_rrt import (
-        JointSpaceRRTConfig,
-        JointSpaceRRTGenerator,
-    )
+    
+    # Import DexGen-specific modules 
     from grasp_generation.net_force_optimization import NetForceOptimizer
-    from grasp_generation.rrt_expansion import MultiObjectGraspGraph
+    from grasp_generation.dexgen_pipeline import (
+        HeuristicSampler,  # Implements Algorithm 3
+        GraspRRTExpander,  # Implements Algorithm 5
+        MultiObjectGraspGraph
+    )
 
     # Create env
     env_cfg = AnyGraspEnvCfg()
@@ -85,27 +85,17 @@ def main():
     env = ManagerBasedRLEnv(env_cfg)
     robot = env.scene["robot"]
     ft_ids = get_fingertip_body_ids_from_env(robot, env)
+    num_fingers = len(ft_ids)
 
-    # NFO quality scorer
+    # NFO for GraspAnalysis (Algorithm 4)
+    # Optimizes f_i to minimize net force.
     nfo = NetForceOptimizer(
-        mu=0.5,
-        min_quality=args.min_quality,
-        fast_mode=False,
+        min_quality=args.f_thresh, 
+        fast_mode=False
     )
 
-    # RRT config
-    rrt_cfg = JointSpaceRRTConfig(
-        target_size=args.num_grasps,
-        num_seed_attempts=args.seed_attempts,
-        contact_threshold=args.contact_threshold,
-        min_quality=args.min_quality,
-        joint_noise_std=args.joint_noise_std,
-    )
-
-    # Generate for each shape × size
     sizes = np.linspace(args.size_min, args.size_max, args.num_sizes)
     multi_graph = MultiObjectGraspGraph(graphs={}, object_specs={})
-    num_fingers = len(ft_ids)
 
     for shape in args.shapes:
         for size in sizes:
@@ -118,19 +108,32 @@ def main():
 
             mesh = _make_mesh(shape, size)
 
-            generator = JointSpaceRRTGenerator(
+            # 1. Algorithm 3: HeuristicSample
+            sampler = HeuristicSampler(
                 env=env,
                 mesh=mesh,
                 nfo=nfo,
                 ft_ids=ft_ids,
-                cfg=rrt_cfg,
-                object_name=obj_name,
-                object_size=size,
+                num_samples=args.num_initial,
             )
+            print("  [Step 1] Running Heuristic Sampling...")
+            initial_grasp_set = sampler.generate_seeds()
+            
+            if len(initial_grasp_set) == 0:
+                print(f"  [Warning] Failed to generate initial seeds for {obj_name}. Skipping.")
+                continue
 
-            graph = generator.generate()
+            # 2. Algorithm 5: GraspRRTExpand
+            expander = GraspRRTExpander(
+                env=env,
+                mesh=mesh,
+                rrt_steps=args.num_rrt_steps,
+            )
+            print(f"  [Step 2] Running RRT Expansion ({args.num_rrt_steps} steps)...")
+            # expand() function should handle NearestNeighbor, Interpolate, and FixContactAndCollision
+            final_graph = expander.expand(initial_grasp_set)
 
-            multi_graph.graphs[obj_name] = graph
+            multi_graph.graphs[obj_name] = final_graph
             multi_graph.object_specs[obj_name] = {
                 "name": obj_name,
                 "shape_type": shape,
@@ -140,7 +143,7 @@ def main():
 
     # Summary
     print(f"\n{'='*60}")
-    print("  GENERATION SUMMARY")
+    print("  GENERATION SUMMARY (DexGen Pipeline)")
     print(f"{'='*60}")
     for name, g in multi_graph.graphs.items():
         n = len(g.grasp_set)
