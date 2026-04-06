@@ -297,8 +297,9 @@ def reset_to_random_grasp(
 
     if has_stored_reset:
         # ── Solved graph path ──────────────────────────────────────────
-        # Use stored joint_angles + object_pos_hand/object_quat_hand
-        # to reproduce the exact solved configuration.
+        # MJCF ↔ USD 축 불일치로 stored obj_pos_hand를 직접 사용하면
+        # 물체가 손목 위에 올라감. 대신 Isaac FK로 fingertip centroid를
+        # 직접 측정하여 물체를 배치한다.
 
         # 1. Set wrist at default world position
         wrist_pos = (
@@ -308,21 +309,18 @@ def reset_to_random_grasp(
         wrist_quat = robot.data.default_root_state[env_ids, 3:7].clone()
         set_robot_root_pose(env, env_ids, wrist_pos, wrist_quat)
 
-        # 2. Set stored joint angles (validated by solve_grasp_graph)
+        # 2. Set stored joint angles
         set_robot_joints_direct(env, env_ids, start_joints_list)
-        robot.write_data_to_sim()
-        robot.update(0.0)
+        # Force FK computation so body_pos_w reflects new joints
+        env.sim.step(render=False)
+        env.scene.update(dt=env.physics_dt)
 
-        # 3. Place object at actual fingertip centroid from FK.
-        # This is more robust than stored object pose which has frame
-        # mismatch issues (optimizer uses rotated hand frame, Isaac uses identity).
+        # 3. Place object at Isaac FK fingertip centroid
         ft_ids = get_fingertip_body_ids_from_env(robot, env)
-        ft_world = robot.data.body_pos_w[env_ids][:, ft_ids, :]  # (n, F, 3)
-        obj_pos_w = ft_world.mean(dim=1)  # (n, 3)
-        obj_quat_w = torch.zeros(n, 4, device=env.device)
-        obj_quat_w[:, 0] = 1.0  # identity
+        ft_pos_w = robot.data.body_pos_w[env_ids][:, ft_ids, :]
+        obj_pos_w = ft_pos_w.mean(dim=1)  # (n, 3)
+        obj_quat_w = robot.data.root_quat_w[env_ids].clone()
 
-        # 4. Place object at computed world pose
         obj_root_state = obj.data.default_root_state[env_ids].clone()
         obj_root_state[:, :3] = obj_pos_w
         obj_root_state[:, 3:7] = obj_quat_w
@@ -330,7 +328,7 @@ def reset_to_random_grasp(
         obj.write_root_state_to_sim(obj_root_state, env_ids=env_ids)
         obj.update(0.0)
 
-        # 5. Compute goal fingertip world positions from object world pose
+        # 4. Compute goal fingertip world positions
         goal_world = local_to_world_points(goal_fps, obj_pos_w, obj_quat_w)
 
     else:

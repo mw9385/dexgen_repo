@@ -273,21 +273,19 @@ def _validate_physics(args, grasps, obj_name):
         if grasp.joint_angles is None:
             continue
 
-        # Set joints
+        # Set joints and force FK computation
         q = torch.tensor(grasp.joint_angles, device=device, dtype=torch.float32).unsqueeze(0)
         robot.write_joint_state_to_sim(q, torch.zeros_like(q), env_ids=env_ids)
         robot.set_joint_position_target(q, env_ids=env_ids)
-        robot.update(0.0)
+        env.sim.step(render=False)
+        env.scene.update(dt=env.physics_dt)
 
-        # Place object from stored hand-relative pose
-        rp = robot.data.root_pos_w[0]
-        rq = robot.data.root_quat_w[0]
-        obj_pos_hand = torch.tensor(grasp.object_pos_hand, device=device, dtype=torch.float32)
-        obj_quat_hand = torch.tensor(grasp.object_quat_hand, device=device, dtype=torch.float32)
-
-        obj_pos_w = rp + quat_apply(rq.unsqueeze(0), obj_pos_hand.unsqueeze(0))[0]
-        obj_quat_w = quat_multiply(rq.unsqueeze(0), obj_quat_hand.unsqueeze(0))[0]
-        obj_quat_w = obj_quat_w / (obj_quat_w.norm() + 1e-8)
+        # Place object at Isaac FK fingertip centroid (ignore MJCF local offset)
+        from envs.mdp.sim_utils import get_fingertip_body_ids_from_env
+        ft_ids = get_fingertip_body_ids_from_env(robot, env)
+        ft_pos_w = robot.data.body_pos_w[env_ids][:, ft_ids, :]
+        obj_pos_w = ft_pos_w.mean(dim=1)[0]
+        obj_quat_w = torch.tensor([1.0, 0.0, 0.0, 0.0], device=device)
 
         obj_state = obj.data.default_root_state[env_ids].clone()
         obj_state[:, :3] = obj_pos_w.unsqueeze(0)
