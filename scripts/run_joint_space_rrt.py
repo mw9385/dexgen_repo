@@ -76,7 +76,7 @@ def main():
     from grasp_generation.rrt_expansion import MultiObjectGraspGraph
     
     # 2. 신규 작성 모듈 Import (dexgen_sampler.py에 구현된다고 가정)
-    from grasp_generation.dexgen_sampler import (
+    from grasp_generation.grasp_sampler import (
         HeuristicSampler,  # Implements Algorithm 3
         GraspRRTExpander   # Implements Algorithm 5
     )

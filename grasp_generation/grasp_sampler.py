@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
 
 import numpy as np
+import torch
 import trimesh
 
 # ---------------------------------------------------------------------------
@@ -328,3 +329,202 @@ class HeuristicSampler:
         q = self.rng.normal(size=4)
         q /= np.linalg.norm(q) + 1e-8
         return q if q[0] >= 0.0 else -q
+
+
+# ---------------------------------------------------------------------------
+# Algorithm 5: GraspRRTExpander — joint-space RRT expansion
+# ---------------------------------------------------------------------------
+
+class GraspRRTExpander:
+    """
+    DexGen Algorithm 5: RRT expansion in joint space.
+
+    Perturbs parent grasp joints, validates via FK + surface proximity +
+    NFO + penetration check. Builds a connectivity graph.
+    """
+
+    def __init__(
+        self,
+        env,
+        mesh: trimesh.Trimesh,
+        nfo,
+        ft_ids: list,
+        rrt_steps: int = 300,
+        joint_noise_std: float = 0.1,
+        contact_threshold: float = 0.015,
+        penetration_margin: float = 0.008,
+        delta_max: float = 0.5,
+        max_attempts_per_step: int = 50,
+        seed: int = 42,
+    ):
+        self.env = env
+        self.robot = env.scene["robot"]
+        self.obj = env.scene["object"]
+        self.device = env.device
+        self.env_ids = torch.tensor([0], device=self.device, dtype=torch.long)
+
+        self.mesh = mesh
+        self.nfo = nfo
+        self.ft_ids = ft_ids
+        self.rrt_steps = rrt_steps
+        self.joint_noise_std = joint_noise_std
+        self.contact_threshold = contact_threshold
+        self.penetration_margin = penetration_margin
+        self.delta_max = delta_max
+        self.max_attempts_per_step = max_attempts_per_step
+        self.rng = np.random.default_rng(seed)
+
+        self.finger_body_ids = self._resolve_finger_body_ids()
+        self.q_low = self.robot.data.soft_joint_pos_limits[0, :, 0].clone()
+        self.q_high = self.robot.data.soft_joint_pos_limits[0, :, 1].clone()
+
+    def _resolve_finger_body_ids(self) -> list:
+        _LINKS = [
+            "robot0_ffknuckle", "robot0_ffproximal", "robot0_ffmiddle", "robot0_ffdistal",
+            "robot0_mfknuckle", "robot0_mfproximal", "robot0_mfmiddle", "robot0_mfdistal",
+            "robot0_rfknuckle", "robot0_rfproximal", "robot0_rfmiddle", "robot0_rfdistal",
+            "robot0_lfmetacarpal", "robot0_lfknuckle", "robot0_lfproximal",
+            "robot0_lfmiddle", "robot0_lfdistal",
+            "robot0_thbase", "robot0_thproximal", "robot0_thhub",
+            "robot0_thmiddle", "robot0_thdistal",
+        ]
+        ids = []
+        for name in _LINKS:
+            try:
+                found = self.robot.find_bodies(name)[0]
+                if len(found) > 0:
+                    ids.append(int(found[0]))
+            except Exception:
+                pass
+        if not ids:
+            num_bodies = self.robot.data.body_pos_w.shape[1]
+            ids = list(range(2, num_bodies))
+        return ids
+
+    def expand(self, seed_set: GraspSet) -> "GraspGraph":
+        """Expand seeds via joint-space RRT."""
+        from .rrt_expansion import GraspGraph
+
+        grasps = list(seed_set.grasps)
+        obj_pos_w = self._get_object_pos(grasps[0])
+        total_attempts = 0
+        max_total = self.rrt_steps * self.max_attempts_per_step * 2
+
+        while len(grasps) < len(seed_set) + self.rrt_steps:
+            new = self._expand_step(grasps, obj_pos_w)
+            if new is not None:
+                grasps.append(new)
+                if len(grasps) % 50 == 0:
+                    print(f"    [RRT] {len(grasps)} grasps")
+            total_attempts += 1
+            if total_attempts >= max_total:
+                print(f"    [RRT] Stopping at {len(grasps)} grasps ({total_attempts} attempts)")
+                break
+
+        edges = self._build_edges(grasps)
+        return GraspGraph(
+            grasp_set=GraspSet(grasps=grasps, object_name=seed_set.object_name),
+            edges=edges,
+            object_name=seed_set.object_name,
+            num_fingers=len(self.ft_ids),
+        )
+
+    def _get_object_pos(self, grasp: Grasp) -> torch.Tensor:
+        """Reconstruct world-frame object position from grasp."""
+        if grasp.joint_angles is not None:
+            q = torch.tensor(grasp.joint_angles, device=self.device, dtype=torch.float32)
+            self.robot.write_joint_state_to_sim(
+                q.unsqueeze(0), torch.zeros(1, len(q), device=self.device),
+                env_ids=self.env_ids,
+            )
+            self.robot.update(0.0)
+        ft = self.robot.data.body_pos_w[0, self.ft_ids, :]
+        return ft.mean(dim=0)
+
+    def _expand_step(self, grasps: list, obj_pos_w: torch.Tensor) -> Optional[Grasp]:
+        for _ in range(self.max_attempts_per_step):
+            parent = grasps[self.rng.integers(0, len(grasps))]
+            q_parent = torch.tensor(
+                parent.joint_angles, device=self.device, dtype=torch.float32,
+            )
+            noise = torch.randn_like(q_parent) * self.joint_noise_std
+            noise[:2] = 0.0
+            q_new = torch.clamp(q_parent + noise, self.q_low, self.q_high)
+            grasp = self._evaluate(q_new, obj_pos_w)
+            if grasp is not None:
+                return grasp
+        return None
+
+    def _evaluate(self, q: torch.Tensor, obj_pos_w: torch.Tensor) -> Optional[Grasp]:
+        """FK + penetration + surface proximity + NFO."""
+        q_2d = q.unsqueeze(0)
+        self.robot.write_joint_state_to_sim(
+            q_2d, torch.zeros_like(q_2d), env_ids=self.env_ids,
+        )
+        self.robot.set_joint_position_target(q_2d, env_ids=self.env_ids)
+        self.robot.update(0.0)
+
+        # Penetration check
+        fl_world = self.robot.data.body_pos_w[0, self.finger_body_ids, :]
+        fl_obj = (fl_world - obj_pos_w).cpu().numpy()
+        fl_closest, fl_dists, fl_face = trimesh.proximity.closest_point(self.mesh, fl_obj)
+        to_pt = fl_obj - fl_closest
+        fl_normals = self.mesh.face_normals[fl_face]
+        sign = np.sum(to_pt * fl_normals, axis=-1)
+        penetration = np.where(sign < 0, fl_dists, 0.0)
+        if np.any(penetration > self.penetration_margin):
+            return None
+
+        # Surface proximity
+        ft_world = self.robot.data.body_pos_w[0, self.ft_ids, :].clone()
+        ft_obj = (ft_world - obj_pos_w).cpu().numpy()
+        closest, dists, face_idx = trimesh.proximity.closest_point(self.mesh, ft_obj)
+        if np.any(dists > self.contact_threshold):
+            return None
+
+        # NFO
+        normals = self.mesh.face_normals[face_idx].astype(np.float32)
+        test_grasp = Grasp(
+            fingertip_positions=closest.astype(np.float32),
+            contact_normals=normals,
+        )
+        quality = self.nfo.evaluate(test_grasp)
+        if quality < self.nfo.min_quality:
+            return None
+
+        # Per-grasp object pose
+        from isaaclab.utils.math import quat_apply_inverse
+        from envs.mdp.math_utils import quat_multiply, quat_conjugate
+
+        grasp_centroid = ft_obj.mean(axis=0)
+        fp_local = (closest - grasp_centroid).astype(np.float32)
+        grasp_obj_pos_w = ft_world.mean(dim=0)
+
+        rp = self.robot.data.root_pos_w[0]
+        rq = self.robot.data.root_quat_w[0]
+        rel = grasp_obj_pos_w - rp
+        pos_hand = quat_apply_inverse(rq.unsqueeze(0), rel.unsqueeze(0))[0]
+        obj_quat_w = torch.tensor([[1, 0, 0, 0]], device=self.device, dtype=torch.float32)
+        quat_hand = quat_multiply(quat_conjugate(rq.unsqueeze(0)), obj_quat_w)[0]
+
+        return Grasp(
+            fingertip_positions=fp_local,
+            contact_normals=normals,
+            quality=quality,
+            joint_angles=q.cpu().numpy().copy(),
+            object_pos_hand=pos_hand.cpu().numpy().copy(),
+            object_quat_hand=quat_hand.cpu().numpy().copy(),
+            object_pose_frame="hand_root",
+        )
+
+    def _build_edges(self, grasps: list) -> list:
+        n = len(grasps)
+        if n < 2:
+            return []
+        all_q = np.stack([g.joint_angles for g in grasps])
+        edges = []
+        for i in range(n):
+            for j in range(i + 1, n):
+                if float(np.linalg.norm(all_q[i] - all_q[j])) < self.delta_max:
+                    edges.append((i, j))
+        return edges
