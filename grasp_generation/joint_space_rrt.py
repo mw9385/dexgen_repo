@@ -235,7 +235,7 @@ class JointSpaceRRTGenerator:
         op = self.obj_pos_w[0]
 
         from isaaclab.utils.math import quat_apply_inverse
-        from .math_utils import quat_multiply, quat_conjugate
+        from envs.mdp.math_utils import quat_multiply, quat_conjugate
 
         rel = op - rp
         obj_pos_hand = quat_apply_inverse(rq.unsqueeze(0), rel.unsqueeze(0))[0]
