@@ -147,24 +147,24 @@ def main():
                 fp, device=device, dtype=torch.float32,
             ).unsqueeze(0)  # (1, F, 3)
 
-            # ── Step 1: Place object at fixed position ──
-            obj_pos_w, obj_quat_w = place_object_fixed(env, env_ids)
-            obj.update(0.0)
-
-            # ── Step 2: Fingertip targets in world frame ──
-            start_world = local_to_world_points(fp_tensor, obj_pos_w, obj_quat_w)
-
-            # ── Step 3: Compute wrist from fingertips ──
-            wrist_pos, wrist_quat = compute_wrist_from_fingertips(
-                env, env_ids, start_world,
+            # ── Step 1: Set wrist at default pose ──
+            wrist_pos = (
+                robot.data.default_root_state[env_ids, :3].clone()
+                + env.scene.env_origins[env_ids]
             )
+            wrist_quat = robot.data.default_root_state[env_ids, 3:7].clone()
             set_robot_root_pose(env, env_ids, wrist_pos, wrist_quat)
 
-            # ── Step 4: Adaptive initial joint pose ──
+            # ── Step 2: Adaptive initial joint pose ──
             set_adaptive_joint_pose(env, env_ids, obj_size)
             robot.update(0.0)
 
-            # Re-fix object
+            # ── Step 3: Place object at fingertip centroid ──
+            ft_pos_w = robot.data.body_pos_w[env_ids][:, ft_ids, :]  # (1, F, 3)
+            obj_pos_w = ft_pos_w.mean(dim=1)  # (1, 3)
+            obj_quat_w = torch.zeros(1, 4, device=device)
+            obj_quat_w[:, 0] = 1.0
+
             obj_root_state = obj.data.default_root_state[env_ids].clone()
             obj_root_state[:, :3] = obj_pos_w
             obj_root_state[:, 3:7] = obj_quat_w
@@ -172,7 +172,7 @@ def main():
             obj.write_root_state_to_sim(obj_root_state, env_ids=env_ids)
             obj.update(0.0)
 
-            # ── Step 5: Per-finger IK ──
+            # ── Step 4: Per-finger IK ──
             refine_hand_to_start_grasp(env, env_ids, fp_tensor)
             robot.update(0.0)
 

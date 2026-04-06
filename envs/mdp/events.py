@@ -329,19 +329,17 @@ def reset_to_random_grasp(
         goal_world = local_to_world_points(goal_fps, obj_pos_w, obj_quat_w)
 
     else:
-        # ── Unsolved graph path: place object fixed → IK ───────────────
-        # Place object at fixed position, compute wrist from fingertips,
-        # run per-finger IK to reach target contacts.
+        # ── Unsolved graph path ───────────────────────────────────────
+        # 1. Set wrist at default pose
+        # 2. Set adaptive joints based on object size
+        # 3. Place object at fingertip centroid (so it sits in the hand)
+        # 4. Run per-finger IK to refine contacts
 
-        obj_pos_w, obj_quat_w = place_object_fixed(env, env_ids)
-        obj.update(0.0)
-
-        start_world = local_to_world_points(start_fps, obj_pos_w, obj_quat_w)
-        goal_world = local_to_world_points(goal_fps, obj_pos_w, obj_quat_w)
-
-        wrist_pos, wrist_quat = compute_wrist_from_fingertips(
-            env, env_ids, start_world,
+        wrist_pos = (
+            robot.data.default_root_state[env_ids, :3].clone()
+            + env.scene.env_origins[env_ids]
         )
+        wrist_quat = robot.data.default_root_state[env_ids, 3:7].clone()
         set_robot_root_pose(env, env_ids, wrist_pos, wrist_quat)
 
         # Adaptive initial joints based on object size
@@ -356,13 +354,22 @@ def reset_to_random_grasp(
         set_adaptive_joint_pose(env, env_ids, obj_size)
         robot.update(0.0)
 
-        # Re-fix object during IK
+        # Place object at fingertip centroid (after joints are set)
+        ft_ids = get_fingertip_body_ids_from_env(robot, env)
+        ft_pos_w = robot.data.body_pos_w[env_ids][:, ft_ids, :]  # (n, F, 3)
+        obj_pos_w = ft_pos_w.mean(dim=1)  # (n, 3) — centroid of fingertips
+        obj_quat_w = torch.zeros(n, 4, device=env.device)
+        obj_quat_w[:, 0] = 1.0  # identity
+
         obj_root_state = obj.data.default_root_state[env_ids].clone()
         obj_root_state[:, :3] = obj_pos_w
         obj_root_state[:, 3:7] = obj_quat_w
         obj_root_state[:, 7:] = 0.0
         obj.write_root_state_to_sim(obj_root_state, env_ids=env_ids)
         obj.update(0.0)
+
+        start_world = local_to_world_points(start_fps, obj_pos_w, obj_quat_w)
+        goal_world = local_to_world_points(goal_fps, obj_pos_w, obj_quat_w)
 
         # Per-finger differential IK
         refine_hand_to_start_grasp(env, env_ids, start_fps)
