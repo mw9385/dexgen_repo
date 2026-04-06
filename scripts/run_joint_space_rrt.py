@@ -71,12 +71,14 @@ def main():
     from envs.anygrasp_env import AnyGraspEnvCfg
     from envs.mdp.sim_utils import get_fingertip_body_ids_from_env
     
-    # Import DexGen-specific modules 
+    # 1. 기존 구현 모듈 Import
     from grasp_generation.net_force_optimization import NetForceOptimizer
-    from grasp_generation.dexgen_pipeline import (
+    from grasp_generation.rrt_expansion import MultiObjectGraspGraph
+    
+    # 2. 신규 작성 모듈 Import (dexgen_sampler.py에 구현된다고 가정)
+    from grasp_generation.dexgen_sampler import (
         HeuristicSampler,  # Implements Algorithm 3
-        GraspRRTExpander,  # Implements Algorithm 5
-        MultiObjectGraspGraph
+        GraspRRTExpander   # Implements Algorithm 5
     )
 
     # Create env
@@ -88,7 +90,6 @@ def main():
     num_fingers = len(ft_ids)
 
     # NFO for GraspAnalysis (Algorithm 4)
-    # Optimizes f_i to minimize net force.
     nfo = NetForceOptimizer(
         min_quality=args.f_thresh, 
         fast_mode=False
@@ -115,9 +116,10 @@ def main():
                 nfo=nfo,
                 ft_ids=ft_ids,
                 num_samples=args.num_initial,
+                num_fingers=num_fingers  # 명시적 전달
             )
             print("  [Step 1] Running Heuristic Sampling...")
-            initial_grasp_set = sampler.generate_seeds()
+            initial_grasp_set = sampler.sample()
             
             if len(initial_grasp_set) == 0:
                 print(f"  [Warning] Failed to generate initial seeds for {obj_name}. Skipping.")
@@ -127,10 +129,11 @@ def main():
             expander = GraspRRTExpander(
                 env=env,
                 mesh=mesh,
+                nfo=nfo,         # NFO 검증 객체 전달
+                ft_ids=ft_ids,   # 손가락 ID 전달
                 rrt_steps=args.num_rrt_steps,
             )
             print(f"  [Step 2] Running RRT Expansion ({args.num_rrt_steps} steps)...")
-            # expand() function should handle NearestNeighbor, Interpolate, and FixContactAndCollision
             final_graph = expander.expand(initial_grasp_set)
 
             multi_graph.graphs[obj_name] = final_graph
