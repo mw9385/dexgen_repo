@@ -270,9 +270,13 @@ class JointSpaceRRTGenerator:
         # Contact normals from mesh faces
         normals = self.mesh.face_normals[face_idx].astype(np.float32)
 
-        # NFO quality check
+        # Per-grasp object frame: origin at this grasp's fingertip centroid
+        grasp_centroid_obj = ft_obj.mean(axis=0)  # (3,) in fixed object frame
+        fp_local = (closest - grasp_centroid_obj).astype(np.float32)
+
+        # NFO quality check (relative positions + normals)
         grasp = Grasp(
-            fingertip_positions=closest.astype(np.float32),
+            fingertip_positions=fp_local,
             contact_normals=normals,
             quality=0.0,
             object_name=self.object_name,
@@ -286,19 +290,24 @@ class JointSpaceRRTGenerator:
         grasp.quality = quality
         grasp.joint_angles = q.cpu().numpy().copy()
 
-        # Object pose in hand frame
+        # Compute per-grasp object pose: place object at THIS grasp's
+        # fingertip centroid so each grasp has a unique object position.
+        grasp_obj_pos_w = ft_world.mean(dim=0)  # (3,) centroid of this grasp's fingertips
+
         rp = self.robot.data.root_pos_w[0]
         rq = self.robot.data.root_quat_w[0]
-        op = self.obj_pos_w[0]
 
         from isaaclab.utils.math import quat_apply_inverse
         from envs.mdp.math_utils import quat_multiply, quat_conjugate
 
-        rel = op - rp
+        rel = grasp_obj_pos_w - rp
         obj_pos_hand = quat_apply_inverse(rq.unsqueeze(0), rel.unsqueeze(0))[0]
+        # Object orientation: identity in world = conj(hand_quat) in hand frame
+        obj_quat_w_id = torch.zeros(1, 4, device=self.device)
+        obj_quat_w_id[:, 0] = 1.0
         obj_quat_hand = quat_multiply(
             quat_conjugate(rq.unsqueeze(0)),
-            self.obj_quat_w,
+            obj_quat_w_id,
         )[0]
 
         grasp.object_pos_hand = obj_pos_hand.cpu().numpy().copy()
