@@ -536,7 +536,7 @@ if _ISAACLAB_AVAILABLE:
                 }
 
             # Finger link subsets — Shadow Hand Isaac Lab link names.
-            # Order must MATCH GraspSampler._FINGER_SUBSETS so that fingertip
+            # Order must MATCH HeuristicSampler._FINGER_SUBSETS so that fingertip
             # positions in grasps align with sensor/obs order.
             #   2-finger: FF + TH  (pinch — thumb always required)
             #   3-finger: FF + MF + TH
