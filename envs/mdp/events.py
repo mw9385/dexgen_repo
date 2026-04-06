@@ -333,7 +333,7 @@ def reset_to_random_grasp(
         # 1. Set wrist at default pose
         # 2. Set adaptive joints based on object size
         # 3. Place object at fingertip centroid (so it sits in the hand)
-        # No IK refinement — adaptive joints are sufficient.
+        # 4. Per-finger IK to match RRT grasp-specific fingertip targets
 
         wrist_pos = (
             robot.data.default_root_state[env_ids, :3].clone()
@@ -367,6 +367,10 @@ def reset_to_random_grasp(
         obj_root_state[:, 7:] = 0.0
         obj.write_root_state_to_sim(obj_root_state, env_ids=env_ids)
         obj.update(0.0)
+
+        # Per-finger IK to match grasp-specific fingertip targets
+        refine_hand_to_start_grasp(env, env_ids, start_fps)
+        robot.update(0.0)
 
         start_world = local_to_world_points(start_fps, obj_pos_w, obj_quat_w)
         goal_world = local_to_world_points(goal_fps, obj_pos_w, obj_quat_w)
