@@ -134,7 +134,7 @@ def _build_object_spawner(object_pool_specs: Optional[List[dict]] = None):
         return sim_utils.CuboidCfg(
             size=(0.040, 0.040, 0.040),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                disable_gravity=False, max_depenetration_velocity=0.05,
+                disable_gravity=False, max_depenetration_velocity=5.0,
                 enable_gyroscopic_forces=True,
             ),
             mass_props=sim_utils.MassPropertiesCfg(mass=0.05),
@@ -149,7 +149,7 @@ def _build_object_spawner(object_pool_specs: Optional[List[dict]] = None):
     for spec in object_pool_specs:
         shape, s = spec["shape_type"], spec["size"]
         color = tuple(spec.get("color", (0.7, 0.7, 0.7)))
-        rp = sim_utils.RigidBodyPropertiesCfg(disable_gravity=False, max_depenetration_velocity=0.05, enable_gyroscopic_forces=True)
+        rp = sim_utils.RigidBodyPropertiesCfg(disable_gravity=False, max_depenetration_velocity=5.0, enable_gyroscopic_forces=True)
         mp = sim_utils.MassPropertiesCfg(mass=spec.get("mass", 0.1))
         cp = sim_utils.CollisionPropertiesCfg(contact_offset=0.002, rest_offset=0.0)
         pm = _DEFAULT_MATERIAL
@@ -203,7 +203,7 @@ if _ISAACLAB_AVAILABLE:
             spawn=sim_utils.CuboidCfg(
                 size=(0.040, 0.040, 0.040),
                 rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                    disable_gravity=False, max_depenetration_velocity=0.05,
+                    disable_gravity=False, max_depenetration_velocity=5.0,
                     enable_gyroscopic_forces=True,
                 ),
                 mass_props=sim_utils.MassPropertiesCfg(mass=0.05),
