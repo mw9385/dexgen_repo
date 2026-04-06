@@ -310,6 +310,7 @@ def reset_to_random_grasp(
 
         # 2. Set stored joint angles (validated by solve_grasp_graph)
         set_robot_joints_direct(env, env_ids, start_joints_list)
+        robot.write_data_to_sim()
         robot.update(0.0)
 
         # 3. Place object at actual fingertip centroid from FK.
