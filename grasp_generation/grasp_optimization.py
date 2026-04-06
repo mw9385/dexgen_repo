@@ -261,27 +261,32 @@ def initialize_grasp_poses(hand_model: DexGraspNetHandModel,
     rotate_theta = 2 * math.pi * torch.rand(batch_size, device=device)
 
     # Build rotation matrices
-    import transforms3d
+    from scipy.spatial.transform import Rotation as _Rot
+
+    def _euler_rzxz(a, b, c):
+        """Equivalent to transforms3d.euler.euler2mat(a, b, c, axes='rzxz')."""
+        return _Rot.from_euler('ZXZ', [a, b, c]).as_matrix()
+
     rotation = torch.zeros(batch_size, 3, 3, dtype=torch.float, device=device)
     translation = torch.zeros(batch_size, 3, dtype=torch.float, device=device)
 
     rotation_hand = torch.tensor(
-        transforms3d.euler.euler2mat(0, -np.pi / 3, 0, axes='rzxz'),
+        _euler_rzxz(0, -np.pi / 3, 0),
         dtype=torch.float, device=device,
     )
 
     for j in range(batch_size):
         rot_local = torch.tensor(
-            transforms3d.euler.euler2mat(
+            _euler_rzxz(
                 float(process_theta[j]), float(deviate_theta[j]),
-                float(rotate_theta[j]), axes='rzxz'),
+                float(rotate_theta[j])),
             dtype=torch.float, device=device,
         )
         rot_global = torch.tensor(
-            transforms3d.euler.euler2mat(
+            _euler_rzxz(
                 math.atan2(float(n[j, 1]), float(n[j, 0])) - math.pi / 2,
                 -math.acos(float(torch.clamp(n[j, 2], -1.0, 1.0))),
-                0, axes='rzxz'),
+                0),
             dtype=torch.float, device=device,
         )
         rotation[j] = rot_global @ rot_local @ rotation_hand
