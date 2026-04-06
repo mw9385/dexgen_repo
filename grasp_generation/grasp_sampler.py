@@ -141,37 +141,86 @@ def make_default_object_mesh(object_type: str = "cube", size: float = 0.06) -> t
 
 
 # ---------------------------------------------------------------------------
-# Heuristic Sampler (Implementation of DexGen Algorithm 3)
+# Shared helpers for FK-based grasp validation
+# ---------------------------------------------------------------------------
+
+_SHADOW_FINGER_LINKS = [
+    "robot0_ffknuckle", "robot0_ffproximal", "robot0_ffmiddle", "robot0_ffdistal",
+    "robot0_mfknuckle", "robot0_mfproximal", "robot0_mfmiddle", "robot0_mfdistal",
+    "robot0_rfknuckle", "robot0_rfproximal", "robot0_rfmiddle", "robot0_rfdistal",
+    "robot0_lfmetacarpal", "robot0_lfknuckle", "robot0_lfproximal",
+    "robot0_lfmiddle", "robot0_lfdistal",
+    "robot0_thbase", "robot0_thproximal", "robot0_thhub",
+    "robot0_thmiddle", "robot0_thdistal",
+]
+
+
+def _resolve_finger_body_ids(robot) -> list:
+    """Get all finger link body IDs for penetration check."""
+    ids = []
+    for name in _SHADOW_FINGER_LINKS:
+        try:
+            found = robot.find_bodies(name)[0]
+            if len(found) > 0:
+                ids.append(int(found[0]))
+        except Exception:
+            pass
+    if not ids:
+        num_bodies = robot.data.body_pos_w.shape[1]
+        ids = list(range(2, num_bodies))
+    return ids
+
+
+def _compute_obj_pose_hand(robot, obj_pos_w, device):
+    """Compute object pose in hand root frame. Returns (pos_np, quat_np)."""
+    from isaaclab.utils.math import quat_apply_inverse
+    from envs.mdp.math_utils import quat_multiply, quat_conjugate
+
+    rp = robot.data.root_pos_w[0]
+    rq = robot.data.root_quat_w[0]
+    rel = obj_pos_w - rp
+    pos_hand = quat_apply_inverse(rq.unsqueeze(0), rel.unsqueeze(0))[0]
+    obj_quat_w = torch.tensor([[1, 0, 0, 0]], device=device, dtype=torch.float32)
+    quat_hand = quat_multiply(quat_conjugate(rq.unsqueeze(0)), obj_quat_w)[0]
+    return pos_hand.cpu().numpy().copy(), quat_hand.cpu().numpy().copy()
+
+
+# ---------------------------------------------------------------------------
+# Heuristic Sampler — FK-based seed generation
 # ---------------------------------------------------------------------------
 
 class HeuristicSampler:
     """
-    Samples grasps adhering strictly to DexGen Algorithm 3:
-      1. Geometric Sampling
-      2. Grasp Analysis (NFO)
-      3. Assign (IK)
-      4. Collision Check
+    FK-based seed generation for Shadow Hand.
+
+    Samples joint configurations centered on joint-limit midpoint with
+    moderate noise. Validates via FK + partial contact check + NFO.
+
+    Key design choices for Shadow Hand 5-finger:
+      - Pre-shape centered sampling (midpoint ± noise_std) instead of
+        full-range random. This keeps fingers in a natural grasp envelope.
+      - Partial contact: requires min_contact_fingers (default 3) out of
+        num_fingers to be within contact_threshold. Remaining fingers can
+        be further away and get refined during RRT expansion.
+      - Relaxed contact_threshold (default 3cm) for seeds — expansion
+        will tighten contact as grasps evolve.
     """
-    _FINGER_SUBSETS = {
-        2: ["index", "thumb"],
-        3: ["index", "middle", "thumb"],
-        4: ["index", "middle", "ring", "thumb"],
-        5: ["index", "middle", "ring", "thumb", "pinky"],
-    }
-    _DEFAULT_FINGER_NAMES = ["index", "middle", "ring", "thumb", "pinky"]
-    PALM_NORMAL_THRESH = 0.3
 
     def __init__(
         self,
         mesh: trimesh.Trimesh,
         object_name: str = "object",
         object_scale: float = 1.0,
-        num_candidates: int = 5000,
-        num_grasps: int = 200,
-        num_fingers: int = 4,
-        nfo: Any = None,        # NEW: Net Force Optimizer instance
-        env: Any = None,        # NEW: Isaac Sim environment or IK solver interface
-        ft_ids: list = None,    # NEW: Fingertip body IDs for IK
+        num_candidates: int = 10000,
+        num_grasps: int = 50,
+        num_fingers: int = 5,
+        nfo: Any = None,
+        env: Any = None,
+        ft_ids: list = None,
+        noise_std: float = 0.3,
+        contact_threshold: float = 0.03,
+        min_contact_fingers: int = 3,
+        penetration_margin: float = 0.008,
         seed: int = 42,
     ):
         self.mesh = mesh
@@ -180,158 +229,140 @@ class HeuristicSampler:
         self.num_candidates = num_candidates
         self.num_grasps = num_grasps
         self.num_fingers = num_fingers
-        self.rng = np.random.default_rng(seed)
-        
         self.nfo = nfo
         self.env = env
         self.ft_ids = ft_ids
+        self.noise_std = noise_std
+        self.contact_threshold = contact_threshold
+        self.min_contact_fingers = min_contact_fingers
+        self.penetration_margin = penetration_margin
+        self.rng = np.random.default_rng(seed)
 
-        obj_size = float(np.max(mesh.bounding_box.extents))
-        self.MIN_FINGER_SPACING = max(0.008, obj_size * 0.15)
-        self.MAX_FINGER_SPACING = obj_size * 2.5
+        if env is not None:
+            self.robot = env.scene["robot"]
+            self.obj = env.scene["object"]
+            self.device = env.device
+            self.env_ids = torch.tensor([0], device=self.device, dtype=torch.long)
+            self.num_dof = self.robot.data.joint_pos.shape[-1]
+            self.q_low = self.robot.data.soft_joint_pos_limits[0, :, 0].clone()
+            self.q_high = self.robot.data.soft_joint_pos_limits[0, :, 1].clone()
+            self.q_mid = (self.q_low + self.q_high) / 2.0
+            self.q_mid[:2] = 0.0  # wrist fixed
+            self.q_range = self.q_high - self.q_low
+            self.finger_body_ids = _resolve_finger_body_ids(self.robot)
 
     def sample(self) -> GraspSet:
-        print(f"[HeuristicSampler] Sampling {self.num_grasps} valid (q, p) seeds on '{self.object_name}'")
+        """Generate seeds via pre-shape centered joint sampling + FK validation."""
+        print(f"[HeuristicSampler] Sampling {self.num_grasps} seeds on '{self.object_name}' "
+              f"(noise_std={self.noise_std}, contact_thresh={self.contact_threshold}m, "
+              f"min_contact={self.min_contact_fingers}/{self.num_fingers})")
 
-        # 1. Surface points
-        points, face_idx = trimesh.sample.sample_surface(self.mesh, self.num_candidates)
-        normals = self.mesh.face_normals[face_idx]
+        if self.env is None:
+            print("[HeuristicSampler] WARNING: no env, returning empty set")
+            return GraspSet(object_name=self.object_name)
 
+        obj_pos_w = self._setup_object()
         grasp_set = GraspSet(object_name=self.object_name)
-        attempts = 0
-        max_attempts = self.num_grasps * 100  # IK and NFO rejection needs higher budget
 
-        while len(grasp_set) < self.num_grasps and attempts < max_attempts:
-            attempts += 1
-            
-            # Step 1: Geometric Sampling (Find opposing points with good spacing)
-            geom_result = self._sample_finger_assignment(points, normals)
-            if geom_result is None:
-                continue
-            pts, nrm = geom_result
+        for attempt in range(self.num_candidates):
+            if len(grasp_set) >= self.num_grasps:
+                break
 
-            # Step 2: Grasp Analysis (Algorithm 4 - Net Force Optimization)
-            if self.nfo is not None:
-                # evaluate() should return a score based on ||Σ f_i n_i||^2 optimization
-                quality = self.nfo.evaluate(Grasp(
-                    fingertip_positions=pts.astype(np.float32),
-                    contact_normals=nrm.astype(np.float32),
-                ))
-                if quality < self.nfo.min_quality:
-                    continue  # Rejected by NFO
-            else:
-                quality = 1.0  # Bypass if no NFO provided
+            q = self._sample_preshape()
+            grasp = self._evaluate(q, obj_pos_w)
+            if grasp is not None:
+                grasp_set.add(grasp)
+                if len(grasp_set) % 10 == 0:
+                    print(f"    seeds: {len(grasp_set)} (attempt {attempt + 1})")
 
-            # Step 3: Random Pose in Hand Frame
-            obj_pos_hand = self._sample_object_pose_in_hand(pts)
-            obj_quat_hand = self._sample_random_quaternion()
-
-            # Step 4: Assign (Inverse Kinematics to find 'q')
-            joint_angles = self._assign_ik(pts, obj_pos_hand, obj_quat_hand)
-            if joint_angles is None:
-                continue  # IK failed to converge
-
-            # Step 5: Collision Check (Ensure hand doesn't penetrate object mesh)
-            if not self._check_collision(joint_angles, obj_pos_hand, obj_quat_hand):
-                continue  # Rejected due to penetration
-
-            # Fully Valid Grasp Tuple (q, p) secured!
-            grasp_set.add(Grasp(
-                fingertip_positions=pts.astype(np.float32),
-                contact_normals=nrm.astype(np.float32),
-                quality=quality,
-                object_name=self.object_name,
-                object_scale=self.object_scale,
-                joint_angles=joint_angles.astype(np.float32),
-                object_pos_hand=obj_pos_hand.astype(np.float32),
-                object_quat_hand=obj_quat_hand.astype(np.float32),
-                object_pose_frame="hand_root"
-            ))
-
-        print(f"[HeuristicSampler] Generated {len(grasp_set)} valid grasps ({attempts} attempts)")
+        print(f"[HeuristicSampler] {len(grasp_set)} seeds from {min(attempt+1, self.num_candidates)} attempts")
         return grasp_set
 
-    # ------------------------------------------------------------------
-    # Core Logic Implementations
-    # ------------------------------------------------------------------
+    def _setup_object(self) -> torch.Tensor:
+        """Place object at fingertip centroid of midpoint pose."""
+        self._set_joints(self.q_mid)
+        ft_world = self.robot.data.body_pos_w[self.env_ids][:, self.ft_ids, :]
+        obj_pos = ft_world.mean(dim=1)  # (1, 3)
 
-    def _sample_finger_assignment(self, points: np.ndarray, normals: np.ndarray) -> Optional[Tuple[np.ndarray, np.ndarray]]:
-        """Returns valid (points, normals) or None based purely on geometry."""
-        n_pts = len(points)
-        selected_idx = []
-        available = np.ones(n_pts, dtype=bool)
+        obj_state = self.obj.data.default_root_state[self.env_ids].clone()
+        obj_state[:, :3] = obj_pos
+        obj_state[:, 3:7] = torch.tensor([[1, 0, 0, 0]], device=self.device, dtype=torch.float32)
+        obj_state[:, 7:] = 0.0
+        self.obj.write_root_state_to_sim(obj_state, env_ids=self.env_ids)
+        self.obj.update(0.0)
+        print(f"    Object at {obj_pos[0].tolist()}")
+        return obj_pos[0]  # (3,)
 
-        for _ in range(self.num_fingers):
-            candidates = np.where(available)[0]
-            if len(candidates) == 0: return None
-            chosen = candidates[self.rng.integers(0, len(candidates))]
-            selected_idx.append(chosen)
+    def _set_joints(self, q: torch.Tensor):
+        q_2d = q.unsqueeze(0) if q.ndim == 1 else q
+        self.robot.write_joint_state_to_sim(
+            q_2d, torch.zeros_like(q_2d), env_ids=self.env_ids,
+        )
+        self.robot.set_joint_position_target(q_2d, env_ids=self.env_ids)
+        self.robot.update(0.0)
 
-            dists = np.linalg.norm(points - points[chosen], axis=-1)
-            available &= (dists >= self.MIN_FINGER_SPACING)
+    def _sample_preshape(self) -> torch.Tensor:
+        """Sample joints centered on midpoint with moderate noise."""
+        noise = torch.randn(self.num_dof, device=self.device) * self.noise_std
+        noise[:2] = 0.0  # wrist fixed
+        q = self.q_mid + noise * self.q_range
+        return torch.clamp(q, self.q_low, self.q_high)
 
-        pts, nrm = points[selected_idx], normals[selected_idx]
+    def _evaluate(self, q: torch.Tensor, obj_pos_w: torch.Tensor) -> Optional[Grasp]:
+        """FK + penetration check + partial contact + NFO."""
+        self._set_joints(q)
 
-        max_dist = np.linalg.norm(pts[:, None] - pts[None, :], axis=-1).max()
-        if max_dist > self.MAX_FINGER_SPACING * 3: return None
+        # Penetration check
+        fl_world = self.robot.data.body_pos_w[0, self.finger_body_ids, :]
+        fl_obj = (fl_world - obj_pos_w).cpu().numpy()
+        fl_closest, fl_dists, fl_face = trimesh.proximity.closest_point(self.mesh, fl_obj)
+        to_pt = fl_obj - fl_closest
+        fl_normals = self.mesh.face_normals[fl_face]
+        sign = np.sum(to_pt * fl_normals, axis=-1)
+        penetration = np.where(sign < 0, fl_dists, 0.0)
+        if np.any(penetration > self.penetration_margin):
+            return None
 
-        n_dot = nrm @ nrm.T
-        pair_dots = n_dot[np.triu_indices(self.num_fingers, k=1)]
-        if not np.any(pair_dots < -self.PALM_NORMAL_THRESH): return None
-        if pair_dots.mean() > 0.1: return None
+        # Partial contact check: at least min_contact_fingers within threshold
+        ft_world = self.robot.data.body_pos_w[0, self.ft_ids, :].clone()
+        ft_obj = (ft_world - obj_pos_w).cpu().numpy()
+        closest, dists, face_idx = trimesh.proximity.closest_point(self.mesh, ft_obj)
+        in_contact = dists <= self.contact_threshold
+        if int(in_contact.sum()) < self.min_contact_fingers:
+            return None
 
-        centroid = pts.mean(axis=0)
-        dirs = pts - centroid
-        dirs /= (np.linalg.norm(dirs, axis=-1, keepdims=True) + 1e-8)
-        thumb_idx = int(np.argmin((dirs * nrm).sum(axis=-1)))
+        # NFO on contacting fingers only
+        normals = self.mesh.face_normals[face_idx].astype(np.float32)
+        contact_pts = closest[in_contact].astype(np.float32)
+        contact_nrm = normals[in_contact]
+        if self.nfo is not None and len(contact_pts) >= 2:
+            quality = self.nfo.evaluate(Grasp(
+                fingertip_positions=contact_pts,
+                contact_normals=contact_nrm,
+            ))
+            if quality < self.nfo.min_quality:
+                return None
+        else:
+            quality = 0.0
 
-        order = [i for i in range(self.num_fingers) if i != thumb_idx] + [thumb_idx]
-        return pts[order], nrm[order]
+        # Build grasp with per-grasp object pose
+        grasp_obj_pos_w = ft_world.mean(dim=0)
+        pos_hand, quat_hand = _compute_obj_pose_hand(self.robot, grasp_obj_pos_w, self.device)
 
-    def _assign_ik(self, pts_obj: np.ndarray, pos_hand: np.ndarray, quat_hand: np.ndarray) -> Optional[np.ndarray]:
-        """
-        Algorithm 3 'Assign': Translates target points to joint angles (q).
-        Requires self.env (Isaac Sim) to compute differential IK.
-        """
-        if self.env is None:
-            # Fallback for testing without simulator: return dummy joints
-            return np.zeros(16, dtype=np.float32)
+        grasp_centroid = ft_obj.mean(axis=0)
+        fp_local = (closest - grasp_centroid).astype(np.float32)
 
-        # TODO: Implement Isaac Sim IK call here.
-        # 1. Place object in world at a safe z-height.
-        # 2. Compute wrist pose using 'pos_hand' and 'quat_hand'.
-        # 3. Transform 'pts_obj' to world frame.
-        # 4. Run `refine_hand_to_start_grasp` or equivalent IK solver.
-        # 5. Measure tip error. If error > threshold, return None.
-        # 6. Return robot.data.joint_pos.
-        
-        # Pseudo-code placeholder:
-        # joint_pos, error = run_ik_solver(self.env, pts_obj, pos_hand, quat_hand)
-        # if error > 0.01: return None
-        # return joint_pos
-        pass
-
-    def _check_collision(self, joint_angles: np.ndarray, pos_hand: np.ndarray, quat_hand: np.ndarray) -> bool:
-        """
-        Algorithm 3 'NoCollision': Ensures the computed 'q' doesn't cause penetration.
-        """
-        if self.env is None:
-            return True # Fallback
-
-        # TODO: Implement Isaac Sim collision check.
-        # Read contact forces from the physics engine after setting the joint angles.
-        # If massive contact forces or deep penetrations are detected -> return False.
-        return True
-
-    def _sample_object_pose_in_hand(self, points_obj: np.ndarray) -> np.ndarray:
-        centroid = points_obj.mean(axis=0)
-        offset = self.rng.normal(0.0, self.MIN_FINGER_SPACING * 0.5, size=3)
-        return centroid + offset
-
-    def _sample_random_quaternion(self) -> np.ndarray:
-        q = self.rng.normal(size=4)
-        q /= np.linalg.norm(q) + 1e-8
-        return q if q[0] >= 0.0 else -q
+        return Grasp(
+            fingertip_positions=fp_local,
+            contact_normals=normals,
+            quality=quality,
+            object_name=self.object_name,
+            object_scale=self.object_scale,
+            joint_angles=q.cpu().numpy().copy(),
+            object_pos_hand=pos_hand,
+            object_quat_hand=quat_hand,
+            object_pose_frame="hand_root",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -354,7 +385,8 @@ class GraspRRTExpander:
         ft_ids: list,
         rrt_steps: int = 300,
         joint_noise_std: float = 0.1,
-        contact_threshold: float = 0.015,
+        contact_threshold: float = 0.02,
+        min_contact_fingers: int = 4,
         penetration_margin: float = 0.008,
         delta_max: float = 0.5,
         max_attempts_per_step: int = 50,
@@ -372,37 +404,15 @@ class GraspRRTExpander:
         self.rrt_steps = rrt_steps
         self.joint_noise_std = joint_noise_std
         self.contact_threshold = contact_threshold
+        self.min_contact_fingers = min_contact_fingers
         self.penetration_margin = penetration_margin
         self.delta_max = delta_max
         self.max_attempts_per_step = max_attempts_per_step
         self.rng = np.random.default_rng(seed)
 
-        self.finger_body_ids = self._resolve_finger_body_ids()
+        self.finger_body_ids = _resolve_finger_body_ids(self.robot)
         self.q_low = self.robot.data.soft_joint_pos_limits[0, :, 0].clone()
         self.q_high = self.robot.data.soft_joint_pos_limits[0, :, 1].clone()
-
-    def _resolve_finger_body_ids(self) -> list:
-        _LINKS = [
-            "robot0_ffknuckle", "robot0_ffproximal", "robot0_ffmiddle", "robot0_ffdistal",
-            "robot0_mfknuckle", "robot0_mfproximal", "robot0_mfmiddle", "robot0_mfdistal",
-            "robot0_rfknuckle", "robot0_rfproximal", "robot0_rfmiddle", "robot0_rfdistal",
-            "robot0_lfmetacarpal", "robot0_lfknuckle", "robot0_lfproximal",
-            "robot0_lfmiddle", "robot0_lfdistal",
-            "robot0_thbase", "robot0_thproximal", "robot0_thhub",
-            "robot0_thmiddle", "robot0_thdistal",
-        ]
-        ids = []
-        for name in _LINKS:
-            try:
-                found = self.robot.find_bodies(name)[0]
-                if len(found) > 0:
-                    ids.append(int(found[0]))
-            except Exception:
-                pass
-        if not ids:
-            num_bodies = self.robot.data.body_pos_w.shape[1]
-            ids = list(range(2, num_bodies))
-        return ids
 
     def expand(self, seed_set: GraspSet) -> "GraspGraph":
         """Expand seeds via joint-space RRT."""
@@ -478,45 +488,42 @@ class GraspRRTExpander:
         if np.any(penetration > self.penetration_margin):
             return None
 
-        # Surface proximity
+        # Partial contact check
         ft_world = self.robot.data.body_pos_w[0, self.ft_ids, :].clone()
         ft_obj = (ft_world - obj_pos_w).cpu().numpy()
         closest, dists, face_idx = trimesh.proximity.closest_point(self.mesh, ft_obj)
-        if np.any(dists > self.contact_threshold):
+        in_contact = dists <= self.contact_threshold
+        if int(in_contact.sum()) < self.min_contact_fingers:
             return None
 
-        # NFO
+        # NFO on contacting fingers
         normals = self.mesh.face_normals[face_idx].astype(np.float32)
-        test_grasp = Grasp(
-            fingertip_positions=closest.astype(np.float32),
-            contact_normals=normals,
-        )
-        quality = self.nfo.evaluate(test_grasp)
-        if quality < self.nfo.min_quality:
-            return None
+        contact_pts = closest[in_contact].astype(np.float32)
+        contact_nrm = normals[in_contact]
+        if self.nfo is not None and len(contact_pts) >= 2:
+            quality = self.nfo.evaluate(Grasp(
+                fingertip_positions=contact_pts,
+                contact_normals=contact_nrm,
+            ))
+            if quality < self.nfo.min_quality:
+                return None
+        else:
+            quality = 0.0
 
         # Per-grasp object pose
-        from isaaclab.utils.math import quat_apply_inverse
-        from envs.mdp.math_utils import quat_multiply, quat_conjugate
+        grasp_obj_pos_w = ft_world.mean(dim=0)
+        pos_hand, quat_hand = _compute_obj_pose_hand(self.robot, grasp_obj_pos_w, self.device)
 
         grasp_centroid = ft_obj.mean(axis=0)
         fp_local = (closest - grasp_centroid).astype(np.float32)
-        grasp_obj_pos_w = ft_world.mean(dim=0)
-
-        rp = self.robot.data.root_pos_w[0]
-        rq = self.robot.data.root_quat_w[0]
-        rel = grasp_obj_pos_w - rp
-        pos_hand = quat_apply_inverse(rq.unsqueeze(0), rel.unsqueeze(0))[0]
-        obj_quat_w = torch.tensor([[1, 0, 0, 0]], device=self.device, dtype=torch.float32)
-        quat_hand = quat_multiply(quat_conjugate(rq.unsqueeze(0)), obj_quat_w)[0]
 
         return Grasp(
             fingertip_positions=fp_local,
             contact_normals=normals,
             quality=quality,
             joint_angles=q.cpu().numpy().copy(),
-            object_pos_hand=pos_hand.cpu().numpy().copy(),
-            object_quat_hand=quat_hand.cpu().numpy().copy(),
+            object_pos_hand=pos_hand,
+            object_quat_hand=quat_hand,
             object_pose_frame="hand_root",
         )
 
