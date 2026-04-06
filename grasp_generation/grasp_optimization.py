@@ -595,13 +595,14 @@ class GraspOptimizer:
             _, _, face_idx = trimesh.proximity.closest_point(self.mesh, tips)
             normals = self.mesh.face_normals[face_idx].astype(np.float32)
 
-            # Object pose in hand frame: R^T @ (0 - t) = -R^T @ t
-            obj_pos_hand = (-R.T @ t).astype(np.float32)
-            obj_quat_scipy = R_scipy.from_matrix(R.T).as_quat()  # (x,y,z,w)
-            obj_quat_hand = np.array([
-                obj_quat_scipy[3], obj_quat_scipy[0],
-                obj_quat_scipy[1], obj_quat_scipy[2],
-            ], dtype=np.float32)
+            # Object pose in hand frame — rotation-invariant via fingertip centroid.
+            # tips are in world/object frame, hand at (t, R).
+            # Fingertip positions in hand local frame: R^T @ (tips - t)
+            tips_hand = (R.T @ (tips - t).T).T  # (5, 3)
+            obj_pos_hand = tips_hand.mean(axis=0).astype(np.float32)
+            # Object has identity orientation in world → identity in hand frame
+            # (Isaac resets wrist at identity, then palm-up rotates everything together)
+            obj_quat_hand = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
 
             grasps.append(Grasp(
                 fingertip_positions=tips,
