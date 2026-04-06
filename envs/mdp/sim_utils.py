@@ -6,6 +6,7 @@ Shared infrastructure for RL reset (events.py) and graph validation scripts.
 from __future__ import annotations
 
 import math
+import os
 from typing import Optional, Tuple
 
 import torch
@@ -523,6 +524,8 @@ def refine_hand_to_start_grasp(
     ]
     num_fingers = min(len(ft_ids), len(_FINGER_JOINT_IDS))
 
+    _debug_ik = bool(os.environ.get("DEBUG_IK", ""))
+
     for _iter in range(iterations):
         # Kinematics-only update (no physics step)
         robot.write_data_to_sim()
@@ -541,12 +544,21 @@ def refine_hand_to_start_grasp(
         )
         current_world = robot.data.body_pos_w[env_ids][:, ft_ids, :]
         pos_error = target_world - current_world   # (n, F, 3)
-        mean_err = torch.norm(pos_error, dim=-1).mean(dim=-1)
+        per_finger_err = torch.norm(pos_error, dim=-1)  # (n, F)
+        mean_err = per_finger_err.mean(dim=-1)
+        if _debug_ik and _iter % 10 == 0:
+            print(f"    [IK iter {_iter:3d}] mean_err={float(mean_err[0]):.4f}m  "
+                  f"per_finger={[f'{float(e):.4f}' for e in per_finger_err[0]]}")
         if torch.all(mean_err <= pos_threshold):
+            if _debug_ik:
+                print(f"    [IK] Converged at iter {_iter}")
             break
 
-        # Full Jacobian from PhysX: (n, num_bodies, 6, num_joints)
+        # Full Jacobian from PhysX: (n, num_bodies, 6, num_joints+base_dofs)
         full_jac = robot.root_physx_view.get_jacobians()[env_ids]
+        if _debug_ik and _iter == 0:
+            print(f"    [IK] Jacobian shape={tuple(full_jac.shape)}, "
+                  f"jac_col_offset={jac_col_offset}")
 
         # Accumulate per-joint deltas from all fingers
         joint_pos = robot.data.joint_pos[env_ids].clone()

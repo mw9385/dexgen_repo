@@ -105,6 +105,22 @@ def main():
 
     ft_ids = get_fingertip_body_ids_from_env(robot, env)
 
+    # ── Debug: verify Jacobian setup ──────────────────────────────────
+    jac = robot.root_physx_view.get_jacobians()
+    print(f"[DEBUG] robot.is_fixed_base = {robot.is_fixed_base}")
+    print(f"[DEBUG] Jacobian shape = {tuple(jac.shape)}")
+    print(f"[DEBUG] joint_pos shape = {tuple(robot.data.joint_pos.shape)}")
+    print(f"[DEBUG] num_bodies = {robot.data.body_pos_w.shape[1]}")
+    print(f"[DEBUG] fingertip body ids = {ft_ids}")
+    jac_col_offset = 0 if robot.is_fixed_base else 6
+    print(f"[DEBUG] jac_col_offset = {jac_col_offset}")
+    # Sample: print first grasp fingertip positions
+    g0 = subgraph.grasp_set[0] if len(subgraph.grasp_set) > 0 else None
+    if g0 is not None:
+        print(f"[DEBUG] Sample grasp fingertip_positions shape = {g0.fingertip_positions.shape}")
+        print(f"[DEBUG] Sample grasp fingertip_positions:\n{g0.fingertip_positions}")
+    # ──────────────────────────────────────────────────────────────────
+
     print(f"[SolveGraph] Objects: {graph.object_names}")
     print(f"[SolveGraph] error_threshold={args.error_threshold}m, "
           f"vel_threshold={args.vel_threshold}m/s, settle_steps={args.settle_steps}")
