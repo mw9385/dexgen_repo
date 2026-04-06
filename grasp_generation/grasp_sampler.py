@@ -75,6 +75,10 @@ class GraspSet:
     def __getitem__(self, idx): return self.grasps[idx]
     def add(self, grasp: Grasp): self.grasps.append(grasp)
 
+    def as_array(self) -> np.ndarray:
+        """Stack all fingertip positions into (N, F*3) array."""
+        return np.stack([g.fingertip_positions.flatten() for g in self.grasps])
+
     def filter_by_quality(self, min_quality: float) -> "GraspSet":
         filtered = [g for g in self.grasps if g.quality >= min_quality]
         return GraspSet(grasps=filtered, object_name=self.object_name)
