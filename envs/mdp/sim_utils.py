@@ -241,28 +241,23 @@ def place_object_fixed(
     env_ids: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
-    Place the object at a fixed position in front of the palm.
+    Place the object above the palm center.
 
-    Uses the palm normal direction so it works regardless of
-    the hand's default orientation.
+    Reads the actual palm body position from the simulator and places
+    the object slightly above it. No heuristic offsets.
 
     Returns (obj_pos_w, obj_quat_w) for later frame transforms.
     """
     robot = env.scene["robot"]
     obj = env.scene["object"]
-    n = len(env_ids)
 
-    # Default wrist world position and orientation
-    wrist_default = (
-        robot.data.default_root_state[env_ids, :3].clone()
-        + env.scene.env_origins[env_ids]
-    )
-    wrist_quat = robot.data.default_root_state[env_ids, 3:7].clone()
+    # Get actual palm position from sim
+    palm_body_id = get_palm_body_id_from_env(robot, env)
+    palm_pos_w = robot.data.body_pos_w[env_ids, palm_body_id, :].clone()  # (n, 3)
 
-    # Place object along palm normal direction (in front of palm)
-    palm_normal_local = get_local_palm_normal(robot, env)  # (3,)
-    palm_normal_world = quat_apply(wrist_quat, palm_normal_local.unsqueeze(0).expand(n, 3))
-    obj_pos = wrist_default + palm_normal_world * 0.12  # ~12cm in front of palm
+    # Place object slightly above palm center (~3cm)
+    obj_pos = palm_pos_w.clone()
+    obj_pos[:, 2] += 0.03
 
     obj_quat = torch.zeros(len(env_ids), 4, device=env.device)
     obj_quat[:, 0] = 1.0    # identity quaternion
@@ -279,37 +274,21 @@ def place_object_fixed(
 def compute_wrist_from_fingertips(
     env,
     env_ids: torch.Tensor,
-    target_world: torch.Tensor,   # (n, F, 3)
+    target_world: torch.Tensor,   # (n, F, 3)  — unused, kept for API compat
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
-    Compute wrist pose so the hand is roughly positioned to reach
-    the target fingertip world positions.
+    Return the default wrist pose. No heuristic computation.
 
-    Strategy:
-      1. Place wrist at fingertip centroid
-      2. Orient wrist so palm faces toward the centroid (palm-up alignment)
-      3. Offset wrist along the negative palm normal (away from fingertips)
-         so fingers can naturally extend toward the targets.
+    The hand is already in a reasonable default pose (palm up).
+    IK refinement will adjust finger joints to reach the targets.
     """
     robot = env.scene["robot"]
-    n = len(env_ids)
 
-    centroid = target_world.mean(dim=1)   # (n, 3)
-
-    # Start from default orientation
-    default_quat = robot.data.default_root_state[env_ids, 3:7].clone()
-
-    # Compute palm normal in world frame using default orientation
-    palm_normal_local = get_local_palm_normal(robot, env)  # (3,)
-    palm_normal_world = quat_apply(default_quat, palm_normal_local.unsqueeze(0).expand(n, 3))
-
-    # Wrist = centroid offset OPPOSITE to palm normal direction
-    # (palm points toward object, wrist is behind the palm)
-    wrist_pos = centroid - palm_normal_world * 0.10  # ~10cm behind palm
-
-    # Keep default orientation (no palm-up rotation here — that happens
-    # later in apply_palm_up_transform during the common reset path)
-    wrist_quat = default_quat
+    wrist_pos = (
+        robot.data.default_root_state[env_ids, :3].clone()
+        + env.scene.env_origins[env_ids]
+    )
+    wrist_quat = robot.data.default_root_state[env_ids, 3:7].clone()
 
     return wrist_pos, wrist_quat
 
