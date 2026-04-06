@@ -213,7 +213,10 @@ class HeuristicSampler:
             # Step 2: Grasp Analysis (Algorithm 4 - Net Force Optimization)
             if self.nfo is not None:
                 # evaluate() should return a score based on ||Σ f_i n_i||^2 optimization
-                quality = self.nfo.evaluate(pts, nrm)
+                quality = self.nfo.evaluate(Grasp(
+                    fingertip_positions=pts.astype(np.float32),
+                    contact_normals=nrm.astype(np.float32),
+                ))
                 if quality < self.nfo.min_quality:
                     continue  # Rejected by NFO
             else:
