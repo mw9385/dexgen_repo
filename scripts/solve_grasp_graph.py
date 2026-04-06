@@ -238,8 +238,29 @@ def main():
         print(f"[SolveGraph] {obj_name}: {n_solved}/{n_grasps} solved "
               f"({n_grasps - n_solved} rejected, {len(new_edges)} edges)")
 
-    print(f"\n[SolveGraph] Total: {total_solved}/{total_before} grasps solved "
+    # ── Final summary ──────────────────────────────────────────────────
+    print("\n" + "=" * 60)
+    print(f"  SOLVE SUMMARY")
+    print("=" * 60)
+    for obj_name in graph.object_names:
+        sg = graph.graphs[obj_name]
+        n = len(sg.grasp_set)
+        e = len(sg.edges)
+        print(f"  {obj_name:30s}  {n:4d} grasps  {e:4d} edges")
+    print("-" * 60)
+    print(f"  {'TOTAL':30s}  {total_solved:4d}/{total_before} solved "
           f"({total_before - total_solved} rejected)")
+    print("=" * 60)
+
+    if total_solved == 0:
+        print("\n[WARNING] 0 grasps solved! Check:")
+        print("  - Object size may be too small for the hand")
+        print("  - Try relaxing --error-threshold (current: "
+              f"{args.error_threshold}m)")
+        print("  - Try increasing --settle-steps (current: "
+              f"{args.settle_steps})")
+        print("  - Ensure grasp_graph.pkl has grasps "
+              "(run scripts/run_grasp_generation.py first)")
 
     # Save
     output_path = Path(args.output)
