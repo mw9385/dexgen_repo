@@ -434,9 +434,24 @@ class JointSpaceRRTGenerator:
             q = self._sample_from_preshape()
             self._set_joints(q)
 
-            # Skip penetration check for seeds — curled fingers around the
-            # object naturally have middle links inside the mesh volume.
-            # Penetration is checked during RRT expansion where perturbations are small.
+            # Penetration check with relaxed margin for seeds:
+            # curled fingers naturally have middle links near/inside the surface.
+            # Only reject deep through-penetration (> 30% of object size).
+            seed_pen_margin = self.object_size * 0.30
+            if self.cfg.use_penetration_check:
+                link_world = self.robot.data.body_pos_w[0, self.active_link_body_ids, :]
+                link_obj = self._world_to_object_frame(link_world)
+                try:
+                    closest_l, dists_l, face_l = trimesh.proximity.closest_point(self.mesh, link_obj)
+                    to_pt = link_obj - closest_l
+                    normals_l = self.mesh.face_normals[face_l]
+                    sign = np.sum(to_pt * normals_l, axis=-1)
+                    pen_depth = np.where(sign < 0, dists_l, 0.0)
+                    if np.any(pen_depth > seed_pen_margin):
+                        reject_pen += 1
+                        continue
+                except Exception:
+                    pass
 
             ft_world = self._get_fingertip_world()
             ft_obj = self._world_to_object_frame(ft_world)
