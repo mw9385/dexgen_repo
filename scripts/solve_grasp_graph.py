@@ -256,6 +256,14 @@ def main():
             max_err = float(tip_err.max().item())
             ik_errors.append(mean_err)
 
+            # Progress every 50 grasps
+            if (idx + 1) % 50 == 0:
+                print(
+                    f"  [{idx + 1}/{n_grasps}] solved={len(solved_indices)} "
+                    f"ik_reject={reject_ik} phys_reject={reject_physics} "
+                    f"last_err={mean_err:.4f}m"
+                )
+
             if mean_err > args.error_threshold:
                 reject_ik += 1
                 continue
@@ -310,12 +318,6 @@ def main():
             grasp.reset_contact_error_max = max_err
 
             solved_indices.append(idx)
-
-            if (idx + 1) % 50 == 0 or idx == n_grasps - 1:
-                print(
-                    f"  [{idx + 1}/{n_grasps}] solved: {len(solved_indices)} "
-                    f"(last err: {mean_err:.4f}m)"
-                )
 
         # Per-object rejection breakdown
         print(f"\n  Rejection breakdown for {obj_name}:")
