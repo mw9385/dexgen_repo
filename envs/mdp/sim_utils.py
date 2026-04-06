@@ -503,6 +503,9 @@ def refine_hand_to_start_grasp(
     pos_threshold = float(cfg.get("pos_threshold", 0.005))
     null_space_gain = float(cfg.get("null_space_gain", 0.1))
 
+    # Floating-base Jacobian offset: PhysX prepends 6 columns for base DOFs
+    jac_col_offset = 0 if robot.is_fixed_base else 6
+
     joint_lower = robot.data.soft_joint_pos_limits[env_ids, :, 0]
     joint_upper = robot.data.soft_joint_pos_limits[env_ids, :, 1]
     q_rest = (joint_lower + joint_upper) / 2.0
@@ -552,13 +555,13 @@ def refine_hand_to_start_grasp(
         for fi in range(num_fingers):
             finger_joint_ids = _FINGER_JOINT_IDS[fi]
             fj = torch.tensor(finger_joint_ids, device=device, dtype=torch.long)
+            fj_jac = fj + jac_col_offset  # Jacobian column indices (offset for floating base)
             ndof = len(finger_joint_ids)
 
             # Extract sub-Jacobian for this finger: (n, 3, ndof)
-            # jac_body_ids[fi] = body index for this fingertip
-            # :3 = position rows only (not orientation)
-            # fj = column indices for this finger's joints
-            sub_jac = full_jac[:, jac_body_ids[fi], :3, :][:, :, fj]  # (n, 3, ndof)
+            # fj_jac = column indices in Jacobian (accounts for base DOFs)
+            # fj = joint indices in joint_pos (no offset)
+            sub_jac = full_jac[:, jac_body_ids[fi], :3, :][:, :, fj_jac]  # (n, 3, ndof)
 
             # Fingertip error for this finger: (n, 3, 1)
             err = pos_error[:, fi, :].unsqueeze(-1)  # (n, 3, 1)
