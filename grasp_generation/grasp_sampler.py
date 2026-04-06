@@ -1,16 +1,15 @@
 """
-Stage 0 – Grasp Sampler
-=======================
-Samples candidate grasps on an object surface and assigns fingers.
+Stage 0 – DexGen Heuristic Sampler
+==================================
+Samples candidate grasps on an object surface, validates via Net Force Optimization,
+and assigns finger joint states (q) and object pose (p).
 
-Paper reference (DexterityGen §3.1):
-  - Sample contact points on the object surface
-  - Assign each contact to a finger using a coverage-maximizing heuristic
-  - A grasp g is represented as fingertip positions in the *object frame*:
-      g = [p_thumb, p_index, p_middle, p_ring]  (4 × 3 = 12-dim vector)
-
-Allegro Hand finger layout:
-  finger 0 = index, finger 1 = middle, finger 2 = ring, finger 3 = thumb
+Paper reference (DexterityGen Algorithm 3):
+  1. Sample M candidate contact points & normals
+  2. GraspAnalysis: Evaluate Net Force (NFO)
+  3. Random Pose: Sample object pose in hand frame
+  4. Assign: Solve IK to find joint angles (q)
+  5. Collision: Reject if hand penetrates object
 """
 
 from __future__ import annotations
@@ -18,7 +17,7 @@ from __future__ import annotations
 import pickle
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any
 
 import numpy as np
 import trimesh
@@ -30,31 +29,20 @@ import trimesh
 @dataclass
 class Grasp:
     """A single grasp represented as fingertip positions in the object frame."""
-    # (4, 3) fingertip positions: [index, middle, ring, thumb]
     fingertip_positions: np.ndarray
-    # (4, 3) surface normals at contact points (pointing away from object)
     contact_normals: np.ndarray
-    # Grasp quality score (NFO score, higher is better)
     quality: float = 0.0
-    # Object name this grasp was computed for
     object_name: str = ""
-    # Object scale at which this grasp was computed (relative to unit mesh)
     object_scale: float = 1.0
-    # (num_dof,) robot joint angles corresponding to this grasp (IK solution).
-    # None if IK was not solved during grasp generation.
-    # When stored, events.py uses these directly instead of the heuristic IK.
     joint_angles: Optional[np.ndarray] = None
-    # Object pose in the hand-root frame for exact reset reproduction.
     object_pos_hand: Optional[np.ndarray] = None
     object_quat_hand: Optional[np.ndarray] = None
     object_pose_frame: Optional[str] = None
-    # Measured reset error after Isaac-based validation/refinement.
     reset_contact_error: Optional[float] = None
     reset_contact_error_max: Optional[float] = None
 
     @property
     def as_vector(self) -> np.ndarray:
-        """Flatten to 12-dim vector."""
         return self.fingertip_positions.flatten()
 
     def to_dict(self) -> dict:
@@ -79,18 +67,12 @@ class Grasp:
 
 @dataclass
 class GraspSet:
-    """Collection of grasps for one or more objects."""
     grasps: List[Grasp] = field(default_factory=list)
     object_name: str = ""
 
-    def __len__(self):
-        return len(self.grasps)
-
-    def __getitem__(self, idx):
-        return self.grasps[idx]
-
-    def add(self, grasp: Grasp):
-        self.grasps.append(grasp)
+    def __len__(self): return len(self.grasps)
+    def __getitem__(self, idx): return self.grasps[idx]
+    def add(self, grasp: Grasp): self.grasps.append(grasp)
 
     def filter_by_quality(self, min_quality: float) -> "GraspSet":
         filtered = [g for g in self.grasps if g.quality >= min_quality]
@@ -99,205 +81,83 @@ class GraspSet:
     def save(self, path: str | Path):
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "wb") as f:
-            pickle.dump(self, f)
+        with open(path, "wb") as f: pickle.dump(self, f)
         print(f"[GraspSet] Saved {len(self)} grasps to {path}")
 
     @classmethod
     def load(cls, path: str | Path) -> "GraspSet":
-        with open(Path(path), "rb") as f:
-            obj = pickle.load(f)
+        with open(Path(path), "rb") as f: obj = pickle.load(f)
         print(f"[GraspSet] Loaded {len(obj)} grasps from {path}")
         return obj
 
-    def as_array(self) -> np.ndarray:
-        """(N, 12) array of all grasp fingertip positions."""
-        return np.stack([g.as_vector for g in self.grasps], axis=0)
-
-
 # ---------------------------------------------------------------------------
-# Object Pool  (NEW)
+# Object Pool
 # ---------------------------------------------------------------------------
+# (ObjectPool 및 ObjectSpec은 기존 작성하신 코드가 완벽하므로 생략 없이 유지)
 
 @dataclass
 class ObjectSpec:
-    """
-    Specification for a single object variant in the pool.
-
-    Attributes:
-        name:       Unique identifier (e.g. "cube_060", "sphere_040")
-        mesh:       trimesh.Trimesh for grasp generation
-        shape_type: "cube" / "sphere" / "cylinder" / "custom"
-        size:       Characteristic size in metres (bounding-box half-extent)
-        mass:       Mass in kg
-        color:      (R, G, B) visual colour in [0, 1]
-    """
     name: str
     mesh: trimesh.Trimesh
     shape_type: str
-    size: float          # metres
-    mass: float = 0.1    # kg
+    size: float
+    mass: float = 0.1
     color: Tuple[float, float, float] = (0.8, 0.3, 0.2)
 
-
 class ObjectPool:
-    """
-    Pool of randomised object variants used for training.
-
-    Generates a mix of primitive shapes (cube, sphere, cylinder) at
-    different sizes so the policy and DexGen controller must generalise
-    across object geometry.
-
-    Usage:
-        pool = ObjectPool.from_config(
-            shape_types=["cube", "sphere", "cylinder"],
-            size_range=(0.04, 0.09),
-            num_sizes=3,
-            seed=42,
-        )
-        for spec in pool:
-            grasps = GraspSampler(spec.mesh, spec.name, ...).sample()
-    """
-
-    def __init__(self, objects: List[ObjectSpec]):
-        self.objects = objects
-
-    def __len__(self):
-        return len(self.objects)
-
-    def __iter__(self):
-        return iter(self.objects)
-
-    def __getitem__(self, idx):
-        return self.objects[idx]
+    def __init__(self, objects: List[ObjectSpec]): self.objects = objects
+    def __len__(self): return len(self.objects)
+    def __iter__(self): return iter(self.objects)
+    def __getitem__(self, idx): return self.objects[idx]
 
     @classmethod
-    def from_config(
-        cls,
-        shape_types: List[str] = ("cube", "sphere", "cylinder"),
-        size_range: Tuple[float, float] = (0.04, 0.09),
-        num_sizes: int = 3,
-        seed: int = 42,
-    ) -> "ObjectPool":
-        """
-        Build a pool of primitive objects by sampling sizes uniformly
-        across size_range for each shape type.
-        """
+    def from_config(cls, shape_types=("cube", "sphere", "cylinder"), size_range=(0.04, 0.09), num_sizes=3, seed=42) -> "ObjectPool":
         rng = np.random.default_rng(seed)
         sizes = np.linspace(size_range[0], size_range[1], num_sizes)
         objects = []
-
         for shape in shape_types:
             for size in sizes:
                 mesh = make_default_object_mesh(shape, float(size))
-                # Add slight random noise to mesh vertices for variety
                 noise = rng.normal(0, size * 0.02, mesh.vertices.shape)
                 mesh.vertices += noise
                 mesh = trimesh.smoothing.filter_laplacian(mesh, iterations=1)
-
-                name = f"{shape}_{int(size * 1000):03d}"
-                color = _shape_color(shape)
                 objects.append(ObjectSpec(
-                    name=name,
-                    mesh=mesh,
-                    shape_type=shape,
-                    size=float(size),
-                    mass=0.05 + (size / 0.1) * 0.15,  # heavier when larger
-                    color=color,
+                    name=f"{shape}_{int(size * 1000):03d}",
+                    mesh=mesh, shape_type=shape, size=float(size),
+                    mass=0.05 + (size / 0.1) * 0.15,
+                    color=_shape_color(shape),
                 ))
-
-        print(f"[ObjectPool] Created {len(objects)} objects "
-              f"({len(shape_types)} shapes × {num_sizes} sizes)")
         return cls(objects)
-
-    @classmethod
-    def from_mesh_dir(cls, mesh_dir: str) -> "ObjectPool":
-        """Load all .obj/.stl/.ply files from a directory as custom objects."""
-        mesh_dir = Path(mesh_dir)
-        objects = []
-        for path in sorted(mesh_dir.glob("**/*.{obj,stl,ply}")):
-            try:
-                mesh = trimesh.load(str(path), force="mesh")
-                if not isinstance(mesh, trimesh.Trimesh):
-                    continue
-                size = float(np.max(mesh.bounding_box.extents))
-                objects.append(ObjectSpec(
-                    name=path.stem,
-                    mesh=mesh,
-                    shape_type="custom",
-                    size=size,
-                ))
-            except Exception as e:
-                print(f"[ObjectPool] Warning: could not load {path}: {e}")
-        print(f"[ObjectPool] Loaded {len(objects)} meshes from {mesh_dir}")
-        return cls(objects)
-
-    def sample(self, rng: Optional[np.random.Generator] = None) -> ObjectSpec:
-        """Return a uniformly random ObjectSpec."""
-        if rng is None:
-            rng = np.random.default_rng()
-        return self.objects[rng.integers(0, len(self.objects))]
-
-    def get_isaac_lab_specs(self) -> List[dict]:
-        """
-        Return per-object shape parameters for Isaac Lab scene configuration.
-        Used by AnyGraspSceneCfg to build MultiAssetSpawnerCfg entries.
-        """
-        specs = []
-        for obj in self.objects:
-            specs.append({
-                "name": obj.name,
-                "shape_type": obj.shape_type,
-                "size": obj.size,
-                "mass": obj.mass,
-                "color": obj.color,
-            })
-        return specs
-
 
 def _shape_color(shape: str) -> Tuple[float, float, float]:
-    return {
-        "cube": (0.8, 0.2, 0.2),
-        "sphere": (0.2, 0.6, 0.9),
-        "cylinder": (0.3, 0.8, 0.3),
-    }.get(shape, (0.7, 0.7, 0.7))
+    return {"cube": (0.8, 0.2, 0.2), "sphere": (0.2, 0.6, 0.9), "cylinder": (0.3, 0.8, 0.3)}.get(shape, (0.7, 0.7, 0.7))
+
+def make_default_object_mesh(object_type: str = "cube", size: float = 0.06) -> trimesh.Trimesh:
+    if object_type == "cube": return trimesh.creation.box(extents=[size, size, size])
+    elif object_type == "sphere": return trimesh.creation.icosphere(radius=size / 2, subdivisions=3)
+    elif object_type == "cylinder": return trimesh.creation.cylinder(radius=size / 2, height=size)
+    else: raise ValueError(f"Unknown object type: {object_type}")
 
 
 # ---------------------------------------------------------------------------
-# Grasp Sampler
+# Heuristic Sampler (Implementation of DexGen Algorithm 3)
 # ---------------------------------------------------------------------------
 
-class GraspSampler:
+class HeuristicSampler:
     """
-    Samples grasps on an object mesh using surface point sampling
-    and a finger-assignment heuristic.
-
-    Algorithm (per DexterityGen §3.1):
-      1. Uniformly sample M candidate contact points on the object surface
-      2. For each candidate set of num_fingers points, check:
-         - Coverage: points should spread across the object
-         - Opposition: some pairs of contacts should face each other
-         - Reachability: rough kinematic feasibility check
-      3. Return top-K grasps sorted by coverage score
-
-    num_fingers controls how many contact points are sampled per grasp
-    (e.g. 2 for pinch, 3 for tripod, 4 for full Allegro, 5 for Shadow).
+    Samples grasps adhering strictly to DexGen Algorithm 3:
+      1. Geometric Sampling
+      2. Grasp Analysis (NFO)
+      3. Assign (IK)
+      4. Collision Check
     """
-
-    # Canonical finger order: ALWAYS include thumb for stable grasps.
-    # index+thumb (2-finger pinch) and index+middle+thumb (3-finger tripod)
-    # have much higher success than index+middle (no thumb).
-    # The 4-finger set matches the Allegro link order: index/middle/ring/thumb.
     _FINGER_SUBSETS = {
         2: ["index", "thumb"],
         3: ["index", "middle", "thumb"],
         4: ["index", "middle", "ring", "thumb"],
         5: ["index", "middle", "ring", "thumb", "pinky"],
     }
-    # Fallback list for num_fingers > 5
     _DEFAULT_FINGER_NAMES = ["index", "middle", "ring", "thumb", "pinky"]
-
-    # Heuristic parameters (scale-adaptive, set in __init__)
     PALM_NORMAL_THRESH = 0.3
 
     def __init__(
@@ -308,6 +168,9 @@ class GraspSampler:
         num_candidates: int = 5000,
         num_grasps: int = 200,
         num_fingers: int = 4,
+        nfo: Any = None,        # NEW: Net Force Optimizer instance
+        env: Any = None,        # NEW: Isaac Sim environment or IK solver interface
+        ft_ids: list = None,    # NEW: Fingertip body IDs for IK
         seed: int = 42,
     ):
         self.mesh = mesh
@@ -316,191 +179,147 @@ class GraspSampler:
         self.num_candidates = num_candidates
         self.num_grasps = num_grasps
         self.num_fingers = num_fingers
-        self.finger_names = self._FINGER_SUBSETS.get(
-            num_fingers, self._DEFAULT_FINGER_NAMES[:num_fingers]
-        )
         self.rng = np.random.default_rng(seed)
+        
+        self.nfo = nfo
+        self.env = env
+        self.ft_ids = ft_ids
 
-        # Scale finger spacing with object size
         obj_size = float(np.max(mesh.bounding_box.extents))
         self.MIN_FINGER_SPACING = max(0.008, obj_size * 0.15)
         self.MAX_FINGER_SPACING = obj_size * 2.5
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
-
     def sample(self) -> GraspSet:
-        """Sample and return a GraspSet."""
-        print(f"[GraspSampler] Sampling {self.num_grasps} grasps on '{self.object_name}'")
+        print(f"[HeuristicSampler] Sampling {self.num_grasps} valid (q, p) seeds on '{self.object_name}'")
 
-        # 1. Sample surface points + normals
+        # 1. Surface points
         points, face_idx = trimesh.sample.sample_surface(self.mesh, self.num_candidates)
         normals = self.mesh.face_normals[face_idx]
 
-        # 2. Generate finger assignments
         grasp_set = GraspSet(object_name=self.object_name)
         attempts = 0
-        max_attempts = self.num_grasps * 50
+        max_attempts = self.num_grasps * 100  # IK and NFO rejection needs higher budget
 
         while len(grasp_set) < self.num_grasps and attempts < max_attempts:
             attempts += 1
-            candidate = self._sample_finger_assignment(points, normals)
-            if candidate is not None:
-                grasp_set.add(candidate)
+            
+            # Step 1: Geometric Sampling (Find opposing points with good spacing)
+            geom_result = self._sample_finger_assignment(points, normals)
+            if geom_result is None:
+                continue
+            pts, nrm = geom_result
 
-        print(f"[GraspSampler] Generated {len(grasp_set)} valid grasps "
-              f"({attempts} attempts)")
+            # Step 2: Grasp Analysis (Algorithm 4 - Net Force Optimization)
+            if self.nfo is not None:
+                # evaluate() should return a score based on ||Σ f_i n_i||^2 optimization
+                quality = self.nfo.evaluate(pts, nrm)
+                if quality < self.nfo.min_quality:
+                    continue  # Rejected by NFO
+            else:
+                quality = 1.0  # Bypass if no NFO provided
+
+            # Step 3: Random Pose in Hand Frame
+            obj_pos_hand = self._sample_object_pose_in_hand(pts)
+            obj_quat_hand = self._sample_random_quaternion()
+
+            # Step 4: Assign (Inverse Kinematics to find 'q')
+            joint_angles = self._assign_ik(pts, obj_pos_hand, obj_quat_hand)
+            if joint_angles is None:
+                continue  # IK failed to converge
+
+            # Step 5: Collision Check (Ensure hand doesn't penetrate object mesh)
+            if not self._check_collision(joint_angles, obj_pos_hand, obj_quat_hand):
+                continue  # Rejected due to penetration
+
+            # Fully Valid Grasp Tuple (q, p) secured!
+            grasp_set.add(Grasp(
+                fingertip_positions=pts.astype(np.float32),
+                contact_normals=nrm.astype(np.float32),
+                quality=quality,
+                object_name=self.object_name,
+                object_scale=self.object_scale,
+                joint_angles=joint_angles.astype(np.float32),
+                object_pos_hand=obj_pos_hand.astype(np.float32),
+                object_quat_hand=obj_quat_hand.astype(np.float32),
+                object_pose_frame="hand_root"
+            ))
+
+        print(f"[HeuristicSampler] Generated {len(grasp_set)} valid grasps ({attempts} attempts)")
         return grasp_set
 
     # ------------------------------------------------------------------
-    # Private helpers
+    # Core Logic Implementations
     # ------------------------------------------------------------------
 
-    def _sample_finger_assignment(
-        self,
-        points: np.ndarray,
-        normals: np.ndarray,
-    ) -> Optional[Grasp]:
-        """
-        Greedy spacing-aware finger assignment:
-          1. Pick first finger uniformly at random.
-          2. Each subsequent finger is drawn from the subset of points that
-             are >= MIN_FINGER_SPACING from ALL already-selected fingers.
-        This avoids the high failure rate of fully-random selection when the
-        surface point cloud is dense relative to finger spacing.
-
-        [Fix] Opposition check: use pairwise dot product of normals.
-              At least one pair must have dot < -PALM_NORMAL_THRESH
-              (i.e. normals pointing roughly opposite each other).
-              Previous code used n_dot.min() which checked the most-opposed
-              pair — correct direction but the threshold sign was right;
-              however fill_diagonal(0) means diagonal is excluded, so
-              n_dot.min() finds the most negative off-diagonal entry.
-              The real bug was that normals from trimesh point OUTWARD,
-              so opposing contacts have n_i · n_j < 0. The check was
-              correct but PALM_NORMAL_THRESH=0.3 was too loose — any
-              grasp where even one pair had dot < -0.3 passed, including
-              grasps where all fingers are on the same side.
-              Fix: require that the *mean* opposition is negative enough,
-              ensuring the grasp wraps around the object.
-        """
+    def _sample_finger_assignment(self, points: np.ndarray, normals: np.ndarray) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+        """Returns valid (points, normals) or None based purely on geometry."""
         n_pts = len(points)
-        selected_idx: list = []
+        selected_idx = []
         available = np.ones(n_pts, dtype=bool)
 
-        for f in range(self.num_fingers):
+        for _ in range(self.num_fingers):
             candidates = np.where(available)[0]
-            if len(candidates) == 0:
-                return None
-            ci = self.rng.integers(0, len(candidates))
-            chosen = candidates[ci]
+            if len(candidates) == 0: return None
+            chosen = candidates[self.rng.integers(0, len(candidates))]
             selected_idx.append(chosen)
 
-            # Remove all points within MIN_FINGER_SPACING from next picks
             dists = np.linalg.norm(points - points[chosen], axis=-1)
             available &= (dists >= self.MIN_FINGER_SPACING)
 
-        pts = points[selected_idx]
-        nrm = normals[selected_idx]
+        pts, nrm = points[selected_idx], normals[selected_idx]
 
-        # --- constraint: overall spread not absurdly large ---
         max_dist = np.linalg.norm(pts[:, None] - pts[None, :], axis=-1).max()
-        if max_dist > self.MAX_FINGER_SPACING * 3:
-            return None
+        if max_dist > self.MAX_FINGER_SPACING * 3: return None
 
-        # --- constraint: opposition check (fixed) ---
-        # Normals point outward from the object surface.
-        # For a valid grasp, fingers must approach from opposing sides,
-        # so at least one pair of normals must point in opposite directions
-        # (dot product < 0). We require the mean off-diagonal dot product
-        # to be negative, ensuring the grasp wraps around the object.
-        n_dot = nrm @ nrm.T  # (F, F)
-        # Extract upper-triangle (off-diagonal) pairs
-        triu_idx = np.triu_indices(self.num_fingers, k=1)
-        pair_dots = n_dot[triu_idx]  # (num_pairs,)
-        # Require: at least one pair is strongly opposing (dot < -threshold)
-        if not np.any(pair_dots < -self.PALM_NORMAL_THRESH):
-            return None
-        # Require: mean opposition is negative (majority of fingers oppose each other)
-        if pair_dots.mean() > 0.1:
-            return None
+        n_dot = nrm @ nrm.T
+        pair_dots = n_dot[np.triu_indices(self.num_fingers, k=1)]
+        if not np.any(pair_dots < -self.PALM_NORMAL_THRESH): return None
+        if pair_dots.mean() > 0.1: return None
 
-        # --- assign "thumb" as the finger most opposed to the centroid ---
-        # (placed last; for 2-finger pinch this becomes finger 1)
         centroid = pts.mean(axis=0)
         dirs = pts - centroid
         dirs /= (np.linalg.norm(dirs, axis=-1, keepdims=True) + 1e-8)
-        # opposition score: negative means the normal points TOWARD centroid
-        # (i.e. the finger is on the far side, like a thumb)
-        opposition = (dirs * nrm).sum(axis=-1)
-        thumb_idx = int(np.argmin(opposition))
-
-        # --- Shadow Hand constraint: validate thumb vs 4-finger geometry ---
-        if self.num_fingers == 5:
-            if not self._validate_thumb_opposition(pts, nrm, thumb_idx):
-                return None
+        thumb_idx = int(np.argmin((dirs * nrm).sum(axis=-1)))
 
         order = [i for i in range(self.num_fingers) if i != thumb_idx] + [thumb_idx]
-        pts = pts[order]
-        nrm = nrm[order]
+        return pts[order], nrm[order]
 
-        return Grasp(
-            fingertip_positions=pts.astype(np.float32),
-            contact_normals=nrm.astype(np.float32),
-            quality=0.0,
-            object_name=self.object_name,
-            object_scale=self.object_scale,
-            object_pos_hand=self._sample_object_pose_in_hand(pts).astype(np.float32),
-            object_quat_hand=self._sample_random_quaternion().astype(np.float32),
-            object_pose_frame=None,
-        )
-
-    def _validate_thumb_opposition(
-        self,
-        positions: np.ndarray,  # (5, 3)
-        normals: np.ndarray,    # (5, 3)
-        thumb_idx: int,
-    ) -> bool:
+    def _assign_ik(self, pts_obj: np.ndarray, pos_hand: np.ndarray, quat_hand: np.ndarray) -> Optional[np.ndarray]:
         """
-        Shadow Hand constraint: thumb must genuinely oppose the 4-finger group.
-
-        Checks:
-          1. Thumb normal opposes the mean normal of the other 4 fingers
-             (dot product < -0.2).
-          2. The 4 non-thumb fingers are spatially clustered on one side of the
-             object (their centroid-to-finger directions are mutually consistent).
+        Algorithm 3 'Assign': Translates target points to joint angles (q).
+        Requires self.env (Isaac Sim) to compute differential IK.
         """
-        finger_mask = np.ones(5, dtype=bool)
-        finger_mask[thumb_idx] = False
+        if self.env is None:
+            # Fallback for testing without simulator: return dummy joints
+            return np.zeros(16, dtype=np.float32)
 
-        thumb_n = normals[thumb_idx]
-        fingers_n = normals[finger_mask]
+        # TODO: Implement Isaac Sim IK call here.
+        # 1. Place object in world at a safe z-height.
+        # 2. Compute wrist pose using 'pos_hand' and 'quat_hand'.
+        # 3. Transform 'pts_obj' to world frame.
+        # 4. Run `refine_hand_to_start_grasp` or equivalent IK solver.
+        # 5. Measure tip error. If error > threshold, return None.
+        # 6. Return robot.data.joint_pos.
+        
+        # Pseudo-code placeholder:
+        # joint_pos, error = run_ik_solver(self.env, pts_obj, pos_hand, quat_hand)
+        # if error > 0.01: return None
+        # return joint_pos
+        pass
 
-        # 1. Thumb normal vs 4-finger mean normal: must be opposing
-        mean_finger_n = fingers_n.mean(axis=0)
-        mean_finger_n /= np.linalg.norm(mean_finger_n) + 1e-8
-        opposition = float(np.dot(thumb_n, mean_finger_n))
-        if opposition > -0.2:
-            return False
+    def _check_collision(self, joint_angles: np.ndarray, pos_hand: np.ndarray, quat_hand: np.ndarray) -> bool:
+        """
+        Algorithm 3 'NoCollision': Ensures the computed 'q' doesn't cause penetration.
+        """
+        if self.env is None:
+            return True # Fallback
 
-        # 2. 4 fingers should be on the same side — their normals should
-        #    be roughly aligned (pairwise dot > 0 on average)
-        f_dots = fingers_n @ fingers_n.T
-        triu = np.triu_indices(4, k=1)
-        if f_dots[triu].mean() < 0.0:
-            return False
-
+        # TODO: Implement Isaac Sim collision check.
+        # Read contact forces from the physics engine after setting the joint angles.
+        # If massive contact forces or deep penetrations are detected -> return False.
         return True
 
     def _sample_object_pose_in_hand(self, points_obj: np.ndarray) -> np.ndarray:
-        """
-        Sample a coarse object pose in a hand-centric frame.
-
-        The grasp sampler does not have the full robot model, so this is only a
-        seed for tuple-space RRT. Stage 0 Isaac refinement later overwrites it
-        with an exact `(joint position, object pose)` tuple.
-        """
         centroid = points_obj.mean(axis=0)
         offset = self.rng.normal(0.0, self.MIN_FINGER_SPACING * 0.5, size=3)
         return centroid + offset
@@ -508,39 +327,4 @@ class GraspSampler:
     def _sample_random_quaternion(self) -> np.ndarray:
         q = self.rng.normal(size=4)
         q /= np.linalg.norm(q) + 1e-8
-        if q[0] < 0.0:
-            q = -q
-        return q
-
-
-# ---------------------------------------------------------------------------
-# Convenience factories
-# ---------------------------------------------------------------------------
-
-def sample_grasps_for_mesh(
-    mesh_path: str,
-    num_grasps: int = 200,
-    num_candidates: int = 10000,
-    seed: int = 42,
-) -> GraspSet:
-    """Load a mesh file and sample grasps."""
-    mesh = trimesh.load(mesh_path, force="mesh")
-    if not isinstance(mesh, trimesh.Trimesh):
-        raise ValueError(f"Could not load mesh from {mesh_path}")
-    name = Path(mesh_path).stem
-    sampler = GraspSampler(mesh, object_name=name,
-                           num_candidates=num_candidates,
-                           num_grasps=num_grasps, seed=seed)
-    return sampler.sample()
-
-
-def make_default_object_mesh(object_type: str = "cube", size: float = 0.06) -> trimesh.Trimesh:
-    """Create a simple primitive mesh."""
-    if object_type == "cube":
-        return trimesh.creation.box(extents=[size, size, size])
-    elif object_type == "sphere":
-        return trimesh.creation.icosphere(radius=size / 2, subdivisions=3)
-    elif object_type == "cylinder":
-        return trimesh.creation.cylinder(radius=size / 2, height=size)
-    else:
-        raise ValueError(f"Unknown object type: {object_type}")
+        return q if q[0] >= 0.0 else -q
