@@ -241,6 +241,29 @@ def main():
             # ------------------------------------------------------------------
             # Step 5. Per-finger IK to match grasp-specific targets
             # ------------------------------------------------------------------
+            # Debug: print state BEFORE IK for first grasp
+            if idx == 0:
+                _jac = robot.root_physx_view.get_jacobians()
+                print(f"[DEBUG] robot.is_fixed_base = {robot.is_fixed_base}")
+                print(f"[DEBUG] Jacobian shape = {tuple(_jac.shape)}")
+                print(f"[DEBUG] joint_pos shape = {tuple(robot.data.joint_pos.shape)}")
+                print(f"[DEBUG] num_bodies = {robot.data.body_pos_w.shape[1]}")
+                print(f"[DEBUG] ft_ids = {ft_ids}")
+                print(f"[DEBUG] wrist_pos = {robot.data.root_pos_w[env_ids][0].tolist()}")
+                print(f"[DEBUG] wrist_quat = {robot.data.root_quat_w[env_ids][0].tolist()}")
+                print(f"[DEBUG] obj_pos_w = {obj_pos_w[0].tolist()}")
+                print(f"[DEBUG] obj_quat_w = {obj_quat_w[0].tolist()}")
+                _ft_before = robot.data.body_pos_w[env_ids][:, ft_ids, :]
+                _tgt = local_to_world_points(fp_tensor, obj_pos_w, obj_quat_w)
+                _err_before = torch.norm(_ft_before - _tgt, dim=-1)
+                print(f"[DEBUG] fingertip positions (before IK):")
+                for fi in range(len(ft_ids)):
+                    print(f"  finger {fi}: actual={_ft_before[0,fi].tolist()}  "
+                          f"target={_tgt[0,fi].tolist()}  "
+                          f"err={float(_err_before[0,fi]):.4f}m")
+                print(f"[DEBUG] fp_tensor (object frame) = {fp_tensor[0].tolist()}")
+                print(f"[DEBUG] mean_err BEFORE IK = {float(_err_before.mean()):.4f}m")
+
             refine_hand_to_start_grasp(env, env_ids, fp_tensor)
             robot.update(0.0)
 
@@ -250,6 +273,16 @@ def main():
             # ------------------------------------------------------------------
             actual_tips = robot.data.body_pos_w[env_ids][:, ft_ids, :]
             target_world = local_to_world_points(fp_tensor, obj_pos_w, obj_quat_w)
+
+            # Debug: print state AFTER IK for first grasp
+            if idx == 0:
+                _err_after = torch.norm(actual_tips - target_world, dim=-1)
+                print(f"[DEBUG] mean_err AFTER IK = {float(_err_after.mean()):.4f}m")
+                for fi in range(len(ft_ids)):
+                    print(f"  finger {fi}: actual={actual_tips[0,fi].tolist()}  "
+                          f"target={target_world[0,fi].tolist()}  "
+                          f"err={float(_err_after[0,fi]):.4f}m")
+
             tip_err = torch.norm(actual_tips - target_world, dim=-1)  # (1, F)
 
             mean_err = float(tip_err.mean().item())
