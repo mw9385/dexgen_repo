@@ -291,6 +291,15 @@ class JointSpaceRRTGenerator:
     # FK / validation
     # ------------------------------------------------------------------
 
+    def _rewrite_object_state(self):
+        """Reset object to stored pose with zero velocity."""
+        obj_state = self.obj.data.default_root_state[self.env_ids].clone()
+        obj_state[:, :3] = self.obj_pos_w
+        obj_state[:, 3:7] = self.obj_quat_w
+        obj_state[:, 7:] = 0.0
+        self.obj.write_root_state_to_sim(obj_state, env_ids=self.env_ids)
+        self.obj.update(0.0)
+
     def _set_joints(self, q: torch.Tensor):
         q_2d = q.unsqueeze(0) if q.ndim == 1 else q
         self.robot.write_joint_state_to_sim(
@@ -434,24 +443,20 @@ class JointSpaceRRTGenerator:
             q = self._sample_from_preshape()
             self._set_joints(q)
 
-            # Penetration check with relaxed margin for seeds:
-            # curled fingers naturally have middle links near/inside the surface.
-            # Only reject deep through-penetration (> 30% of object size).
-            seed_pen_margin = self.object_size * 0.30
-            if self.cfg.use_penetration_check:
-                link_world = self.robot.data.body_pos_w[0, self.active_link_body_ids, :]
-                link_obj = self._world_to_object_frame(link_world)
-                try:
-                    closest_l, dists_l, face_l = trimesh.proximity.closest_point(self.mesh, link_obj)
-                    to_pt = link_obj - closest_l
-                    normals_l = self.mesh.face_normals[face_l]
-                    sign = np.sum(to_pt * normals_l, axis=-1)
-                    pen_depth = np.where(sign < 0, dists_l, 0.0)
-                    if np.any(pen_depth > seed_pen_margin):
-                        reject_pen += 1
-                        continue
-                except Exception:
-                    pass
+            # Physics-based penetration check: set joints, re-place object,
+            # run 1 physics step, check if object gets ejected (high velocity).
+            # This replaces geometric signed-distance checks which can't
+            # distinguish "finger wrapping around object" from "finger through object".
+            self._rewrite_object_state()
+            self.env.sim.step(render=False)
+            self.env.scene.update(dt=self.env.physics_dt)
+            obj_vel = self.obj.data.root_lin_vel_w[0]
+            obj_speed = float(torch.norm(obj_vel).item())
+            if obj_speed > 1.0:
+                reject_pen += 1
+                # Reset object for next attempt
+                self._rewrite_object_state()
+                continue
 
             ft_world = self._get_fingertip_world()
             ft_obj = self._world_to_object_frame(ft_world)
