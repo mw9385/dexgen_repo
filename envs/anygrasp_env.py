@@ -379,40 +379,30 @@ if _ISAACLAB_AVAILABLE:
         #   pos ~ 5-10cm,  orn ~ 0.5-1.5rad
         # ══════════════════════════════════════════════════════════════
 
-        # Object orientation: -orn_err²  ★ PRIMARY
+        # Orientation delta: (prev_err - cur_err) ★ PRIMARY
         object_orientation = RewTerm(
-            func=mdp_rewards.object_orientation_reward,
+            func=mdp_rewards.orientation_delta_reward,
             weight=1.0,
             params={},
         )
-        # Object position: -pos_err²  (secondary)
+        # Position delta: (prev_err - cur_err)
         object_position = RewTerm(
-            func=mdp_rewards.object_position_reward,
-            weight=0.1,
+            func=mdp_rewards.position_delta_reward,
+            weight=1.0,
             params={},
         )
-        # Goal bonus → {0, 1}  (triggers rolling goal update)
+        # Goal bonus: +5 on success
         goal_bonus = RewTerm(
             func=mdp_rewards.goal_bonus,
-            weight=1.0,
+            weight=5.0,
             params={"pos_thresh": 0.02, "rot_thresh": 0.1},
         )
 
         # ── Regularization ────────────────────────────────────────
-        work = RewTerm(
-            func=mdp_rewards.work_penalty,
-            weight=0.01,
-            params={"max_work": 100.0},
-        )
         action = RewTerm(
             func=mdp_rewards.action_penalty,
-            weight=0.01,
-            params={"max_act_sq": 22.0},
-        )
-        torque = RewTerm(
-            func=mdp_rewards.torque_penalty,
-            weight=0.01,
-            params={"max_torque_sq": 200.0},
+            weight=0.0002,
+            params={},
         )
 
 

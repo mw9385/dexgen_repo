@@ -485,6 +485,14 @@ def reset_to_random_grasp(
     if "_no_contact_steps" in env.extras:
         env.extras["_no_contact_steps"][env_ids] = 0
 
+    # Reset delta reward prev-error buffers
+    if "_prev_orn_error" in env.extras:
+        from .rewards import _get_orn_error
+        env.extras["_prev_orn_error"][env_ids] = _get_orn_error(env)[env_ids]
+    if "_prev_pos_error" in env.extras:
+        from .rewards import _get_pos_error
+        env.extras["_prev_pos_error"][env_ids] = _get_pos_error(env)[env_ids]
+
 # ---------------------------------------------------------------------------
 # Start grasp sampling + nearest-neighbor goal selection
 # ---------------------------------------------------------------------------

@@ -1,9 +1,12 @@
 """
-Reward functions for the AnyGrasp-to-AnyGrasp environment.
+Reward functions for in-hand reorientation (OpenAI style).
 
-All reward functions return values in [0, 1].
-Goal rewards are normalized so that the initial error gives ~0 reward
-and reaching the goal gives ~1. This prevents free reward from standing still.
+Core idea: reward = (d_t - d_{t+1}) — reward the reduction in error.
+  - Object moves closer to goal → positive reward
+  - Object stays still → zero reward
+  - Object moves away from goal → negative reward
+
+Plus sparse bonuses/penalties for goal achievement and object drop.
 """
 
 from __future__ import annotations
@@ -25,40 +28,60 @@ def _obj_pose_in_hand_frame(env):
     return pos_hand, quat_hand
 
 
-# ═══════════════════════════════════════════════════════════
-# 1. GOAL REWARDS — [0, 1], normalized so initial state ≈ 0
-# ═══════════════════════════════════════════════════════════
-
-def object_position_reward(env) -> torch.Tensor:
-    """
-    Negative squared position error: -||pos_err||².
-    Returns: (N,) in (-inf, 0]
-    """
-    cur_pos, _ = _obj_pose_in_hand_frame(env)
-    target_pos = env.extras.get("target_object_pos_hand")
-    if target_pos is None:
-        return torch.zeros(env.num_envs, device=env.device)
-    pos_err = torch.norm(cur_pos - target_pos, dim=-1)
-    return -(pos_err ** 2)
-
-
-def object_orientation_reward(env) -> torch.Tensor:
-    """
-    Negative squared orientation error: -orn_err².
-    Returns: (N,) in (-inf, 0]
-    """
+def _get_orn_error(env) -> torch.Tensor:
+    """Compute current orientation error (rad). Returns: (N,)"""
     _, cur_quat = _obj_pose_in_hand_frame(env)
     target_quat = env.extras.get("target_object_quat_hand")
     if target_quat is None:
         return torch.zeros(env.num_envs, device=env.device)
     dot = (cur_quat * target_quat).sum(dim=-1).abs().clamp(0.0, 1.0)
-    orn_err = 2.0 * torch.acos(dot)
-    return -(orn_err ** 2)
+    return 2.0 * torch.acos(dot)
+
+
+def _get_pos_error(env) -> torch.Tensor:
+    """Compute current position error (m). Returns: (N,)"""
+    cur_pos, _ = _obj_pose_in_hand_frame(env)
+    target_pos = env.extras.get("target_object_pos_hand")
+    if target_pos is None:
+        return torch.zeros(env.num_envs, device=env.device)
+    return torch.norm(cur_pos - target_pos, dim=-1)
+
+
+# ═══════════════════════════════════════════════════════════
+# 1. GOAL REWARDS — delta (d_t - d_{t+1})
+# ═══════════════════════════════════════════════════════════
+
+def orientation_delta_reward(env) -> torch.Tensor:
+    """
+    (prev_orn_err - cur_orn_err): positive when getting closer.
+    Returns: (N,) — unbounded, typically in [-0.1, 0.1] per step.
+    """
+    cur_err = _get_orn_error(env)
+    prev_err = env.extras.get("_prev_orn_error")
+    if prev_err is None:
+        prev_err = cur_err.clone()
+    delta = prev_err - cur_err  # positive = improvement
+    env.extras["_prev_orn_error"] = cur_err.clone()
+    return delta
+
+
+def position_delta_reward(env) -> torch.Tensor:
+    """
+    (prev_pos_err - cur_pos_err): positive when getting closer.
+    Returns: (N,) — unbounded, typically small.
+    """
+    cur_err = _get_pos_error(env)
+    prev_err = env.extras.get("_prev_pos_error")
+    if prev_err is None:
+        prev_err = cur_err.clone()
+    delta = prev_err - cur_err
+    env.extras["_prev_pos_error"] = cur_err.clone()
+    return delta
 
 
 def goal_bonus(env, pos_thresh: float = 0.02, rot_thresh: float = 0.1) -> torch.Tensor:
     """
-    Binary reward: 1 if goal achieved (pos < 2cm AND rot < 0.1rad).
+    Sparse bonus: 1 if goal achieved (pos < 2cm AND rot < 0.1rad).
     Returns: (N,) in {0, 1}
     """
     cur_pos, cur_quat = _obj_pose_in_hand_frame(env)
@@ -73,36 +96,15 @@ def goal_bonus(env, pos_thresh: float = 0.02, rot_thresh: float = 0.1) -> torch.
 
 
 # ═══════════════════════════════════════════════════════════
-# 2. REGULARIZATION — [-1, 0]
+# 2. REGULARIZATION — action penalty only (OpenAI style)
 # ═══════════════════════════════════════════════════════════
 
-def work_penalty(env, max_work: float = 100.0) -> torch.Tensor:
+def action_penalty(env) -> torch.Tensor:
     """
-    -clamp(|torque * vel| / max_work, 0, 1). Returns: (N,) in [-1, 0]
-    """
-    robot = env.scene["robot"]
-    torques = robot.data.applied_torque
-    velocities = robot.data.joint_vel
-    work = (torques.abs() * velocities.abs()).sum(dim=-1)
-    return -(work / max_work).clamp(0.0, 1.0)
-
-
-def action_penalty(env, max_act_sq: float = 22.0) -> torch.Tensor:
-    """
-    -clamp(||a||² / max_act_sq, 0, 1). Returns: (N,) in [-1, 0]
+    -||a||². Penalizes large actions.
+    Returns: (N,) in (-inf, 0]
     """
     current_act = env.extras.get("current_action")
     if current_act is None:
         return torch.zeros(env.num_envs, device=env.device)
-    act_sq = (current_act ** 2).sum(dim=-1)
-    return -(act_sq / max_act_sq).clamp(0.0, 1.0)
-
-
-def torque_penalty(env, max_torque_sq: float = 200.0) -> torch.Tensor:
-    """
-    -clamp(||τ||² / max_torque_sq, 0, 1). Returns: (N,) in [-1, 0]
-    """
-    robot = env.scene["robot"]
-    torques = robot.data.applied_torque
-    torque_sq = (torques ** 2).sum(dim=-1)
-    return -(torque_sq / max_torque_sq).clamp(0.0, 1.0)
+    return -(current_act ** 2).sum(dim=-1)
