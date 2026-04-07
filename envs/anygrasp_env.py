@@ -380,25 +380,27 @@ if _ISAACLAB_AVAILABLE:
         # ══════════════════════════════════════════════════════════════
 
         # Object orientation → [0, 1]  ★ PRIMARY
+        # Linear: 0 at max_err(0.5rad), 1 at zero error. Must rotate to earn reward.
         object_orientation = RewTerm(
             func=mdp_rewards.object_orientation_reward,
-            weight=10.0,
-            params={"alpha": 10.0},
+            weight=1.0,
+            params={"max_err": 0.5},
         )
-        # Object position → [0, 1]  (secondary, keep object centered)
+        # Object position → [0, 1]  (secondary)
+        # Linear: 0 at max_err(2cm), 1 at zero error.
         object_position = RewTerm(
             func=mdp_rewards.object_position_reward,
             weight=0.1,
-            params={"alpha": 10.0},
+            params={"max_err": 0.02},
         )
         # Goal bonus → {0, 1}  (triggers rolling goal update)
         goal_bonus = RewTerm(
             func=mdp_rewards.goal_bonus,
-            weight=10.0,
+            weight=1.0,
             params={"pos_thresh": 0.02, "rot_thresh": 0.1},
         )
 
-        # ── r_reg ──────────────────────────────────────────────────
+        # ── Regularization ────────────────────────────────────────
         work = RewTerm(
             func=mdp_rewards.work_penalty,
             weight=0.01,
