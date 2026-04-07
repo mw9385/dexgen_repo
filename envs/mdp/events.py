@@ -578,14 +578,39 @@ def _sample_nearby_goal_index(
     if start_quat is not None:
         sq = np.array(start_quat, dtype=np.float64)
         sq = sq / (np.linalg.norm(sq) + 1e-8)
-        orn_dists = np.full(len(valid_idx), np.inf)
-        for j, vi in enumerate(valid_idx):
-            gq = getattr(grasps[vi], "object_quat_hand", None)
+
+        # Compute orn dist for ALL grasps (before fingertip filter)
+        all_orn_dists = np.full(N, np.inf)
+        for j in range(N):
+            if j == start_idx:
+                continue
+            gq = getattr(grasps[j], "object_quat_hand", None)
             if gq is not None:
                 gq = np.array(gq, dtype=np.float64)
                 gq = gq / (np.linalg.norm(gq) + 1e-8)
                 dot = min(abs(float(np.dot(sq, gq))), 1.0)
-                orn_dists[j] = 2.0 * np.arccos(dot)
+                all_orn_dists[j] = 2.0 * np.arccos(dot)
+
+        # Log once: compare filtered vs unfiltered orientation distances
+        if not getattr(graph, "_orn_dist_logged", False):
+            graph._orn_dist_logged = True
+            finite_all = all_orn_dists[np.isfinite(all_orn_dists)]
+            finite_valid = all_orn_dists[valid_idx]
+            finite_valid = finite_valid[np.isfinite(finite_valid)]
+            print(f"[Goal KNN] ALL grasps orn dist: min={np.min(finite_all):.3f}rad "
+                  f"p5={np.percentile(finite_all, 5):.3f}rad "
+                  f"p25={np.percentile(finite_all, 25):.3f}rad "
+                  f"median={np.median(finite_all):.3f}rad")
+            if len(finite_valid) > 0:
+                print(f"[Goal KNN] AFTER fp filter (>={min_dist}m): "
+                      f"min={np.min(finite_valid):.3f}rad "
+                      f"p5={np.percentile(finite_valid, 5):.3f}rad "
+                      f"median={np.median(finite_valid):.3f}rad "
+                      f"({len(valid_idx)} of {N-1} grasps pass filter)")
+            else:
+                print(f"[Goal KNN] AFTER fp filter: 0 grasps pass (fallback={fallback_used})")
+
+        orn_dists = all_orn_dists[valid_idx]
         sort_dist = orn_dists
     else:
         # Fallback: use fingertip distance if no orientation data
