@@ -504,9 +504,9 @@ def _sample_start_and_nn_goal(
 
     start_idx = int(rng.integers(0, N))
     start_grasp = g.grasp_set[start_idx]
-    # Curriculum: start with easy goals, increase min_dist over time
-    cur_min_dist = getattr(graph, "_curriculum_min_dist", 0.08)
-    goal_idx = _sample_nearby_goal_index(g, start_idx, rng, min_dist=cur_min_dist, num_fingers=env_num_fingers)
+    # Curriculum: start with easy goals, increase min_orn over time
+    cur_min_orn = getattr(graph, "_curriculum_min_orn", 0.05)
+    goal_idx = _sample_nearby_goal_index(g, start_idx, rng, min_orn=cur_min_orn, num_fingers=env_num_fingers)
     goal_grasp = g.grasp_set[goal_idx]
 
     start_fps  = pad_fingertip_positions(start_grasp.fingertip_positions.copy(), env_num_fingers)
@@ -539,85 +539,51 @@ def _sample_start_and_nn_goal(
 
 def _sample_nearby_goal_index(
     graph, start_idx: int, rng: np.random.Generator,
-    top_k: int = 5, min_dist: float = 0.08,
+    top_k: int = 5, min_orn: float = 0.05,
     num_fingers: int = 5,
 ) -> int:
     """
-    Sample a goal grasp from the grasp set, filtered by min_dist on
-    fingertip positions and ranked by orientation distance (geodesic).
+    Sample a goal grasp ranked by orientation distance (geodesic).
 
     Args:
-        min_dist: minimum per-finger distance (m). ALL fingers of the
-            sampled goal must have at least one finger >= min_dist away.
+        min_orn: minimum orientation distance (rad) to avoid trivial goals.
     """
     grasps = graph.grasp_set.grasps
     N = len(grasps)
     if N <= 1:
         return start_idx
 
-    all_fps = graph.grasp_set.as_array()   # (N, F*3)
-    start_flat = all_fps[start_idx]
+    start_quat = getattr(grasps[start_idx], "object_quat_hand", None)
+    if start_quat is None:
+        # No orientation data — fall back to random
+        idx = int(rng.integers(0, N))
+        return idx if idx != start_idx else (start_idx + 1) % N
 
-    # Per-finger max distance: reshape to (N, F, 3), compute per-finger dist, take max
-    nf = num_fingers
-    diff = (all_fps - start_flat).reshape(N, nf, 3)
-    per_finger_dist = np.linalg.norm(diff, axis=-1)  # (N, F)
-    max_finger_dist = per_finger_dist.max(axis=-1)    # (N,) — worst-case finger
-    max_finger_dist[start_idx] = np.inf
+    sq = np.array(start_quat, dtype=np.float64)
+    sq = sq / (np.linalg.norm(sq) + 1e-8)
 
-    valid_idx = np.where((np.isfinite(max_finger_dist)) & (max_finger_dist >= min_dist))[0]
-    fallback_used = False
+    # Compute orientation distance for all grasps
+    orn_dists = np.full(N, np.inf)
+    for j in range(N):
+        if j == start_idx:
+            continue
+        gq = getattr(grasps[j], "object_quat_hand", None)
+        if gq is not None:
+            gq = np.array(gq, dtype=np.float64)
+            gq = gq / (np.linalg.norm(gq) + 1e-8)
+            dot = min(abs(float(np.dot(sq, gq))), 1.0)
+            orn_dists[j] = 2.0 * np.arccos(dot)
+
+    # Filter: orientation >= min_orn to avoid trivially close goals
+    valid_idx = np.where((np.isfinite(orn_dists)) & (orn_dists >= min_orn))[0]
     if len(valid_idx) == 0:
-        fallback_used = True
-        valid_idx = np.where(np.isfinite(max_finger_dist))[0]
+        valid_idx = np.where(np.isfinite(orn_dists))[0]
         if len(valid_idx) == 0:
             return start_idx
 
-    # Rank by orientation distance (quaternion geodesic) — prefer closer orientation goals
-    start_quat = getattr(grasps[start_idx], "object_quat_hand", None)
-    if start_quat is not None:
-        sq = np.array(start_quat, dtype=np.float64)
-        sq = sq / (np.linalg.norm(sq) + 1e-8)
-
-        # Compute orn dist for ALL grasps (before fingertip filter)
-        all_orn_dists = np.full(N, np.inf)
-        for j in range(N):
-            if j == start_idx:
-                continue
-            gq = getattr(grasps[j], "object_quat_hand", None)
-            if gq is not None:
-                gq = np.array(gq, dtype=np.float64)
-                gq = gq / (np.linalg.norm(gq) + 1e-8)
-                dot = min(abs(float(np.dot(sq, gq))), 1.0)
-                all_orn_dists[j] = 2.0 * np.arccos(dot)
-
-        # Log once: compare filtered vs unfiltered orientation distances
-        if not getattr(graph, "_orn_dist_logged", False):
-            graph._orn_dist_logged = True
-            finite_all = all_orn_dists[np.isfinite(all_orn_dists)]
-            finite_valid = all_orn_dists[valid_idx]
-            finite_valid = finite_valid[np.isfinite(finite_valid)]
-            print(f"[Goal KNN] ALL grasps orn dist: min={np.min(finite_all):.3f}rad "
-                  f"p5={np.percentile(finite_all, 5):.3f}rad "
-                  f"p25={np.percentile(finite_all, 25):.3f}rad "
-                  f"median={np.median(finite_all):.3f}rad")
-            if len(finite_valid) > 0:
-                print(f"[Goal KNN] AFTER fp filter (>={min_dist}m): "
-                      f"min={np.min(finite_valid):.3f}rad "
-                      f"p5={np.percentile(finite_valid, 5):.3f}rad "
-                      f"median={np.median(finite_valid):.3f}rad "
-                      f"({len(valid_idx)} of {N-1} grasps pass filter)")
-            else:
-                print(f"[Goal KNN] AFTER fp filter: 0 grasps pass (fallback={fallback_used})")
-
-        orn_dists = all_orn_dists[valid_idx]
-        sort_dist = orn_dists
-    else:
-        # Fallback: use fingertip distance if no orientation data
-        sort_dist = np.linalg.norm(all_fps[valid_idx] - start_flat, axis=-1)
-
+    # Select top-k closest by orientation, randomly pick one
     k = min(top_k, len(valid_idx))
-    top_k_local = np.argpartition(sort_dist, k - 1)[:k]
+    top_k_local = np.argpartition(orn_dists[valid_idx], k - 1)[:k]
     top_k_indices = valid_idx[top_k_local]
     chosen = int(rng.choice(top_k_indices))
 
@@ -629,7 +595,7 @@ def _sample_nearby_goal_index(
 
 def update_curriculum(env, epoch: int, total_epochs: int = 10000):
     """
-    Linearly increase min_dist from 0.03 to 0.08 over the first 30%
+    Linearly increase min_orn from 0.05 to 0.5 rad over the first 30%
     of training. Stored on the graph object so reset picks it up.
 
     Call once per epoch from the training loop.
@@ -639,9 +605,9 @@ def update_curriculum(env, epoch: int, total_epochs: int = 10000):
         return
     warmup_epochs = int(total_epochs * 0.3)
     t = min(epoch / max(warmup_epochs, 1), 1.0)
-    min_dist_start = 0.06
-    min_dist_end = 0.10
-    graph._curriculum_min_dist = min_dist_start + t * (min_dist_end - min_dist_start)
+    min_orn_start = 0.05
+    min_orn_end = 0.50
+    graph._curriculum_min_orn = min_orn_start + t * (min_orn_end - min_orn_start)
 
 # ---------------------------------------------------------------------------
 # Rolling goal: update goal when current goal is achieved mid-episode
