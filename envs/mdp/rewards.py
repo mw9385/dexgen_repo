@@ -76,33 +76,33 @@ def goal_bonus(env, pos_thresh: float = 0.02, rot_thresh: float = 0.1) -> torch.
 # 2. REGULARIZATION — [-1, 0]
 # ═══════════════════════════════════════════════════════════
 
-def work_penalty(env, alpha: float = 0.01) -> torch.Tensor:
+def work_penalty(env, max_work: float = 100.0) -> torch.Tensor:
     """
-    -tanh(α * |torque * vel|). Returns: (N,) in [-1, 0]
+    -clamp(|torque * vel| / max_work, 0, 1). Returns: (N,) in [-1, 0]
     """
     robot = env.scene["robot"]
     torques = robot.data.applied_torque
     velocities = robot.data.joint_vel
     work = (torques.abs() * velocities.abs()).sum(dim=-1)
-    return -torch.tanh(alpha * work)
+    return -(work / max_work).clamp(0.0, 1.0)
 
 
-def action_penalty(env, alpha: float = 0.5) -> torch.Tensor:
+def action_penalty(env, max_act_sq: float = 22.0) -> torch.Tensor:
     """
-    -tanh(α * ||a||²). Returns: (N,) in [-1, 0]
+    -clamp(||a||² / max_act_sq, 0, 1). Returns: (N,) in [-1, 0]
     """
     current_act = env.extras.get("current_action")
     if current_act is None:
         return torch.zeros(env.num_envs, device=env.device)
     act_sq = (current_act ** 2).sum(dim=-1)
-    return -torch.tanh(alpha * act_sq)
+    return -(act_sq / max_act_sq).clamp(0.0, 1.0)
 
 
-def torque_penalty(env, alpha: float = 0.005) -> torch.Tensor:
+def torque_penalty(env, max_torque_sq: float = 200.0) -> torch.Tensor:
     """
-    -tanh(α * ||τ||²). Returns: (N,) in [-1, 0]
+    -clamp(||τ||² / max_torque_sq, 0, 1). Returns: (N,) in [-1, 0]
     """
     robot = env.scene["robot"]
     torques = robot.data.applied_torque
     torque_sq = (torques ** 2).sum(dim=-1)
-    return -torch.tanh(alpha * torque_sq)
+    return -(torque_sq / max_torque_sq).clamp(0.0, 1.0)

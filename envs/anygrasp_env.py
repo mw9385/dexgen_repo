@@ -404,17 +404,17 @@ if _ISAACLAB_AVAILABLE:
         work = RewTerm(
             func=mdp_rewards.work_penalty,
             weight=0.01,
-            params={"alpha": 0.01},
+            params={"max_work": 100.0},
         )
         action = RewTerm(
             func=mdp_rewards.action_penalty,
             weight=0.01,
-            params={"alpha": 0.5},
+            params={"max_act_sq": 22.0},
         )
         torque = RewTerm(
             func=mdp_rewards.torque_penalty,
             weight=0.01,
-            params={"alpha": 0.005},
+            params={"max_torque_sq": 200.0},
         )
 
 
