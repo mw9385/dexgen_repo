@@ -175,8 +175,16 @@ def _resolve_finger_body_ids(robot) -> list:
     return ids
 
 
-def _compute_obj_pose_hand(robot, obj_pos_w, device):
-    """Compute object pose in hand root frame. Returns (pos_np, quat_np)."""
+def _compute_obj_pose_hand(robot, obj_pos_w, device, obj_quat_w=None):
+    """Compute object pose in hand root frame. Returns (pos_np, quat_np).
+
+    Args:
+        robot: Isaac Lab articulation asset.
+        obj_pos_w: Object position in world frame (torch.Tensor, shape (3,)).
+        device: torch device.
+        obj_quat_w: Object quaternion in world frame (w,x,y,z).
+            If None, reads from the sim object state.
+    """
     from isaaclab.utils.math import quat_apply_inverse
     from envs.mdp.math_utils import quat_multiply, quat_conjugate
 
@@ -184,7 +192,10 @@ def _compute_obj_pose_hand(robot, obj_pos_w, device):
     rq = robot.data.root_quat_w[0]
     rel = obj_pos_w - rp
     pos_hand = quat_apply_inverse(rq.unsqueeze(0), rel.unsqueeze(0))[0]
-    obj_quat_w = torch.tensor([[1, 0, 0, 0]], device=device, dtype=torch.float32)
+    if obj_quat_w is None:
+        obj_quat_w = torch.tensor([[1, 0, 0, 0]], device=device, dtype=torch.float32)
+    elif obj_quat_w.ndim == 1:
+        obj_quat_w = obj_quat_w.unsqueeze(0)
     quat_hand = quat_multiply(quat_conjugate(rq.unsqueeze(0)), obj_quat_w)[0]
     return pos_hand.cpu().numpy().copy(), quat_hand.cpu().numpy().copy()
 
@@ -351,7 +362,10 @@ class HeuristicSampler:
 
         # Build grasp with per-grasp object pose
         grasp_obj_pos_w = ft_world.mean(dim=0)
-        pos_hand, quat_hand = _compute_obj_pose_hand(self.robot, grasp_obj_pos_w, self.device)
+        obj_quat_w = self.obj.data.root_quat_w[0]  # actual sim object quaternion
+        pos_hand, quat_hand = _compute_obj_pose_hand(
+            self.robot, grasp_obj_pos_w, self.device, obj_quat_w=obj_quat_w,
+        )
 
         grasp_centroid = ft_obj.mean(axis=0)
         fp_local = (closest - grasp_centroid).astype(np.float32)
@@ -516,7 +530,10 @@ class GraspRRTExpander:
 
         # Per-grasp object pose
         grasp_obj_pos_w = ft_world.mean(dim=0)
-        pos_hand, quat_hand = _compute_obj_pose_hand(self.robot, grasp_obj_pos_w, self.device)
+        obj_quat_w = self.obj.data.root_quat_w[0]  # actual sim object quaternion
+        pos_hand, quat_hand = _compute_obj_pose_hand(
+            self.robot, grasp_obj_pos_w, self.device, obj_quat_w=obj_quat_w,
+        )
 
         grasp_centroid = ft_obj.mean(axis=0)
         fp_local = (closest - grasp_centroid).astype(np.float32)
