@@ -425,6 +425,11 @@ def reset_to_random_grasp(
             env.extras["target_object_quat_hand"][env_ids[i]] = actual_quat_hand.clone()
 
     # ------------------------------------------------------------------
+    # Log start→goal distances (position & orientation) at reset
+    # ------------------------------------------------------------------
+    _log_goal_distances(env, env_ids)
+
+    # ------------------------------------------------------------------
     # 8. Initialise action buffers
     # ------------------------------------------------------------------
     current_q = robot.data.joint_pos[env_ids]   # (n, num_dof=24)
@@ -1001,6 +1006,50 @@ def _load_grasp_graph(env):
     _GRASP_GRAPH_CACHE[cache_key] = graph
     graph.summary()
     return graph
+
+
+# ---------------------------------------------------------------------------
+# Goal distance logging
+# ---------------------------------------------------------------------------
+
+_GOAL_LOG_COUNT = 0
+
+def _log_goal_distances(env, env_ids: torch.Tensor):
+    """Log start→goal pos/orn distances at reset. Prints every reset."""
+    global _GOAL_LOG_COUNT
+    _GOAL_LOG_COUNT += 1
+
+    target_pos = env.extras.get("target_object_pos_hand")
+    target_quat = env.extras.get("target_object_quat_hand")
+    if target_pos is None or target_quat is None:
+        return
+
+    n = len(env_ids)
+    robot = env.scene["robot"]
+    obj = env.scene["object"]
+
+    pos_dists = []
+    orn_dists = []
+    for i, eid in enumerate(env_ids.tolist()):
+        rp = robot.data.root_pos_w[eid]
+        rq = robot.data.root_quat_w[eid]
+        op = obj.data.root_pos_w[eid]
+        oq = obj.data.root_quat_w[eid]
+        cur_pos = quat_apply_inverse(rq.unsqueeze(0), (op - rp).unsqueeze(0))[0]
+        cur_quat = quat_multiply(quat_conjugate(rq.unsqueeze(0)), oq.unsqueeze(0))[0]
+
+        pos_d = float(torch.norm(cur_pos - target_pos[eid]).item())
+        pos_dists.append(pos_d)
+
+        dot = float(torch.abs(torch.dot(cur_quat, target_quat[eid])).clamp(0.0, 1.0).item())
+        orn_d = 2.0 * float(torch.acos(torch.tensor(dot)).item())
+        orn_dists.append(orn_d)
+
+    at_goal = sum(1 for p, o in zip(pos_dists, orn_dists) if p < 0.02 and o < 0.1)
+    print(f"[Goal] Reset #{_GOAL_LOG_COUNT} ({n} envs)  "
+          f"pos: {np.mean(pos_dists):.4f}m [{np.min(pos_dists):.4f}-{np.max(pos_dists):.4f}]  "
+          f"orn: {np.mean(orn_dists):.2f}rad [{np.min(orn_dists):.2f}-{np.max(orn_dists):.2f}]  "
+          f"at_goal: {at_goal}/{n}")
 
 
 # ---------------------------------------------------------------------------
