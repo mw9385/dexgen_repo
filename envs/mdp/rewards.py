@@ -11,10 +11,6 @@ Relative importance is controlled solely by the weight in the RewTerm config.
 from __future__ import annotations
 import torch
 
-from .observations import (
-    _get_fingertip_body_ids,
-    _get_num_fingers,
-)
 
 # ═══════════════════════════════════════════════════════════
 # Quaternion helpers
@@ -83,24 +79,7 @@ def goal_bonus(env, pos_thresh: float = 0.02, rot_thresh: float = 0.1) -> torch.
 
 
 # ═══════════════════════════════════════════════════════════
-# 2. STYLE REWARD  (Eq. 9)  →  [-1, 0]
-# ═══════════════════════════════════════════════════════════
-
-def fingertip_velocity_penalty(env, alpha: float = 1.0) -> torch.Tensor:
-    """
-    Eq. 9: -α * ||ẋ_tip||, normalized via tanh.
-    Returns: (N,) in [-1, 0]
-    """
-    robot = env.scene["robot"]
-    nf = _get_num_fingers(env)
-    tip_ids = _get_fingertip_body_ids(robot, env)[:nf]
-    tip_vels = robot.data.body_lin_vel_w[:, tip_ids, :]
-    speed = torch.norm(tip_vels, dim=-1).mean(dim=-1)
-    return -torch.tanh(alpha * speed)
-
-
-# ═══════════════════════════════════════════════════════════
-# 3. REGULARIZATION  (Eq. 8)  →  [-1, 0]
+# 2. REGULARIZATION  (Eq. 8)  →  [-1, 0]
 # ═══════════════════════════════════════════════════════════
 
 def work_penalty(env, alpha: float = 0.01) -> torch.Tensor:
@@ -136,21 +115,3 @@ def torque_penalty(env, alpha: float = 0.005) -> torch.Tensor:
     torques = robot.data.applied_torque
     torque_sq = (torques ** 2).sum(dim=-1)
     return -torch.tanh(alpha * torque_sq)
-
-
-# ═══════════════════════════════════════════════════════════
-# 4. TERMINATION PENALTY  →  [-1, 0]
-# ═══════════════════════════════════════════════════════════
-
-def termination_penalty(env) -> torch.Tensor:
-    """
-    Penalty when object is dropped or leaves hand.
-    Scaled by remaining episode fraction so early drops cost more.
-    Returns: (N,) in [-1, 0]
-    """
-    from . import events as mdp_events
-    dropped = mdp_events.object_dropped(env, min_height=0.2)
-    left = mdp_events.object_left_hand(env, max_dist=0.20)
-    terminated = dropped | left
-    remaining = (env.max_episode_length - env.episode_length_buf).float() / env.max_episode_length
-    return -terminated.float() * remaining
