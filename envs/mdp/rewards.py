@@ -29,10 +29,9 @@ def _obj_pose_in_hand_frame(env):
 # 1. GOAL REWARDS — [0, 1], normalized so initial state ≈ 0
 # ═══════════════════════════════════════════════════════════
 
-def object_position_reward(env, alpha: float = 40.0, max_err: float = 0.02) -> torch.Tensor:
+def object_position_reward(env, max_err: float = 0.02) -> torch.Tensor:
     """
-    Normalized position reward. Returns 0 at max_err, 1 at zero error.
-    reward = clamp((1 - pos_err / max_err), 0, 1)
+    Quadratic position reward: (1 - (pos_err / max_err)²), clamped [0, 1].
     Returns: (N,) in [0, 1]
     """
     cur_pos, _ = _obj_pose_in_hand_frame(env)
@@ -40,13 +39,12 @@ def object_position_reward(env, alpha: float = 40.0, max_err: float = 0.02) -> t
     if target_pos is None:
         return torch.zeros(env.num_envs, device=env.device)
     pos_err = torch.norm(cur_pos - target_pos, dim=-1)
-    return (1.0 - pos_err / max_err).clamp(0.0, 1.0)
+    return (1.0 - (pos_err / max_err) ** 2).clamp(0.0, 1.0)
 
 
-def object_orientation_reward(env, alpha: float = 10.0, max_err: float = 0.5) -> torch.Tensor:
+def object_orientation_reward(env, max_err: float = 0.5) -> torch.Tensor:
     """
-    Normalized orientation reward. Returns 0 at max_err, 1 at zero error.
-    reward = clamp((1 - orn_err / max_err), 0, 1)
+    Quadratic orientation reward: (1 - (orn_err / max_err)²), clamped [0, 1].
     Returns: (N,) in [0, 1]
     """
     _, cur_quat = _obj_pose_in_hand_frame(env)
@@ -55,7 +53,7 @@ def object_orientation_reward(env, alpha: float = 10.0, max_err: float = 0.5) ->
         return torch.zeros(env.num_envs, device=env.device)
     dot = (cur_quat * target_quat).sum(dim=-1).abs().clamp(0.0, 1.0)
     orn_err = 2.0 * torch.acos(dot)
-    return (1.0 - orn_err / max_err).clamp(0.0, 1.0)
+    return (1.0 - (orn_err / max_err) ** 2).clamp(0.0, 1.0)
 
 
 def goal_bonus(env, pos_thresh: float = 0.02, rot_thresh: float = 0.1) -> torch.Tensor:
