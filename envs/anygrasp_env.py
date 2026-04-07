@@ -385,10 +385,11 @@ if _ISAACLAB_AVAILABLE:
             weight=100.0,
             params={},
         )
-        # Position delta: (prev_err - cur_err) × 100
+        # Position delta: (prev_err - cur_err) × 10000
+        # Scaled to match orientation magnitude (m vs rad, ~100x difference)
         object_position = RewTerm(
             func=mdp_rewards.position_delta_reward,
-            weight=100.0,
+            weight=10000.0,
             params={},
         )
         # Goal bonus: +5 on success
