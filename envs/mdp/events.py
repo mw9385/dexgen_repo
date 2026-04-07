@@ -433,44 +433,50 @@ def reset_to_random_grasp(
 
     # Step 7: Compute goal object pose in hand frame.
     #
-    # The goal grasp has different fingertip positions than the start grasp.
-    # We compute the rigid transform (Procrustes) between start and goal
-    # fingertip positions in object frame. This rotation IS the delta the
-    # object must undergo for fingers to move from start→goal configuration.
-    #
-    # Previous approach (stored object_pos/quat delta) fails because for
-    # simple primitives (cube/sphere), different finger placements produce
-    # nearly identical object_pos_hand/object_quat_hand → delta ≈ 0.
+    # Use stored object_pos_hand / object_quat_hand from the goal grasp
+    # in the grasp graph. Delta between start and goal graph poses is
+    # applied to the actual sim pose to handle frame mismatch from
+    # palm-up transform + tilt noise.
     robot.update(0.0)
     obj.update(0.0)
 
-    # Batched: compute actual object pose in hand frame for all reset envs
-    rp_w = robot.data.root_pos_w[env_ids]          # (n, 3)
-    rq_w = robot.data.root_quat_w[env_ids]          # (n, 4)
-    op_w = obj.data.root_pos_w[env_ids]              # (n, 3)
-    oq_w = obj.data.root_quat_w[env_ids]             # (n, 4)
-    actual_pos_hand = quat_apply_inverse(rq_w, op_w - rp_w)   # (n, 3)
-    actual_quat_hand = quat_multiply(quat_conjugate(rq_w), oq_w)  # (n, 4)
+    for i in range(n):
+        rp_w = robot.data.root_pos_w[env_ids[i]]
+        rq_w = robot.data.root_quat_w[env_ids[i]]
+        op_w = obj.data.root_pos_w[env_ids[i]]
+        oq_w = obj.data.root_quat_w[env_ids[i]]
+        rel = op_w - rp_w
+        actual_pos_hand = quat_apply_inverse(rq_w.unsqueeze(0), rel.unsqueeze(0))[0]
+        actual_quat_hand = quat_multiply(
+            quat_conjugate(rq_w.unsqueeze(0)), oq_w.unsqueeze(0)
+        )[0]
 
-    # Compute goal pose from fingertip Procrustes alignment.
-    # start_fps and goal_fps are in object frame: (n, F, 3).
-    # The rigid transform R that maps start_fps → goal_fps tells us
-    # how the object must rotate (in object frame) for fingers to reach
-    # their goal configuration. We apply this as delta to actual pose.
-    from .math_utils import solve_rigid_alignment
-    delta_pos_fp, delta_quat_fp = solve_rigid_alignment(start_fps, goal_fps)
-    # delta_quat_fp: rotation from start fingertip config → goal config
-    # Apply as: target_quat = actual_quat * delta_quat (object rotates in place)
-    target_quat_all = quat_multiply(actual_quat_hand, delta_quat_fp)
-    target_quat_all = target_quat_all / (torch.norm(target_quat_all, dim=-1, keepdim=True) + 1e-8)
-    # Position: delta_pos_fp is centroid shift in object frame; transform to hand frame
-    # For in-hand manipulation, position goal = current position (object stays in hand)
-    # Plus small delta from Procrustes translation (accounts for asymmetric grasps)
-    delta_pos_hand = quat_apply(actual_quat_hand, delta_pos_fp)
-    target_pos_all = actual_pos_hand + delta_pos_hand
+        # Compute goal as delta from start grasp's stored object pose
+        s_pos = start_object_pos_hand_list[i]
+        s_quat = start_object_quat_hand_list[i]
+        g_pos = goal_object_pos_hand_list[i]
+        g_quat = goal_object_quat_hand_list[i]
 
-    env.extras["target_object_pos_hand"][env_ids] = target_pos_all
-    env.extras["target_object_quat_hand"][env_ids] = target_quat_all
+        if s_pos is not None and g_pos is not None \
+                and s_quat is not None and g_quat is not None:
+            # Position delta
+            delta_pos = torch.tensor(g_pos, device=env.device, dtype=torch.float32) \
+                      - torch.tensor(s_pos, device=env.device, dtype=torch.float32)
+            target_pos = actual_pos_hand + delta_pos
+
+            # Orientation delta: delta_q = conj(start_q) * goal_q
+            sq = torch.tensor(s_quat, device=env.device, dtype=torch.float32).unsqueeze(0)
+            gq = torch.tensor(g_quat, device=env.device, dtype=torch.float32).unsqueeze(0)
+            delta_quat = quat_multiply(quat_conjugate(sq), gq)[0]
+            target_quat = quat_multiply(actual_quat_hand.unsqueeze(0), delta_quat.unsqueeze(0))[0]
+            target_quat = target_quat / (torch.norm(target_quat) + 1e-8)
+
+            env.extras["target_object_pos_hand"][env_ids[i]] = target_pos
+            env.extras["target_object_quat_hand"][env_ids[i]] = target_quat
+        else:
+            # Fallback: no stored object poses → goal = current
+            env.extras["target_object_pos_hand"][env_ids[i]] = actual_pos_hand.clone()
+            env.extras["target_object_quat_hand"][env_ids[i]] = actual_quat_hand.clone()
 
     # ------------------------------------------------------------------
     # DEBUG: Log start→goal distances in hand frame (position & orientation)
@@ -769,14 +775,13 @@ def update_rolling_goal(
             new_fps.reshape(fp_dim), device=env.device, dtype=torch.float32
         )
 
-        # Rebase target: compute Procrustes rigid transform between old goal
-        # (now "start") and new goal fingertip positions in object frame.
-        # This gives a meaningful rotation delta even when stored object poses
-        # are identical across grasps (common for symmetric primitives).
+        # Rebase target: delta between old goal (now start) and new goal
+        # stored object poses, applied to current actual sim pose.
         old_goal_grasp = g.grasp_set[cur_goal_idx]
-        old_fps = pad_fingertip_positions(
-            old_goal_grasp.fingertip_positions.copy(), env_num_fingers
-        )
+        old_goal_obj_pos  = getattr(old_goal_grasp, "object_pos_hand",  None)
+        old_goal_obj_quat = getattr(old_goal_grasp, "object_quat_hand", None)
+        new_goal_obj_pos  = getattr(new_goal_grasp, "object_pos_hand",  None)
+        new_goal_obj_quat = getattr(new_goal_grasp, "object_quat_hand", None)
 
         # Current actual object pose in hand frame
         _rp = robot.data.root_pos_w[env_id]
@@ -786,22 +791,19 @@ def update_rolling_goal(
         _actual_pos = quat_apply_inverse(_rq.unsqueeze(0), (_op - _rp).unsqueeze(0))[0]
         _actual_quat = _qm(_qc(_rq.unsqueeze(0)), _oq.unsqueeze(0))[0]
 
-        # Procrustes: old_fps → new_fps rigid transform
-        from .math_utils import solve_rigid_alignment
-        _old_t = torch.tensor(old_fps, device=env.device, dtype=torch.float32).unsqueeze(0)
-        _new_t = torch.tensor(new_fps, device=env.device, dtype=torch.float32).unsqueeze(0)
-        _delta_pos, _delta_quat = solve_rigid_alignment(_old_t, _new_t)
-        _delta_pos = _delta_pos[0]    # (3,)
-        _delta_quat = _delta_quat[0]  # (4,)
-
-        # Apply: target_quat = actual_quat * delta_quat
-        target_quat = _qm(_actual_quat.unsqueeze(0), _delta_quat.unsqueeze(0))[0]
-        target_quat = target_quat / (torch.norm(target_quat) + 1e-8)
-        env.extras["target_object_quat_hand"][env_id] = target_quat
-
-        # Position: transform delta from object frame to hand frame
-        _dp_hand = quat_apply(_actual_quat.unsqueeze(0), _delta_pos.unsqueeze(0))[0]
-        env.extras["target_object_pos_hand"][env_id] = _actual_pos + _dp_hand
+        if new_goal_obj_pos is not None and old_goal_obj_pos is not None \
+                and "target_object_pos_hand" in env.extras:
+            delta_pos = torch.tensor(new_goal_obj_pos, device=env.device, dtype=torch.float32) \
+                      - torch.tensor(old_goal_obj_pos, device=env.device, dtype=torch.float32)
+            env.extras["target_object_pos_hand"][env_id] = _actual_pos + delta_pos
+        if new_goal_obj_quat is not None and old_goal_obj_quat is not None \
+                and "target_object_quat_hand" in env.extras:
+            _sq = torch.tensor(old_goal_obj_quat, device=env.device, dtype=torch.float32).unsqueeze(0)
+            _gq = torch.tensor(new_goal_obj_quat, device=env.device, dtype=torch.float32).unsqueeze(0)
+            delta_quat = _qm(_qc(_sq), _gq)[0]
+            target_quat = _qm(_actual_quat.unsqueeze(0), delta_quat.unsqueeze(0))[0]
+            target_quat = target_quat / (torch.norm(target_quat) + 1e-8)
+            env.extras["target_object_quat_hand"][env_id] = target_quat
 
         # Update indices: old goal becomes new start
         env.extras["goal_grasp_idx"][env_id]  = new_goal_idx
