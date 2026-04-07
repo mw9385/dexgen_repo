@@ -673,17 +673,13 @@ def update_curriculum(env, epoch: int, total_epochs: int = 10000):
 
 def update_rolling_goal(
     env,
-    pos_threshold: float = 0.02,
     rot_threshold: float = 0.1,
 ) -> int:
     """
-    Called every step. For each env where the object pose is within
+    Called every step. For each env where the orientation is within
     threshold of the target, select a new nearby goal via kNN.
 
-    Success = object position error < pos_threshold (2cm)
-            AND object orientation error < rot_threshold (0.1 rad ~5.7°)
-
-    Same criteria as goal_bonus in the reward function.
+    Success = object orientation error < rot_threshold (0.1 rad ~5.7°).
 
     Returns:
         Number of envs whose goal was updated this step.
@@ -723,7 +719,7 @@ def update_rolling_goal(
     dot = (cur_quat * target_quat).sum(dim=-1).abs().clamp(0.0, 1.0)
     orn_err = 2.0 * torch.acos(dot)
 
-    success_mask = (pos_err < pos_threshold) & (orn_err < rot_threshold)
+    success_mask = (orn_err < rot_threshold)
 
     success_mask = success_mask & ~object_dropped(env)
     success_mask = success_mask & ~object_left_hand(env)
@@ -1094,7 +1090,7 @@ def _log_goal_distances(env, env_ids: torch.Tensor):
         orn_d = 2.0 * float(torch.acos(torch.tensor(dot)).item())
         orn_dists.append(orn_d)
 
-    at_goal = sum(1 for p, o in zip(pos_dists, orn_dists) if p < 0.02 and o < 0.1)
+    at_goal = sum(1 for o in orn_dists if o < 0.1)
     print(f"[Goal] Reset #{_GOAL_LOG_COUNT} ({n} envs)  "
           f"pos: {np.mean(pos_dists):.4f}m [{np.min(pos_dists):.4f}-{np.max(pos_dists):.4f}]  "
           f"orn: {np.mean(orn_dists):.2f}rad [{np.min(orn_dists):.2f}-{np.max(orn_dists):.2f}]  "

@@ -79,20 +79,18 @@ def position_delta_reward(env) -> torch.Tensor:
     return delta
 
 
-def goal_bonus(env, pos_thresh: float = 0.02, rot_thresh: float = 0.1) -> torch.Tensor:
+def goal_bonus(env, rot_thresh: float = 0.1) -> torch.Tensor:
     """
-    Sparse bonus: 1 if goal achieved (pos < 2cm AND rot < 0.1rad).
+    Sparse bonus: 1 if orientation goal achieved (orn < rot_thresh).
     Returns: (N,) in {0, 1}
     """
-    cur_pos, cur_quat = _obj_pose_in_hand_frame(env)
-    target_pos = env.extras.get("target_object_pos_hand")
+    _, cur_quat = _obj_pose_in_hand_frame(env)
     target_quat = env.extras.get("target_object_quat_hand")
-    if target_pos is None or target_quat is None:
+    if target_quat is None:
         return torch.zeros(env.num_envs, device=env.device)
-    pos_err = torch.norm(cur_pos - target_pos, dim=-1)
     dot = (cur_quat * target_quat).sum(dim=-1).abs().clamp(0.0, 1.0)
     orn_err = 2.0 * torch.acos(dot)
-    return ((pos_err < pos_thresh) & (orn_err < rot_thresh)).float()
+    return (orn_err < rot_thresh).float()
 
 
 # ═══════════════════════════════════════════════════════════

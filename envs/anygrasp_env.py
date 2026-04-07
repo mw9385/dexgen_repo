@@ -385,29 +385,17 @@ if _ISAACLAB_AVAILABLE:
             weight=100.0,
             params={},
         )
-        # Position delta: (prev_err - cur_err) × 10000
-        # Scaled to match orientation magnitude (m vs rad, ~100x difference)
-        object_position = RewTerm(
-            func=mdp_rewards.position_delta_reward,
-            weight=10000.0,
-            params={},
-        )
-        # Goal bonus: +5 on success
+        # Goal bonus: +5 on success (orn < 0.1rad)
         goal_bonus = RewTerm(
             func=mdp_rewards.goal_bonus,
             weight=5.0,
-            params={"pos_thresh": 0.02, "rot_thresh": 0.1},
+            params={"rot_thresh": 0.1},
         )
 
         # ── Penalties ──────────────────────────────────────────────
         drop = RewTerm(
             func=mdp_rewards.drop_penalty,
             weight=20.0,
-            params={},
-        )
-        action = RewTerm(
-            func=mdp_rewards.action_penalty,
-            weight=0.0,
             params={},
         )
 
