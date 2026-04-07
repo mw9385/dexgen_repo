@@ -126,53 +126,97 @@ def reset_to_random_grasp(
 
     # ------------------------------------------------------------------
     # 1. Sample start grasps from grasp_set and goals via nearest neighbor
+    #    Batch by object name to avoid per-env Python overhead.
     # ------------------------------------------------------------------
-    start_fps_list, goal_fps_list = [], []
-    start_joints_list = []
-    start_object_pos_hand_list, start_object_quat_hand_list = [], []
-    start_object_pose_frame_list = []
-    start_idx_list, goal_idx_list = [], []
-
-    sampled_obj_names = []
+    sampled_obj_names = [None] * n
     forced_object_name = _resolve_scene_graph_object_name(env, graph, env_num_fingers)
-    # Per-env object name: detected from the actual spawned USD prim so that
-    # envs with sphere objects use sphere grasps, cube envs use cube grasps, etc.
     env_graph_names = _detect_env_graph_names(env, graph, env_num_fingers)
 
-    goal_joints_list = []
-    goal_object_pos_hand_list, goal_object_quat_hand_list = [], []
-    goal_object_pose_frame_list = []
-
+    # Resolve per-env object names
     for i in range(n):
         env_id = int(env_ids[i].item())
-        # Use per-env object name from USD detection, fall back to scene-cfg match
         if env_graph_names is not None:
-            per_env_name = env_graph_names[env_id] or forced_object_name
+            sampled_obj_names[i] = env_graph_names[env_id] or forced_object_name
         else:
-            per_env_name = forced_object_name
-        (
-            obj_name, start_fp, goal_fp,
-            start_joints, start_object_pos_hand, start_object_quat_hand, start_object_pose_frame,
-            goal_joints, goal_object_pos_hand, goal_object_quat_hand, goal_object_pose_frame,
-            start_idx, goal_idx
-        ) = _sample_start_and_nn_goal(
-            graph, rng,
-            object_name=per_env_name,
-            env_num_fingers=env_num_fingers,
-        )
-        sampled_obj_names.append(obj_name)
-        start_fps_list.append(start_fp)
-        goal_fps_list.append(goal_fp)
-        start_joints_list.append(start_joints)
-        start_object_pos_hand_list.append(start_object_pos_hand)
-        start_object_quat_hand_list.append(start_object_quat_hand)
-        start_object_pose_frame_list.append(start_object_pose_frame)
-        goal_joints_list.append(goal_joints)
-        goal_object_pos_hand_list.append(goal_object_pos_hand)
-        goal_object_quat_hand_list.append(goal_object_quat_hand)
-        goal_object_pose_frame_list.append(goal_object_pose_frame)
-        start_idx_list.append(start_idx)
-        goal_idx_list.append(goal_idx)
+            sampled_obj_names[i] = forced_object_name
+
+    # Batch sample: group envs by object name, sample all at once per group
+    start_idx_list = [0] * n
+    goal_idx_list = [0] * n
+
+    from grasp_generation.rrt_expansion import MultiObjectGraspGraph
+    # Group env indices by object name
+    name_to_envs: dict = {}
+    for i in range(n):
+        name_to_envs.setdefault(sampled_obj_names[i], []).append(i)
+
+    for obj_name, env_indices in name_to_envs.items():
+        if isinstance(graph, MultiObjectGraspGraph):
+            g = graph.graphs.get(obj_name)
+            if g is None:
+                g = next(iter(graph.graphs.values()))
+        else:
+            g = graph
+        N_grasps = len(g)
+        if N_grasps == 0:
+            continue
+
+        batch_size = len(env_indices)
+        # Batch random start indices
+        starts = rng.integers(0, N_grasps, size=batch_size)
+        cur_min_orn = getattr(graph, "_curriculum_min_orn", 0.15)
+        # Batch goal selection
+        for j, local_i in enumerate(env_indices):
+            start_idx_list[local_i] = int(starts[j])
+            goal_idx_list[local_i] = _sample_nearby_goal_index(
+                g, int(starts[j]), rng, min_orn=cur_min_orn, num_fingers=env_num_fingers,
+            )
+
+    # Extract grasp data in batch (one pass per object name group)
+    start_fps_list = [None] * n
+    goal_fps_list = [None] * n
+    start_joints_list = [None] * n
+    start_object_pos_hand_list = [None] * n
+    start_object_quat_hand_list = [None] * n
+    start_object_pose_frame_list = [None] * n
+    goal_joints_list = [None] * n
+    goal_object_pos_hand_list = [None] * n
+    goal_object_quat_hand_list = [None] * n
+    goal_object_pose_frame_list = [None] * n
+
+    for obj_name, env_indices in name_to_envs.items():
+        if isinstance(graph, MultiObjectGraspGraph):
+            g = graph.graphs.get(obj_name)
+            if g is None:
+                g = next(iter(graph.graphs.values()))
+        else:
+            g = graph
+
+        # Cache padded fingertip positions for this sub-graph
+        if not hasattr(g, "_cached_padded_fps"):
+            g._cached_padded_fps = np.stack([
+                pad_fingertip_positions(grasp.fingertip_positions.copy(), env_num_fingers)
+                for grasp in g.grasp_set.grasps
+            ])  # (N, F, 3)
+
+        cached_fps = g._cached_padded_fps
+        grasps = g.grasp_set.grasps
+
+        for local_i in env_indices:
+            si = start_idx_list[local_i]
+            gi = goal_idx_list[local_i]
+            start_fps_list[local_i] = cached_fps[si]
+            goal_fps_list[local_i] = cached_fps[gi]
+            sg = grasps[si]
+            gg = grasps[gi]
+            start_joints_list[local_i] = getattr(sg, "joint_angles", None)
+            start_object_pos_hand_list[local_i] = getattr(sg, "object_pos_hand", None)
+            start_object_quat_hand_list[local_i] = getattr(sg, "object_quat_hand", None)
+            start_object_pose_frame_list[local_i] = getattr(sg, "object_pose_frame", None)
+            goal_joints_list[local_i] = getattr(gg, "joint_angles", None)
+            goal_object_pos_hand_list[local_i] = getattr(gg, "object_pos_hand", None)
+            goal_object_quat_hand_list[local_i] = getattr(gg, "object_quat_hand", None)
+            goal_object_pose_frame_list[local_i] = getattr(gg, "object_pose_frame", None)
 
     start_fps = torch.tensor(
         np.stack(start_fps_list), device=env.device, dtype=torch.float32
