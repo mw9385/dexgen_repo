@@ -377,52 +377,42 @@ def reset_to_random_grasp(
     obj.write_root_state_to_sim(obj_root_state, env_ids=env_ids)
     obj.update(0.0)
 
-    # Step 7: Compute goal object pose in hand frame.
-    #
-    # Use stored object_pos_hand / object_quat_hand from the goal grasp
-    # in the grasp graph. Delta between start and goal graph poses is
-    # applied to the actual sim pose to handle frame mismatch from
-    # palm-up transform + tilt noise.
+    # Step 7: Compute goal object pose in hand frame (fully batched).
     robot.update(0.0)
     obj.update(0.0)
 
-    for i in range(n):
-        rp_w = robot.data.root_pos_w[env_ids[i]]
-        rq_w = robot.data.root_quat_w[env_ids[i]]
-        op_w = obj.data.root_pos_w[env_ids[i]]
-        oq_w = obj.data.root_quat_w[env_ids[i]]
-        rel = op_w - rp_w
-        actual_pos_hand = quat_apply_inverse(rq_w.unsqueeze(0), rel.unsqueeze(0))[0]
-        actual_quat_hand = quat_multiply(
-            quat_conjugate(rq_w.unsqueeze(0)), oq_w.unsqueeze(0)
-        )[0]
+    rp_w = robot.data.root_pos_w[env_ids]       # (n, 3)
+    rq_w = robot.data.root_quat_w[env_ids]       # (n, 4)
+    op_w = obj.data.root_pos_w[env_ids]           # (n, 3)
+    oq_w = obj.data.root_quat_w[env_ids]          # (n, 4)
+    actual_pos_hand = quat_apply_inverse(rq_w, op_w - rp_w)     # (n, 3)
+    actual_quat_hand = quat_multiply(quat_conjugate(rq_w), oq_w) # (n, 4)
 
-        # Compute goal as delta from start grasp's stored object pose
-        s_pos = start_object_pos_hand_list[i]
-        s_quat = start_object_quat_hand_list[i]
-        g_pos = goal_object_pos_hand_list[i]
-        g_quat = goal_object_quat_hand_list[i]
+    # Build batched tensors from lists (avoid per-env loop for tensor ops)
+    has_all_poses = (
+        all(p is not None for p in start_object_pos_hand_list)
+        and all(q is not None for q in start_object_quat_hand_list)
+        and all(p is not None for p in goal_object_pos_hand_list)
+        and all(q is not None for q in goal_object_quat_hand_list)
+    )
+    if has_all_poses:
+        s_pos_t = torch.tensor(np.stack(start_object_pos_hand_list), device=env.device, dtype=torch.float32)
+        g_pos_t = torch.tensor(np.stack(goal_object_pos_hand_list), device=env.device, dtype=torch.float32)
+        s_quat_t = torch.tensor(np.stack(start_object_quat_hand_list), device=env.device, dtype=torch.float32)
+        g_quat_t = torch.tensor(np.stack(goal_object_quat_hand_list), device=env.device, dtype=torch.float32)
 
-        if s_pos is not None and g_pos is not None \
-                and s_quat is not None and g_quat is not None:
-            # Position delta
-            delta_pos = torch.tensor(g_pos, device=env.device, dtype=torch.float32) \
-                      - torch.tensor(s_pos, device=env.device, dtype=torch.float32)
-            target_pos = actual_pos_hand + delta_pos
+        delta_pos = g_pos_t - s_pos_t
+        target_pos = actual_pos_hand + delta_pos
 
-            # Orientation delta: delta_q = conj(start_q) * goal_q
-            sq = torch.tensor(s_quat, device=env.device, dtype=torch.float32).unsqueeze(0)
-            gq = torch.tensor(g_quat, device=env.device, dtype=torch.float32).unsqueeze(0)
-            delta_quat = quat_multiply(quat_conjugate(sq), gq)[0]
-            target_quat = quat_multiply(actual_quat_hand.unsqueeze(0), delta_quat.unsqueeze(0))[0]
-            target_quat = target_quat / (torch.norm(target_quat) + 1e-8)
+        delta_quat = quat_multiply(quat_conjugate(s_quat_t), g_quat_t)
+        target_quat = quat_multiply(actual_quat_hand, delta_quat)
+        target_quat = target_quat / (torch.norm(target_quat, dim=-1, keepdim=True) + 1e-8)
 
-            env.extras["target_object_pos_hand"][env_ids[i]] = target_pos
-            env.extras["target_object_quat_hand"][env_ids[i]] = target_quat
-        else:
-            # Fallback: no stored object poses → goal = current
-            env.extras["target_object_pos_hand"][env_ids[i]] = actual_pos_hand.clone()
-            env.extras["target_object_quat_hand"][env_ids[i]] = actual_quat_hand.clone()
+        env.extras["target_object_pos_hand"][env_ids] = target_pos
+        env.extras["target_object_quat_hand"][env_ids] = target_quat
+    else:
+        env.extras["target_object_pos_hand"][env_ids] = actual_pos_hand
+        env.extras["target_object_quat_hand"][env_ids] = actual_quat_hand
 
     # ------------------------------------------------------------------
     # Log start→goal distances (position & orientation) at reset
