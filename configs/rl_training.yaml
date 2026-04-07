@@ -89,7 +89,7 @@ ppo:
   normalize_advantage: true
 
   # Slightly stronger reward scale so dense goal rewards are not drowned out early.
-  reward_shaper_scale: 0.2
+  reward_shaper_scale: 1.0
 
   # Rollout
   # Paper (arXiv:2502.04307) batch_size=8192: num_envs(512) × horizon(16) = 8192.

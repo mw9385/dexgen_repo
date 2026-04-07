@@ -379,16 +379,16 @@ if _ISAACLAB_AVAILABLE:
         #   pos ~ 5-10cm,  orn ~ 0.5-1.5rad
         # ══════════════════════════════════════════════════════════════
 
-        # Orientation delta: (prev_err - cur_err) ★ PRIMARY
+        # Orientation delta: (prev_err - cur_err) × 100
         object_orientation = RewTerm(
             func=mdp_rewards.orientation_delta_reward,
-            weight=1.0,
+            weight=100.0,
             params={},
         )
-        # Position delta: (prev_err - cur_err)
+        # Position delta: (prev_err - cur_err) × 100
         object_position = RewTerm(
             func=mdp_rewards.position_delta_reward,
-            weight=1.0,
+            weight=100.0,
             params={},
         )
         # Goal bonus: +5 on success
@@ -406,7 +406,7 @@ if _ISAACLAB_AVAILABLE:
         )
         action = RewTerm(
             func=mdp_rewards.action_penalty,
-            weight=0.0002,
+            weight=0.0,
             params={},
         )
 
