@@ -388,7 +388,7 @@ if _ISAACLAB_AVAILABLE:
         # Object position → [0, 1]  (secondary, keep object centered)
         object_position = RewTerm(
             func=mdp_rewards.object_position_reward,
-            weight=0.5,
+            weight=0.1,
             params={"alpha": 10.0},
         )
         # Goal bonus → {0, 1}  (triggers rolling goal update)
