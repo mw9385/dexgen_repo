@@ -505,7 +505,7 @@ def _sample_start_and_nn_goal(
     start_idx = int(rng.integers(0, N))
     start_grasp = g.grasp_set[start_idx]
     # Curriculum: start with easy goals, increase min_orn over time
-    cur_min_orn = getattr(graph, "_curriculum_min_orn", 0.05)
+    cur_min_orn = getattr(graph, "_curriculum_min_orn", 0.15)
     goal_idx = _sample_nearby_goal_index(g, start_idx, rng, min_orn=cur_min_orn, num_fingers=env_num_fingers)
     goal_grasp = g.grasp_set[goal_idx]
 
@@ -539,7 +539,7 @@ def _sample_start_and_nn_goal(
 
 def _sample_nearby_goal_index(
     graph, start_idx: int, rng: np.random.Generator,
-    top_k: int = 5, min_orn: float = 0.05,
+    top_k: int = 5, min_orn: float = 0.15,
     num_fingers: int = 5,
 ) -> int:
     """
@@ -605,7 +605,7 @@ def update_curriculum(env, epoch: int, total_epochs: int = 10000):
         return
     warmup_epochs = int(total_epochs * 0.3)
     t = min(epoch / max(warmup_epochs, 1), 1.0)
-    min_orn_start = 0.05
+    min_orn_start = 0.15
     min_orn_end = 0.50
     graph._curriculum_min_orn = min_orn_start + t * (min_orn_end - min_orn_start)
 
