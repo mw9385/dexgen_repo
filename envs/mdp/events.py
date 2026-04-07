@@ -164,7 +164,7 @@ def reset_to_random_grasp(
         batch_size = len(env_indices)
         # Batch random start indices
         starts = rng.integers(0, N_grasps, size=batch_size)
-        cur_min_orn = getattr(graph, "_curriculum_min_orn", 0.15)
+        cur_min_orn = getattr(graph, "_curriculum_min_orn", 0.5)
         # Batch goal selection
         for j, local_i in enumerate(env_indices):
             start_idx_list[local_i] = int(starts[j])
@@ -547,7 +547,7 @@ def _sample_start_and_nn_goal(
     start_idx = int(rng.integers(0, N))
     start_grasp = g.grasp_set[start_idx]
     # Curriculum: start with easy goals, increase min_orn over time
-    cur_min_orn = getattr(graph, "_curriculum_min_orn", 0.15)
+    cur_min_orn = getattr(graph, "_curriculum_min_orn", 0.5)
     goal_idx = _sample_nearby_goal_index(g, start_idx, rng, min_orn=cur_min_orn, num_fingers=env_num_fingers)
     goal_grasp = g.grasp_set[goal_idx]
 
@@ -581,7 +581,7 @@ def _sample_start_and_nn_goal(
 
 def _sample_nearby_goal_index(
     graph, start_idx: int, rng: np.random.Generator,
-    top_k: int = 5, min_orn: float = 0.15,
+    top_k: int = 5, min_orn: float = 0.5,
     num_fingers: int = 5,
 ) -> int:
     """
@@ -663,8 +663,8 @@ def update_curriculum(env, epoch: int, total_epochs: int = 10000):
         return
     warmup_epochs = int(total_epochs * 0.3)
     t = min(epoch / max(warmup_epochs, 1), 1.0)
-    min_orn_start = 0.15
-    min_orn_end = 0.50
+    min_orn_start = 0.50
+    min_orn_end = 1.50
     graph._curriculum_min_orn = min_orn_start + t * (min_orn_end - min_orn_start)
 
 # ---------------------------------------------------------------------------
@@ -1094,7 +1094,7 @@ def _log_goal_distances(env, env_ids: torch.Tensor):
         orn_d = 2.0 * float(torch.acos(torch.tensor(dot)).item())
         orn_dists.append(orn_d)
 
-    at_goal = sum(1 for p, o in zip(pos_dists, orn_dists) if p < 0.05 and o < 0.4)
+    at_goal = sum(1 for p, o in zip(pos_dists, orn_dists) if o < 0.4)
     print(f"[Goal] Reset #{_GOAL_LOG_COUNT} ({n} envs)  "
           f"pos: {np.mean(pos_dists):.4f}m [{np.min(pos_dists):.4f}-{np.max(pos_dists):.4f}]  "
           f"orn: {np.mean(orn_dists):.2f}rad [{np.min(orn_dists):.2f}-{np.max(orn_dists):.2f}]  "
