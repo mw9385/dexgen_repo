@@ -479,6 +479,14 @@ def reset_to_random_grasp(
             env.extras["target_object_quat_hand"][env_ids[i]] = actual_quat_hand.clone()
 
     # ------------------------------------------------------------------
+    # DEBUG: Log start→goal distances in hand frame (position & orientation)
+    # ------------------------------------------------------------------
+    _debug_goal_dist_at_reset(env, env_ids, start_object_pos_hand_list,
+                              start_object_quat_hand_list,
+                              goal_object_pos_hand_list,
+                              goal_object_quat_hand_list)
+
+    # ------------------------------------------------------------------
     # 8. Initialise action buffers
     # ------------------------------------------------------------------
     current_q = robot.data.joint_pos[env_ids]   # (n, num_dof=24)
@@ -617,7 +625,9 @@ def _sample_nearby_goal_index(
     max_finger_dist[start_idx] = np.inf
 
     valid_idx = np.where((np.isfinite(max_finger_dist)) & (max_finger_dist >= min_dist))[0]
+    fallback_used = False
     if len(valid_idx) == 0:
+        fallback_used = True
         valid_idx = np.where(np.isfinite(max_finger_dist))[0]
         if len(valid_idx) == 0:
             return start_idx
@@ -627,7 +637,24 @@ def _sample_nearby_goal_index(
     k = min(top_k, len(valid_idx))
     top_k_local = np.argpartition(total_dist, k - 1)[:k]
     top_k_indices = valid_idx[top_k_local]
-    return int(rng.choice(top_k_indices))
+    chosen = int(rng.choice(top_k_indices))
+
+    # --- DEBUG: log goal sampling diagnostics ---
+    global _GOAL_DEBUG_RESET_COUNT
+    if _GOAL_DEBUG_RESET_COUNT <= 3:
+        chosen_dist = float(max_finger_dist[chosen])
+        chosen_total = float(np.linalg.norm(all_fps[chosen] - start_flat))
+        finite_dists = max_finger_dist[np.isfinite(max_finger_dist)]
+        print(f"  [DEBUG SAMPLE] N={N}, valid(>={min_dist:.3f}m)={len(valid_idx)}/{N-1}, "
+              f"fallback={fallback_used}, "
+              f"chosen_idx={chosen}, max_finger_dist={chosen_dist:.4f}m, "
+              f"total_fp_dist={chosen_total:.4f}m, "
+              f"all max_finger_dist: median={np.median(finite_dists):.4f}m "
+              f"p10={np.percentile(finite_dists, 10):.4f}m "
+              f"p90={np.percentile(finite_dists, 90):.4f}m")
+    # --- end DEBUG ---
+
+    return chosen
 
 # ---------------------------------------------------------------------------
 # Curriculum: gradually increase goal difficulty
@@ -1039,6 +1066,150 @@ def _load_grasp_graph(env):
     _GRASP_GRAPH_CACHE[cache_key] = graph
     graph.summary()
     return graph
+
+
+# ---------------------------------------------------------------------------
+# DEBUG: Goal distance diagnostics
+# ---------------------------------------------------------------------------
+
+_GOAL_DEBUG_RESET_COUNT = 0
+_GOAL_DEBUG_STEP_COUNT = 0
+
+def _debug_goal_dist_at_reset(
+    env,
+    env_ids: torch.Tensor,
+    start_obj_pos_list, start_obj_quat_list,
+    goal_obj_pos_list, goal_obj_quat_list,
+):
+    """
+    Print detailed start→goal distance diagnostics at reset time.
+    Logs both graph-level (stored poses) and sim-level (actual env.extras targets).
+    Called every reset; prints summary every time, detail for first 5 resets.
+    """
+    global _GOAL_DEBUG_RESET_COUNT
+    _GOAL_DEBUG_RESET_COUNT += 1
+    verbose = _GOAL_DEBUG_RESET_COUNT <= 5
+
+    n = len(env_ids)
+    # --- Graph-level distances (stored object poses) ---
+    graph_pos_dists = []
+    graph_orn_dists = []
+    for i in range(n):
+        sp = start_obj_pos_list[i]
+        gp = goal_obj_pos_list[i]
+        sq = start_obj_quat_list[i]
+        gq = goal_obj_quat_list[i]
+        if sp is not None and gp is not None:
+            d = float(np.linalg.norm(np.array(gp) - np.array(sp)))
+            graph_pos_dists.append(d)
+        if sq is not None and gq is not None:
+            dot = abs(float(np.dot(np.array(sq), np.array(gq))))
+            dot = min(dot, 1.0)
+            graph_orn_dists.append(2.0 * float(np.arccos(dot)))
+
+    # --- Sim-level distances (actual target vs current in hand frame) ---
+    sim_pos_dists = []
+    sim_orn_dists = []
+    target_pos = env.extras.get("target_object_pos_hand")
+    target_quat = env.extras.get("target_object_quat_hand")
+    if target_pos is not None and target_quat is not None:
+        robot = env.scene["robot"]
+        obj = env.scene["object"]
+        for i, eid in enumerate(env_ids.tolist()):
+            rp = robot.data.root_pos_w[eid]
+            rq = robot.data.root_quat_w[eid]
+            op = obj.data.root_pos_w[eid]
+            oq = obj.data.root_quat_w[eid]
+            cur_pos = quat_apply_inverse(rq.unsqueeze(0), (op - rp).unsqueeze(0))[0]
+            cur_quat = quat_multiply(quat_conjugate(rq.unsqueeze(0)), oq.unsqueeze(0))[0]
+            tgt_pos = target_pos[eid]
+            tgt_quat = target_quat[eid]
+
+            pos_d = float(torch.norm(cur_pos - tgt_pos).item())
+            sim_pos_dists.append(pos_d)
+
+            dot = float(torch.abs(torch.dot(cur_quat, tgt_quat)).clamp(0.0, 1.0).item())
+            orn_d = 2.0 * float(torch.acos(torch.tensor(dot)).item())
+            sim_orn_dists.append(orn_d)
+
+    # --- Print summary ---
+    print(f"\n[DEBUG GOAL DIST] ══ Reset #{_GOAL_DEBUG_RESET_COUNT} ({n} envs) ══")
+    if graph_pos_dists:
+        print(f"  Graph obj_pos delta:  mean={np.mean(graph_pos_dists):.4f}m  "
+              f"min={np.min(graph_pos_dists):.4f}m  max={np.max(graph_pos_dists):.4f}m")
+    else:
+        print("  Graph obj_pos delta:  N/A (no stored object poses)")
+    if graph_orn_dists:
+        print(f"  Graph obj_orn delta:  mean={np.mean(graph_orn_dists):.2f}rad  "
+              f"min={np.min(graph_orn_dists):.2f}rad  max={np.max(graph_orn_dists):.2f}rad")
+
+    if sim_pos_dists:
+        print(f"  Sim target pos dist:  mean={np.mean(sim_pos_dists):.4f}m  "
+              f"min={np.min(sim_pos_dists):.4f}m  max={np.max(sim_pos_dists):.4f}m")
+        too_close_pos = sum(1 for d in sim_pos_dists if d < 0.01)
+        already_done  = sum(1 for d, o in zip(sim_pos_dists, sim_orn_dists)
+                           if d < 0.02 and o < 0.1)
+        print(f"  Sim target orn dist:  mean={np.mean(sim_orn_dists):.2f}rad  "
+              f"min={np.min(sim_orn_dists):.2f}rad  max={np.max(sim_orn_dists):.2f}rad")
+        print(f"  ⚠ Too close (pos<1cm): {too_close_pos}/{n}  "
+              f"Already at goal (pos<2cm & orn<0.1rad): {already_done}/{n}")
+    else:
+        print("  Sim target dist:     N/A (target not set)")
+
+    # --- Per-env detail for first few resets ---
+    if verbose and sim_pos_dists:
+        for i in range(min(n, 4)):
+            eid = int(env_ids[i].item())
+            print(f"    env[{eid}]: pos_dist={sim_pos_dists[i]:.5f}m  "
+                  f"orn_dist={sim_orn_dists[i]:.3f}rad  "
+                  f"graph_pos_delta={'%.5f' % graph_pos_dists[i] if i < len(graph_pos_dists) else 'N/A'}m")
+    print(f"[DEBUG GOAL DIST] ══════════════════════════════════\n")
+
+
+def debug_goal_distance_per_step(env, log_interval: int = 100):
+    """
+    Call this every step (e.g., from training loop or post-step hook) to
+    periodically log goal distance statistics across all envs.
+
+    Usage in train_rl.py:
+        from envs.mdp.events import debug_goal_distance_per_step
+        # inside step loop:
+        debug_goal_distance_per_step(env, log_interval=200)
+    """
+    global _GOAL_DEBUG_STEP_COUNT
+    _GOAL_DEBUG_STEP_COUNT += 1
+    if _GOAL_DEBUG_STEP_COUNT % log_interval != 0:
+        return
+
+    target_pos = env.extras.get("target_object_pos_hand")
+    target_quat = env.extras.get("target_object_quat_hand")
+    if target_pos is None or target_quat is None:
+        return
+
+    robot = env.scene["robot"]
+    obj = env.scene["object"]
+    root_pos = robot.data.root_pos_w
+    root_quat = robot.data.root_quat_w
+    cur_pos = quat_apply_inverse(root_quat, obj.data.root_pos_w - root_pos)
+    cur_quat = quat_multiply(quat_conjugate(root_quat), obj.data.root_quat_w)
+
+    pos_err = torch.norm(cur_pos - target_pos, dim=-1)
+    dot = (cur_quat * target_quat).sum(dim=-1).abs().clamp(0.0, 1.0)
+    orn_err = 2.0 * torch.acos(dot)
+
+    at_goal = ((pos_err < 0.02) & (orn_err < 0.1)).sum().item()
+    too_close = (pos_err < 0.005).sum().item()
+
+    # Reward values at current state (for debugging reward signal strength)
+    pos_rew = torch.exp(-10.0 * pos_err)
+    orn_rew = torch.exp(-2.0 * orn_err)
+
+    print(f"[DEBUG STEP {_GOAL_DEBUG_STEP_COUNT}] "
+          f"pos_err: {pos_err.mean():.4f}±{pos_err.std():.4f}m "
+          f"(min={pos_err.min():.4f}, max={pos_err.max():.4f})  "
+          f"orn_err: {orn_err.mean():.2f}±{orn_err.std():.2f}rad  "
+          f"pos_rew: {pos_rew.mean():.3f}  orn_rew: {orn_rew.mean():.3f}  "
+          f"at_goal: {at_goal}/{env.num_envs}  too_close(<5mm): {too_close}/{env.num_envs}")
 
 
 # ---------------------------------------------------------------------------
