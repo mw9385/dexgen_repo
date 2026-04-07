@@ -673,8 +673,8 @@ def update_curriculum(env, epoch: int, total_epochs: int = 10000):
 
 def update_rolling_goal(
     env,
-    pos_threshold: float = 0.02,
-    rot_threshold: float = 0.1,
+    pos_threshold: float = 0.05,
+    rot_threshold: float = 0.4,
 ) -> int:
     """
     Called every step. For each env where the object pose is within
@@ -1094,7 +1094,7 @@ def _log_goal_distances(env, env_ids: torch.Tensor):
         orn_d = 2.0 * float(torch.acos(torch.tensor(dot)).item())
         orn_dists.append(orn_d)
 
-    at_goal = sum(1 for p, o in zip(pos_dists, orn_dists) if p < 0.02 and o < 0.1)
+    at_goal = sum(1 for p, o in zip(pos_dists, orn_dists) if p < 0.05 and o < 0.4)
     print(f"[Goal] Reset #{_GOAL_LOG_COUNT} ({n} envs)  "
           f"pos: {np.mean(pos_dists):.4f}m [{np.min(pos_dists):.4f}-{np.max(pos_dists):.4f}]  "
           f"orn: {np.mean(orn_dists):.2f}rad [{np.min(orn_dists):.2f}-{np.max(orn_dists):.2f}]  "

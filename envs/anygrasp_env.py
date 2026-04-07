@@ -385,17 +385,11 @@ if _ISAACLAB_AVAILABLE:
             weight=1.0,
             params={},
         )
-        # Position delta: (prev_err - cur_err)
-        object_position = RewTerm(
-            func=mdp_rewards.position_delta_reward,
-            weight=1.0,
-            params={},
-        )
-        # Goal bonus: +5 on success
+        # Goal bonus: +5 on success (orn < 0.4rad, OpenAI style)
         goal_bonus = RewTerm(
             func=mdp_rewards.goal_bonus,
             weight=5.0,
-            params={"pos_thresh": 0.02, "rot_thresh": 0.1},
+            params={"pos_thresh": 0.05, "rot_thresh": 0.4},
         )
 
         # ── Regularization ────────────────────────────────────────
