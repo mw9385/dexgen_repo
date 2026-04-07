@@ -555,26 +555,23 @@ def _sample_nearby_goal_index(
 
     start_quat = getattr(grasps[start_idx], "object_quat_hand", None)
     if start_quat is None:
-        # No orientation data — fall back to random
         idx = int(rng.integers(0, N))
         return idx if idx != start_idx else (start_idx + 1) % N
 
-    sq = np.array(start_quat, dtype=np.float64)
-    sq = sq / (np.linalg.norm(sq) + 1e-8)
+    # Build quaternion array (cached on graph for speed)
+    all_quats = _get_cached_quats(graph)
+    if all_quats is None:
+        idx = int(rng.integers(0, N))
+        return idx if idx != start_idx else (start_idx + 1) % N
 
-    # Compute orientation distance for all grasps
-    orn_dists = np.full(N, np.inf)
-    for j in range(N):
-        if j == start_idx:
-            continue
-        gq = getattr(grasps[j], "object_quat_hand", None)
-        if gq is not None:
-            gq = np.array(gq, dtype=np.float64)
-            gq = gq / (np.linalg.norm(gq) + 1e-8)
-            dot = min(abs(float(np.dot(sq, gq))), 1.0)
-            orn_dists[j] = 2.0 * np.arccos(dot)
+    # Vectorized orientation distance
+    sq = all_quats[start_idx]
+    dots = np.abs(np.dot(all_quats, sq))
+    np.clip(dots, 0.0, 1.0, out=dots)
+    orn_dists = 2.0 * np.arccos(dots)
+    orn_dists[start_idx] = np.inf
 
-    # Filter: orientation >= min_orn to avoid trivially close goals
+    # Filter: orientation >= min_orn
     valid_idx = np.where((np.isfinite(orn_dists)) & (orn_dists >= min_orn))[0]
     if len(valid_idx) == 0:
         valid_idx = np.where(np.isfinite(orn_dists))[0]
@@ -585,7 +582,26 @@ def _sample_nearby_goal_index(
     k = min(top_k, len(valid_idx))
     top_k_local = np.argpartition(orn_dists[valid_idx], k - 1)[:k]
     top_k_indices = valid_idx[top_k_local]
-    chosen = int(rng.choice(top_k_indices))
+    return int(rng.choice(top_k_indices))
+
+
+def _get_cached_quats(graph) -> Optional[np.ndarray]:
+    """Cache normalized quaternion array on the graph object."""
+    if hasattr(graph, "_cached_quats"):
+        return graph._cached_quats
+    grasps = graph.grasp_set.grasps
+    quats = []
+    for g in grasps:
+        q = getattr(g, "object_quat_hand", None)
+        if q is None:
+            graph._cached_quats = None
+            return None
+        quats.append(np.array(q, dtype=np.float64))
+    arr = np.stack(quats)
+    norms = np.linalg.norm(arr, axis=-1, keepdims=True)
+    arr = arr / (norms + 1e-8)
+    graph._cached_quats = arr
+    return arr
 
     return chosen
 
