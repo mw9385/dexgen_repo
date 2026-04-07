@@ -600,10 +600,8 @@ def _sample_nearby_goal_index(
     num_fingers: int = 5,
 ) -> int:
     """
-    Sample a goal grasp from the grasp set, filtered by min_dist.
-
-    min_dist is compared against the MAX per-finger distance (same metric
-    as rolling goal success_threshold) to prevent trivial initial success.
+    Sample a goal grasp from the grasp set, filtered by min_dist on
+    fingertip positions and ranked by orientation distance (geodesic).
 
     Args:
         min_dist: minimum per-finger distance (m). ALL fingers of the
@@ -632,10 +630,26 @@ def _sample_nearby_goal_index(
         if len(valid_idx) == 0:
             return start_idx
 
-    # Sort by total distance (prefer closer goals that still satisfy min_dist)
-    total_dist = np.linalg.norm(all_fps[valid_idx] - start_flat, axis=-1)
+    # Rank by orientation distance (quaternion geodesic) — prefer closer orientation goals
+    start_quat = getattr(grasps[start_idx], "object_quat_hand", None)
+    if start_quat is not None:
+        sq = np.array(start_quat, dtype=np.float64)
+        sq = sq / (np.linalg.norm(sq) + 1e-8)
+        orn_dists = np.full(len(valid_idx), np.inf)
+        for j, vi in enumerate(valid_idx):
+            gq = getattr(grasps[vi], "object_quat_hand", None)
+            if gq is not None:
+                gq = np.array(gq, dtype=np.float64)
+                gq = gq / (np.linalg.norm(gq) + 1e-8)
+                dot = min(abs(float(np.dot(sq, gq))), 1.0)
+                orn_dists[j] = 2.0 * np.arccos(dot)
+        sort_dist = orn_dists
+    else:
+        # Fallback: use fingertip distance if no orientation data
+        sort_dist = np.linalg.norm(all_fps[valid_idx] - start_flat, axis=-1)
+
     k = min(top_k, len(valid_idx))
-    top_k_local = np.argpartition(total_dist, k - 1)[:k]
+    top_k_local = np.argpartition(sort_dist, k - 1)[:k]
     top_k_indices = valid_idx[top_k_local]
     chosen = int(rng.choice(top_k_indices))
 
@@ -644,11 +658,12 @@ def _sample_nearby_goal_index(
     if _GOAL_DEBUG_RESET_COUNT <= 3:
         chosen_dist = float(max_finger_dist[chosen])
         chosen_total = float(np.linalg.norm(all_fps[chosen] - start_flat))
+        chosen_orn = float(sort_dist[np.where(valid_idx == chosen)[0][0]]) if chosen in valid_idx else float("nan")
         finite_dists = max_finger_dist[np.isfinite(max_finger_dist)]
         print(f"  [DEBUG SAMPLE] N={N}, valid(>={min_dist:.3f}m)={len(valid_idx)}/{N-1}, "
               f"fallback={fallback_used}, "
               f"chosen_idx={chosen}, max_finger_dist={chosen_dist:.4f}m, "
-              f"total_fp_dist={chosen_total:.4f}m, "
+              f"orn_dist={chosen_orn:.3f}rad, "
               f"all max_finger_dist: median={np.median(finite_dists):.4f}m "
               f"p10={np.percentile(finite_dists, 10):.4f}m "
               f"p90={np.percentile(finite_dists, 90):.4f}m")
