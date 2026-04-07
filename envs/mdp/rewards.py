@@ -96,8 +96,19 @@ def goal_bonus(env, pos_thresh: float = 0.02, rot_thresh: float = 0.1) -> torch.
 
 
 # ═══════════════════════════════════════════════════════════
-# 2. REGULARIZATION — action penalty only (OpenAI style)
+# 2. PENALTIES
 # ═══════════════════════════════════════════════════════════
+
+def drop_penalty(env, min_height: float = 0.2, max_dist: float = 0.20) -> torch.Tensor:
+    """
+    -1 when object is dropped or leaves hand. 0 otherwise.
+    Returns: (N,) in {-1, 0}
+    """
+    from . import events as mdp_events
+    dropped = mdp_events.object_dropped(env, min_height=min_height)
+    left = mdp_events.object_left_hand(env, max_dist=max_dist)
+    return -(dropped | left).float()
+
 
 def action_penalty(env) -> torch.Tensor:
     """

@@ -398,7 +398,12 @@ if _ISAACLAB_AVAILABLE:
             params={"pos_thresh": 0.02, "rot_thresh": 0.1},
         )
 
-        # ── Regularization ────────────────────────────────────────
+        # ── Penalties ──────────────────────────────────────────────
+        drop = RewTerm(
+            func=mdp_rewards.drop_penalty,
+            weight=20.0,
+            params={},
+        )
         action = RewTerm(
             func=mdp_rewards.action_penalty,
             weight=0.0002,
