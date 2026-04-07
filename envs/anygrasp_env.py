@@ -383,7 +383,7 @@ if _ISAACLAB_AVAILABLE:
         object_orientation = RewTerm(
             func=mdp_rewards.object_orientation_reward,
             weight=10.0,
-            params={"alpha": 2.0},
+            params={"alpha": 10.0},
         )
         # Object position → [0, 1]  (secondary, keep object centered)
         object_position = RewTerm(
