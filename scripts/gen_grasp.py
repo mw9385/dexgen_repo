@@ -318,6 +318,24 @@ def main():
 
         def _reset_idx(self, env_ids):
             super()._reset_idx(env_ids)
+            if len(env_ids) == 0:
+                return
+            # Apply default + 0.15 noise on every reset (including first)
+            rand = 2.0 * torch.rand(
+                (len(env_ids), self.hand.num_joints), device=self.device,
+            ) - 1.0
+            dof_pos = self.hand.data.default_joint_pos[env_ids] + 0.15 * rand
+            dof_pos = saturate(dof_pos, self.dof_lower[env_ids], self.dof_upper[env_ids])
+            self.hand.write_joint_state_to_sim(
+                dof_pos, torch.zeros_like(dof_pos), env_ids=env_ids,
+            )
+            self.hand.set_joint_position_target(dof_pos, env_ids=env_ids)
+            # Reset object to default pose
+            obj_state = self.object.data.default_root_state[env_ids].clone()
+            obj_state[:, :3] += self.scene.env_origins[env_ids]
+            obj_state[:, 7:] = 0.0
+            self.object.write_root_pose_to_sim(obj_state[:, :7], env_ids=env_ids)
+            self.object.write_root_velocity_to_sim(obj_state[:, 7:], env_ids=env_ids)
 
     env = GraspGenEnv(cfg)
     hand = env.hand
@@ -400,33 +418,13 @@ def main():
             saved = torch.cat([saved, states], dim=0)
 
         # ── Reset: failed envs + completed envs ──────────────
+        # _reset_idx handles DOF noise + object reset
         done_ids = torch.unique(torch.cat([
             fail_ids,
             torch.where(at_end)[0],
         ]))
-
         if len(done_ids) > 0:
-            # Reset hand DOF: default + 0.15 * noise (from sharpa)
-            rand = 2.0 * torch.rand(
-                (len(done_ids), hand.num_joints), device=device,
-            ) - 1.0
-            dof_pos = hand.data.default_joint_pos[done_ids] + 0.15 * rand
-            dof_pos = saturate(dof_pos, env.dof_lower[done_ids], env.dof_upper[done_ids])
-
-            hand.write_joint_state_to_sim(
-                dof_pos,
-                torch.zeros_like(dof_pos),
-                env_ids=done_ids,
-            )
-            hand.set_joint_position_target(dof_pos, env_ids=done_ids)
-
-            # Reset object
-            obj_state = obj.data.default_root_state[done_ids].clone()
-            obj_state[:, :3] += env.scene.env_origins[done_ids]
-            obj_state[:, 7:] = 0.0
-            obj.write_root_pose_to_sim(obj_state[:, :7], env_ids=done_ids)
-            obj.write_root_velocity_to_sim(obj_state[:, 7:], env_ids=done_ids)
-
+            env._reset_idx(done_ids)
             env.episode_length_buf[done_ids] = 0
 
         # Progress log
