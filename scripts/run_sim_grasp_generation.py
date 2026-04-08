@@ -52,7 +52,8 @@ def parse_args():
                    help="NFO force-closure quality threshold")
 
     # Phase 2: Physics validation
-    p.add_argument("--settle_steps", type=int, default=15)
+    p.add_argument("--settle_steps", type=int, default=40,
+                   help="Physics steps to hold grasp during validation")
     p.add_argument("--vel_threshold", type=float, default=0.3)
 
     # Graph

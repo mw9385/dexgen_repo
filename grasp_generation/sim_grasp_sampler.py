@@ -57,7 +57,7 @@ class SimGraspValidator:
     def __init__(
         self,
         env,
-        settle_steps: int = 15,
+        settle_steps: int = 40,
         vel_threshold: float = 0.3,
         min_height: float = 0.15,
         max_drift: float = 0.05,
@@ -109,18 +109,18 @@ class SimGraspValidator:
             bs = len(batch)
             env_ids = self.all_env_ids[:bs]
 
-            # 1. Default wrist pose → palm-up
+            # ── 1. Set wrist pose + palm-up ──────────────────────────
             root_state = robot.data.default_root_state[env_ids, :7].clone()
             root_state[:, :3] += env.scene.env_origins[env_ids]
             wrist_pos = root_state[:, :3]
             wrist_quat = root_state[:, 3:7]
             set_robot_root_pose(env, env_ids, wrist_pos, wrist_quat)
 
-            # 2. Set stored joint angles
+            # Set joints first so body positions are valid for palm normal
             joint_list = [g.joint_angles for g in batch]
             set_robot_joints_direct(env, env_ids, joint_list)
 
-            # 3. Move object far away → FK step
+            # Move object far away
             temp = obj.data.default_root_state[env_ids].clone()
             temp[:, :3] = (
                 env.scene.env_origins[env_ids]
@@ -130,10 +130,45 @@ class SimGraspValidator:
             obj.write_root_state_to_sim(temp, env_ids=env_ids)
             obj.update(0.0)
 
+            # FK step so body_pos_w is accurate
             env.sim.step(render=self.render)
             env.scene.update(dt=env.physics_dt)
 
-            # 4. Place object at Isaac FK fingertip centroid
+            # Apply palm-up rotation (same as apply_palm_up_transform)
+            from envs.mdp.sim_utils import (
+                get_local_palm_normal,
+                get_fingertip_body_ids_from_env,
+            )
+            from envs.mdp.math_utils import quat_from_two_vectors, quat_multiply
+            from isaaclab.utils.math import quat_apply
+
+            cur_wrist_pos = robot.data.root_pos_w[env_ids].clone()
+            cur_wrist_quat = robot.data.root_quat_w[env_ids].clone()
+            palm_n_local = get_local_palm_normal(robot, env)
+            palm_n_local = palm_n_local.unsqueeze(0).expand(bs, 3)
+            palm_n_world = quat_apply(cur_wrist_quat, palm_n_local)
+            target_up = torch.tensor(
+                [0.0, 0.0, 1.0], device=self.device,
+            ).expand(bs, 3)
+            correction = quat_from_two_vectors(palm_n_world, target_up)
+
+            ft_world = robot.data.body_pos_w[env_ids][:, self.ft_ids, :]
+            pivot = ft_world.mean(dim=1)
+
+            new_wrist_quat = quat_multiply(correction, cur_wrist_quat)
+            new_wrist_quat = new_wrist_quat / (
+                torch.norm(new_wrist_quat, dim=-1, keepdim=True) + 1e-8
+            )
+            wrist_rel = cur_wrist_pos - pivot
+            new_wrist_pos = quat_apply(correction, wrist_rel) + pivot
+
+            set_robot_root_pose(env, env_ids, new_wrist_pos, new_wrist_quat)
+
+            # FK step after palm-up rotation
+            env.sim.step(render=self.render)
+            env.scene.update(dt=env.physics_dt)
+
+            # ── 2. Place object at fingertip centroid (palm-up FK) ───
             ft_pos = robot.data.body_pos_w[env_ids][:, self.ft_ids, :]
             obj_pos = ft_pos.mean(dim=1)
 
@@ -146,7 +181,7 @@ class SimGraspValidator:
             obj.write_root_state_to_sim(obj_state, env_ids=env_ids)
             obj.update(0.0)
 
-            # 5. Physics settle — re-apply joint targets each step
+            # ── 3. Hold grasp: re-apply targets each step ───────────
             q_batch = torch.stack([
                 torch.tensor(g.joint_angles, device=self.device,
                              dtype=torch.float32)
@@ -157,7 +192,7 @@ class SimGraspValidator:
                 env.sim.step(render=self.render)
                 env.scene.update(dt=env.physics_dt)
 
-            # 6. Check stability
+            # ── 4. Check stability ──────────────────────────────────
             speed = torch.norm(
                 obj.data.root_lin_vel_w[env_ids], dim=-1,
             )
