@@ -75,8 +75,15 @@ def main():
     shape = args.shapes[0]
     size = float(args.size_min)
 
-    # Create env
+    # Create env with LOW depenetration velocity
+    # (default 5.0 ejects objects violently — 0.1 resolves overlaps gently)
     env_cfg = _build_env_cfg(shape, size, args.num_envs)
+    import isaaclab.sim as sim_utils
+    env_cfg.scene.object.spawn.rigid_props = sim_utils.RigidBodyPropertiesCfg(
+        disable_gravity=False,
+        max_depenetration_velocity=0.1,
+        enable_gyroscopic_forces=True,
+    )
     env = ManagerBasedRLEnv(env_cfg)
     robot = env.scene["robot"]
     obj = env.scene["object"]
@@ -203,11 +210,27 @@ def main():
             print(f"    obj_center={obj_pos[0].tolist()}")
             print(f"    (holding for {args.interval}s — inspect in GUI)")
 
-            # Hold and render for interval seconds (NO PHYSICS — static view)
+            # Hold with physics — force joints, let PhysX handle object
             t0 = time.time()
+            step_count = 0
             while time.time() - t0 < args.interval and sim_app.is_running():
-                # Render only, no physics step — object stays in place
-                sim_app.update()
+                robot.write_joint_state_to_sim(q, torch.zeros_like(q), env_ids=env_ids)
+                env.sim.step(render=True)
+                env.scene.update(dt=env.physics_dt)
+                step_count += 1
+
+            # Report final state
+            obj_vel = torch.norm(obj.data.root_lin_vel_w[0]).item()
+            obj_z = obj.data.root_pos_w[0, 2].item()
+            obj_pos_final = obj.data.root_pos_w[0].tolist()
+            ft_final = robot.data.body_pos_w[0, ft_ids, :]
+            centroid_final = ft_final.mean(dim=0)
+            drift = torch.norm(obj.data.root_pos_w[0, :3] - centroid_final).item()
+            held = obj_z > 0.15 and drift < 0.05
+            status = "HELD" if held else "DROPPED"
+            print(f"    → {status} after {step_count} steps: "
+                  f"vel={obj_vel:.4f}, z={obj_z:.3f}, "
+                  f"drift={drift:.3f}\n")
 
             grasp_idx += 1
 
