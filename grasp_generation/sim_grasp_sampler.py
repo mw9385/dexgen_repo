@@ -1,20 +1,21 @@
 """
-Isaac Sim Batched Grasp Sampler with Physics Validation
-========================================================
-Generates grasps by sampling joint configs in Isaac Sim, holding them
-via position control for multiple physics steps, and validating that
-the object stays stable in the hand.
+Isaac Sim Batched Grasp Sampler — Close-from-Open Strategy
+===========================================================
+Generates grasps by simulating active finger closing in Isaac Sim.
 
 Pipeline per round:
   1. (Init, once) Apply palm-up transform so palm faces +Z
-  2. Set sampled joint angles as position targets in all N envs
-  3. Place object at fingertip centroid
-  4. Step physics for hold_steps — actuators maintain pose,
-     PhysX handles contact. This gives time for the grasp to stabilise.
-  5. Validate: velocity, height, contact distance, penetration, NFO
+  2. Set all envs to OPEN hand (fingers extended)
+  3. Place object above palm (at open-hand fingertip centroid)
+  4. Set sampled CLOSING targets as joint position targets
+  5. Step physics for hold_steps — actuators drive fingers toward
+     targets, PhysX handles contact. Fingers stop where they meet
+     the object surface.
+  6. Validate after holding: velocity, height, contact, NFO
 
-No separate FK/physics phases — everything runs through physics
-so the hand actually holds the object visually and physically.
+This "close-from-open" approach ensures fingers actually wrap around
+the object, unlike random joint sampling where fingers might never
+touch the object.
 """
 
 from __future__ import annotations
@@ -130,9 +131,55 @@ class SimGraspSampler:
         self.q_mid = (self.q_low + self.q_high) / 2.0
         self.q_mid[self._WRIST_JOINTS] = 0.0
 
-        # Noise scale
+        # Open hand pre-shape: fingers mostly extended (20% into range)
+        self.q_open = self.q_low + 0.20 * self.q_range
+        self.q_open[self._WRIST_JOINTS] = 0.0
+
+        # Closing target center: biased toward flexion so fingers
+        # actually close around the object
+        # Shadow Hand 24-DOF joint indices:
+        #   [0,1]=wrist, [2]=FFJ4(passive), [3-5]=FFJ3/2/1,
+        #   [6]=MFJ4(passive), [7-9]=MFJ3/2/1,
+        #   [10]=RFJ4(passive), [11-13]=RFJ3/2/1,
+        #   [14]=LFJ5(passive), [15-18]=LFJ4/3/2/1,
+        #   [19-23]=THJ4/3/2/1/0
+        _CLOSING_BIASES = {
+            # Thumb opposition + flexion (critical for grasping)
+            19: 0.25,   # THJ4: opposition
+            20: 0.20,   # THJ3: flexion
+            21: 0.15,   # THJ2: flexion
+            # MCP flexion — curls fingers toward palm
+            3: 0.20,    # FFJ3
+            7: 0.20,    # MFJ3
+            11: 0.20,   # RFJ3
+            16: 0.20,   # LFJ3
+            # PIP flexion — wraps fingers around object
+            4: 0.30,    # FFJ2
+            8: 0.30,    # MFJ2
+            12: 0.30,   # RFJ2
+            17: 0.30,   # LFJ2
+            # DIP flexion
+            5: 0.15,    # FFJ1
+            9: 0.15,    # MFJ1
+            13: 0.15,   # RFJ1
+            18: 0.15,   # LFJ1
+        }
+        self.q_close_center = self.q_mid.clone()
+        self.q_close_center[self._WRIST_JOINTS] = 0.0
+        for jidx, bias in _CLOSING_BIASES.items():
+            if jidx < self.num_dof:
+                self.q_close_center[jidx] += bias * self.q_range[jidx]
+        self.q_close_center = torch.clamp(
+            self.q_close_center, self.q_low, self.q_high,
+        )
+
+        # Noise scale for closing targets
         self.noise_scale = self.q_range.clone() * self.noise_std
         self.noise_scale[self._WRIST_JOINTS] = 0.0
+        # Passive joints: less noise
+        for j in [2, 6, 10, 14]:  # passive spread joints
+            if j < self.num_dof:
+                self.noise_scale[j] *= 0.3
 
         # Object mesh
         self.mesh = make_primitive_mesh(object_shape, object_size)
@@ -331,9 +378,10 @@ class SimGraspSampler:
     # ------------------------------------------------------------------
 
     def _sample_joints(self) -> torch.Tensor:
+        """Sample closing targets: biased toward flexion + noise."""
         N = self.num_envs
         noise = torch.randn(N, self.num_dof, device=self.device)
-        q = self.q_mid.unsqueeze(0) + noise * self.noise_scale.unsqueeze(0)
+        q = self.q_close_center.unsqueeze(0) + noise * self.noise_scale.unsqueeze(0)
         return torch.clamp(q, self.q_low, self.q_high)
 
     def _sample_joints_perturb(
@@ -353,17 +401,18 @@ class SimGraspSampler:
 
     def _evaluate_round(
         self,
-        joint_targets: torch.Tensor,
+        closing_targets: torch.Tensor,
         reject_counts: dict,
         verbose: bool = False,
     ) -> List[Grasp]:
         """
-        One round of physics-based grasp evaluation.
+        Close-from-open grasp evaluation.
 
-        1. Set palm-up wrist + joint targets
-        2. Place object at fingertip centroid
-        3. Hold for hold_steps (position control active)
-        4. Validate after holding
+        1. Palm-up wrist + OPEN hand
+        2. Place object at open-hand fingertip centroid
+        3. Switch to CLOSING targets — actuators drive fingers closed
+        4. Hold for hold_steps — fingers wrap around object
+        5. Validate
         """
         from envs.mdp.sim_utils import set_robot_root_pose
 
@@ -373,19 +422,19 @@ class SimGraspSampler:
         robot = self.robot
         obj = self.obj
 
-        # ── 1. Set palm-up wrist pose ────────────────────────────────
+        # ── 1. Palm-up wrist + OPEN hand ─────────────────────────────
         set_robot_root_pose(
             env, env_ids,
             self._palm_up_wrist_pos, self._palm_up_wrist_quat,
         )
 
-        # ── 2. Set joint targets + state ─────────────────────────────
+        q_open = self.q_open.unsqueeze(0).expand(N, -1)
         robot.write_joint_state_to_sim(
-            joint_targets, torch.zeros_like(joint_targets), env_ids=env_ids,
+            q_open, torch.zeros_like(q_open), env_ids=env_ids,
         )
-        robot.set_joint_position_target(joint_targets, env_ids=env_ids)
+        robot.set_joint_position_target(q_open, env_ids=env_ids)
 
-        # Move object away during FK init
+        # Move object away for FK step
         temp = obj.data.default_root_state[env_ids].clone()
         temp[:, :3] = (
             env.scene.env_origins[env_ids]
@@ -395,13 +444,13 @@ class SimGraspSampler:
         obj.write_root_state_to_sim(temp, env_ids=env_ids)
         obj.update(0.0)
 
-        # FK step to get fingertip positions
+        # FK step — resolve open hand fingertip positions
         env.sim.step(render=self.render)
         env.scene.update(dt=env.physics_dt)
 
-        # ── 3. Place object at fingertip centroid ────────────────────
-        ft_pos = robot.data.body_pos_w[env_ids][:, self.ft_ids, :]
-        obj_pos_w = ft_pos.mean(dim=1)  # (N, 3)
+        # ── 2. Place object at open-hand fingertip centroid ──────────
+        ft_open = robot.data.body_pos_w[env_ids][:, self.ft_ids, :]
+        obj_pos_w = ft_open.mean(dim=1)  # (N, 3)
 
         obj_state = obj.data.default_root_state[env_ids].clone()
         obj_state[:, :3] = obj_pos_w
@@ -412,10 +461,11 @@ class SimGraspSampler:
         obj.write_root_state_to_sim(obj_state, env_ids=env_ids)
         obj.update(0.0)
 
-        # ── 4. Hold grasp: step physics with position control ────────
-        # Re-apply joint targets each step to keep actuators locked
+        # ── 3. Switch to closing targets ─────────────────────────────
+        # Now fingers will drive toward the closing configuration.
+        # PhysX handles contact — fingers stop at the object surface.
         for step in range(self.hold_steps):
-            robot.set_joint_position_target(joint_targets, env_ids=env_ids)
+            robot.set_joint_position_target(closing_targets, env_ids=env_ids)
             env.sim.step(render=self.render)
             env.scene.update(dt=env.physics_dt)
 
