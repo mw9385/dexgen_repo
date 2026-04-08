@@ -112,24 +112,27 @@ optimization:
 # Isaac Sim Physics-based Sampling (recommended — no FK mismatch, no penetration)
 # ==============================================================================
 #
-# Algorithm:
-#   1. Sample joint configurations (pre-shape centered + noise)
-#   2. Set joints in N parallel Isaac Sim environments
-#   3. Place objects at fingertip centroids
-#   4. PhysX physics settle → detect penetration via object ejection
-#   5. Validate fingertip contact distance
-#   6. Collect stable, non-penetrating grasps
+# Algorithm (grasp-by-closing):
+#   1. Orient hand palm-up, set fingers to open pre-shape
+#   2. Place object above the palm center
+#   3. Set finger joint targets to a sampled closing configuration
+#   4. Step physics for closing_steps → fingers close around object
+#      (PhysX resolves contact naturally — fingers stop at object surface)
+#   5. Step physics for settle_steps → verify grasp stability
+#   6. Validate: fingertip contact, no penetration, object stable
+#   7. Extract actual post-contact joint positions as the grasp
 #
 # Advantages:
 #   - FK computed by Isaac Sim directly → no MJCF-Isaac mismatch
 #   - Collision detection by PhysX → no analytical SDF approximation
-#   - Generated grasps are physics-validated by construction
+#   - Fingers physically interact with object → real grasps
 #   - Joint angles in 24-DOF Isaac format directly (no conversion needed)
 #
 sim_heuristic:
   num_envs: 64                  # parallel environments for batched sampling
   noise_std: 0.25               # joint noise std (fraction of joint range)
-  settle_steps: 8               # physics steps for settle test
+  closing_steps: 40             # physics steps for finger closing phase
+  settle_steps: 10              # physics steps for stability verification
   vel_threshold: 0.25           # max object velocity after settle (m/s)
   contact_threshold: 0.015      # max fingertip-to-surface distance for contact (m)
   min_contact_fingers: 3        # minimum fingertips in contact (out of 5)

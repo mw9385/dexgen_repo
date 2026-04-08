@@ -57,8 +57,10 @@ def parse_args():
     # Sampler parameters
     p.add_argument("--noise_std", type=float, default=0.25,
                    help="Joint noise std (fraction of joint range)")
-    p.add_argument("--settle_steps", type=int, default=8,
-                   help="Physics settle steps after object placement")
+    p.add_argument("--closing_steps", type=int, default=40,
+                   help="Physics steps for finger closing phase")
+    p.add_argument("--settle_steps", type=int, default=10,
+                   help="Physics steps for stability verification after closing")
     p.add_argument("--vel_threshold", type=float, default=0.25,
                    help="Max object velocity after settle (m/s)")
     p.add_argument("--contact_threshold", type=float, default=0.015,
@@ -218,6 +220,7 @@ def main():
                 object_shape=shape,
                 object_size=size,
                 num_fingers=num_fingers,
+                closing_steps=args.closing_steps,
                 settle_steps=args.settle_steps,
                 vel_threshold=args.vel_threshold,
                 contact_threshold=args.contact_threshold,
