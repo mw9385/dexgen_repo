@@ -248,8 +248,8 @@ def fix_contact_and_collision(
     normals = mesh.face_normals[face_idx].astype(np.float32)
     
     # 3. NFO 품질 평가
-    quality = grasp_analysis(closest, normals, nfo)
-    if quality < nfo_min_quality:
+    quality = grasp_analysis(closest, normals, mu=0.5, num_edges=8)
+    if quality > nfo_min_quality:  # residual² — lower is better
         return None, None, None, quality
     
     # 4. 투영된 점(표면)을 목표로 IK를 풀어 관절 각도(q) 보정
