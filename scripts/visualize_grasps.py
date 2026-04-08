@@ -167,7 +167,13 @@ def main():
     for i, name in enumerate(joint_names):
         print(f"  [{i:2d}] {name:30s}  default={default_targets[i].item():.4f}")
 
+    # Pause physics so sim_app.update() only renders
+    from omni.timeline import get_timeline_interface
+    timeline = get_timeline_interface()
+    timeline.pause()
+
     print(f"\n[GraspViz] Cycling through grasps every {args.interval}s")
+    print(f"[GraspViz] Physics PAUSED — render only")
     print(f"[GraspViz] Press Ctrl+C to stop")
 
     last_switch = time.time()
@@ -210,6 +216,9 @@ def main():
                     obj_state[:, 7:] = 0.0
                     obj.write_root_state_to_sim(obj_state, env_ids=env_ids)
                     obj.update(0.0)
+
+                    # Re-pause physics after sim.step
+                    timeline.pause()
 
                     # Print info
                     q = grasp.object_quat_hand
