@@ -194,7 +194,7 @@ def get_local_palm_normal(robot, env) -> torch.Tensor:
     key = id(robot)
     if key not in _PALM_NORMAL_CACHE:
         hand_cfg = getattr(env.cfg, "hand", None) or {}
-    if hand_cfg.get("name") == "sharpa":
+        if hand_cfg.get("name") == "sharpa":
             base_names = ["right_index_fingertip", "right_ring_fingertip", "right_thumb_fingertip"]
         elif hand_cfg.get("name") == "shadow":
             base_names = ["robot0_ffknuckle", "robot0_rfknuckle", "robot0_thbase"]

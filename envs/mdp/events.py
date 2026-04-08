@@ -144,7 +144,7 @@ def reset_to_random_grasp(
     start_idx_list = [0] * n
     goal_idx_list = [0] * n
 
-    from grasp_generation.rrt_expansion import MultiObjectGraspGraph
+    from grasp_generation.graph_io import MultiObjectGraspGraph
     # Group env indices by object name
     name_to_envs: dict = {}
     for i in range(n):
@@ -522,7 +522,7 @@ def _sample_start_and_nn_goal(
     env_num_fingers: the env's fixed finger count.  Grasp fingertip_positions
     are padded / truncated to match so all tensors have uniform shape.
     """
-    from grasp_generation.rrt_expansion import MultiObjectGraspGraph, GraspGraph
+    from grasp_generation.graph_io import MultiObjectGraspGraph, GraspGraph
 
     if isinstance(graph, MultiObjectGraspGraph):
         obj_name = object_name or graph.sample_object(rng)
@@ -746,7 +746,7 @@ def update_rolling_goal(
     )
     fp_dim = env_num_fingers * 3
 
-    from grasp_generation.rrt_expansion import MultiObjectGraspGraph
+    from grasp_generation.graph_io import MultiObjectGraspGraph
 
     updated = 0
     for env_id in success_ids.tolist():
@@ -825,7 +825,7 @@ def _resolve_scene_graph_object_name(
     this ensures Stage 1 only samples from graphs whose num_fingers == env
     finger count.
     """
-    from grasp_generation.rrt_expansion import MultiObjectGraspGraph
+    from grasp_generation.graph_io import MultiObjectGraspGraph
 
     if not isinstance(graph, MultiObjectGraspGraph):
         return None
@@ -938,7 +938,7 @@ def _detect_env_graph_names(
 
     Returns None if ``graph`` is not a MultiObjectGraspGraph.
     """
-    from grasp_generation.rrt_expansion import MultiObjectGraspGraph
+    from grasp_generation.graph_io import MultiObjectGraspGraph
 
     if not isinstance(graph, MultiObjectGraspGraph):
         return None
