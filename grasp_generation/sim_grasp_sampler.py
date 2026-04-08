@@ -1,24 +1,33 @@
 """
-Grasp Generation Pipeline: Seed → Surface RRT → IK → Physics Validation
-========================================================================
-1. HeuristicSampler: FK-based seed generation (contact + NFO quality)
-2. Surface RRT Expansion: perturb fingertip positions on object surface,
-   check finger spacing + NFO quality → build grasp graph
-3. IK (refine_hand_to_start_grasp): solve joint angles for each grasp
-4. Physics Validation: Isaac Sim PhysX settle test
+DexterityGen Algorithm 3 — Grasp Set Generation + Physics Validation
+=====================================================================
+Implements the exact grasp generation pipeline from the DexterityGen paper
+(Appendix, Algorithm 3):
 
-Uses config parameters from configs/grasp_generation.yaml [surface_rrt].
+  1. Sample M candidate contact points & normals on object surface
+  2. GraspAnalysis: Evaluate Net Force Optimization (NFO) quality
+  3. Random Pose: Sample object pose in hand frame
+  4. Assign: Solve IK to find joint angles (q)
+  5. Collision: Reject if hand penetrates object
+
+Then validates in Isaac Sim physics:
+  6. Physics settle: force joints, check object stays stable
+
+Key difference from previous HeuristicSampler:
+  - HeuristicSampler: random JOINTS → FK → check if near surface
+  - Algorithm 3: sample ON SURFACE → NFO → IK → collision check
+  Algorithm 3 guarantees fingertips are on the surface by construction.
 """
 
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import numpy as np
 import torch
 import trimesh
 
-from .grasp_sampler import Grasp, GraspSet, HeuristicSampler
+from .grasp_sampler import Grasp, GraspSet, _resolve_finger_body_ids, _compute_obj_pose_hand
 from .net_force_optimization import NetForceOptimizer
 
 
@@ -34,165 +43,128 @@ def make_primitive_mesh(shape: str, size: float) -> trimesh.Trimesh:
 
 
 # ---------------------------------------------------------------------------
-# Surface RRT Expansion
+# Algorithm 3, Step 1-2: Surface Sampling + NFO
 # ---------------------------------------------------------------------------
 
-class SurfaceRRTExpander:
+class SurfaceGraspSampler:
     """
-    Expand seed grasps by perturbing fingertip positions on object surface.
+    Sample candidate grasps by picking contact points on the object surface
+    and evaluating NFO quality.
 
-    Algorithm:
-      1. Start with seed grasps (fingertip_positions on mesh surface)
-      2. Pick a random seed
-      3. Add Gaussian noise (±delta_pos) to each fingertip
-      4. Project back to mesh surface (closest point)
-      5. Check: min pairwise finger spacing, NFO quality
-      6. If valid, add to graph with edge to parent
-      7. Repeat until target_size reached
-
-    Config keys (from grasp_generation.yaml [surface_rrt]):
-      delta_pos, delta_max, min_quality, max_attempts_per_step,
-      collision_threshold, min_finger_spacing
+    Algorithm 3, Steps 1-2:
+      1. Sample M sets of num_fingers contact points on mesh surface
+      2. For each set, compute surface normals
+      3. Evaluate NFO force-closure quality
+      4. Keep grasps with quality >= min_quality
     """
 
     def __init__(
         self,
         mesh: trimesh.Trimesh,
         nfo: NetForceOptimizer,
-        delta_pos: float = 0.008,
-        delta_max: float = 0.04,
-        min_quality: float = 0.03,
-        max_attempts_per_step: int = 30,
-        min_finger_spacing: float = 0.01,
         num_fingers: int = 5,
+        min_quality: float = 0.03,
+        min_finger_spacing: float = 0.01,
         seed: int = 42,
     ):
         self.mesh = mesh
         self.nfo = nfo
-        self.delta_pos = delta_pos
-        self.delta_max = delta_max
-        self.min_quality = min_quality
-        self.max_attempts_per_step = max_attempts_per_step
-        self.min_finger_spacing = min_finger_spacing
         self.num_fingers = num_fingers
+        self.min_quality = min_quality
+        self.min_finger_spacing = min_finger_spacing
         self.rng = np.random.default_rng(seed)
 
-    def expand(
+    def sample(
         self,
-        seeds: List[Grasp],
-        target_size: int = 300,
+        num_candidates: int = 10000,
+        num_grasps: int = 500,
         verbose: bool = True,
     ) -> List[Grasp]:
         """
-        Expand seeds via surface-projected RRT.
+        Sample contact point sets on the mesh surface and filter by NFO.
 
-        Returns list of grasps with fingertip_positions + contact_normals
-        but WITHOUT joint_angles (those come from IK later).
+        Returns grasps with fingertip_positions (on surface) + contact_normals
+        + quality. No joint_angles yet (IK will fill those).
         """
-        if len(seeds) == 0:
-            return []
-
-        graph = list(seeds)  # start with seeds
-        fps_array = np.stack([g.fingertip_positions for g in graph])
-
-        stall_count = 0
-        max_stall = 200  # give up if no progress for 200 rounds
-
         if verbose:
-            print(f"    [RRT] Seeds: {len(seeds)}, target: {target_size}, "
-                  f"delta_pos={self.delta_pos}, min_spacing={self.min_finger_spacing}")
+            print(f"    [SurfaceSampler] Sampling {num_grasps} grasps "
+                  f"from {num_candidates} candidates "
+                  f"(NFO >= {self.min_quality})")
 
-        while len(graph) < target_size and stall_count < max_stall:
-            added_this_round = False
+        valid = []
+        nfo_fail = 0
+        spacing_fail = 0
 
-            for _ in range(self.max_attempts_per_step):
-                # Pick random parent
-                parent_idx = self.rng.integers(0, len(graph))
-                parent_fp = graph[parent_idx].fingertip_positions.copy()
-
-                # Perturb each fingertip
-                noise = self.rng.normal(0, self.delta_pos, parent_fp.shape)
-                new_fp = parent_fp + noise.astype(np.float32)
-
-                # Project to surface
-                closest, dists, face_idx = trimesh.proximity.closest_point(
-                    self.mesh, new_fp,
-                )
-                new_fp = closest.astype(np.float32)
-                normals = self.mesh.face_normals[face_idx].astype(np.float32)
-
-                # Check pairwise finger spacing
-                if not self._check_spacing(new_fp):
-                    continue
-
-                # Check NFO quality
-                quality = self.nfo.evaluate(Grasp(
-                    fingertip_positions=new_fp,
-                    contact_normals=normals,
-                ))
-                if quality < self.min_quality:
-                    continue
-
-                # Check distance to parent (for graph edge)
-                dist_to_parent = float(np.linalg.norm(
-                    new_fp.flatten() - parent_fp.flatten(),
-                ))
-                if dist_to_parent > self.delta_max * self.num_fingers:
-                    continue
-
-                # Valid expansion
-                new_grasp = Grasp(
-                    fingertip_positions=new_fp,
-                    contact_normals=normals,
-                    quality=quality,
-                    joint_angles=None,  # IK will fill this later
-                )
-                graph.append(new_grasp)
-                fps_array = np.vstack([fps_array, new_fp[np.newaxis]])
-                added_this_round = True
+        for attempt in range(num_candidates):
+            if len(valid) >= num_grasps:
                 break
 
-            if added_this_round:
-                stall_count = 0
-            else:
-                stall_count += 1
+            # Step 1: Sample num_fingers points on surface
+            points, face_idx = trimesh.sample.sample_surface(
+                self.mesh, self.num_fingers,
+            )
+            points = points.astype(np.float32)
+            normals = self.mesh.face_normals[face_idx].astype(np.float32)
 
-            if verbose and len(graph) % 50 == 0:
-                print(f"    [RRT] {len(graph)}/{target_size} grasps")
+            # Check pairwise finger spacing
+            if not self._check_spacing(points):
+                spacing_fail += 1
+                continue
+
+            # Step 2: NFO quality evaluation
+            grasp = Grasp(
+                fingertip_positions=points,
+                contact_normals=normals,
+            )
+            quality = self.nfo.evaluate(grasp)
+
+            if quality < self.min_quality:
+                nfo_fail += 1
+                continue
+
+            grasp.quality = quality
+            valid.append(grasp)
+
+            if verbose and len(valid) % 100 == 0:
+                print(f"      {len(valid)} valid (attempt {attempt+1}, "
+                      f"spacing_fail={spacing_fail}, nfo_fail={nfo_fail})")
 
         if verbose:
-            print(f"    [RRT] Final: {len(graph)} grasps "
-                  f"(seeds={len(seeds)}, expanded={len(graph)-len(seeds)})")
+            print(f"    [SurfaceSampler] {len(valid)} grasps from "
+                  f"{min(attempt+1, num_candidates)} attempts "
+                  f"(spacing_fail={spacing_fail}, nfo_fail={nfo_fail})")
 
-        return graph
+        return valid
 
-    def _check_spacing(self, fp: np.ndarray) -> bool:
-        """Check min pairwise distance between all fingertips."""
-        n = len(fp)
+    def _check_spacing(self, points: np.ndarray) -> bool:
+        n = len(points)
         for i in range(n):
             for j in range(i + 1, n):
-                if np.linalg.norm(fp[i] - fp[j]) < self.min_finger_spacing:
+                if np.linalg.norm(points[i] - points[j]) < self.min_finger_spacing:
                     return False
         return True
 
 
 # ---------------------------------------------------------------------------
-# IK Solver (uses refine_hand_to_start_grasp from sim_utils)
+# Algorithm 3, Steps 3-5: Random Pose + IK + Collision
 # ---------------------------------------------------------------------------
 
-def solve_ik_for_grasps(
+def assign_ik_and_check_collision(
     env,
     grasps: List[Grasp],
+    mesh: trimesh.Trimesh,
+    object_size: float,
+    penetration_margin: float = 0.008,
     render: bool = False,
     verbose: bool = True,
 ) -> List[Grasp]:
     """
-    Solve IK for grasps that have fingertip_positions but no joint_angles.
+    Algorithm 3, Steps 3-5:
+      3. Object is placed at fingertip centroid (defines object pose)
+      4. IK (refine_hand_to_start_grasp) to find joint angles
+      5. Collision check: reject if hand penetrates object
 
-    Uses refine_hand_to_start_grasp (per-finger differential IK).
-    Processes one grasp at a time on env 0.
-
-    Grasps that already have joint_angles are passed through unchanged.
+    Processes grasps one at a time on env 0 (IK is serial).
     """
     from envs.mdp.sim_utils import (
         set_robot_root_pose,
@@ -200,40 +172,38 @@ def solve_ik_for_grasps(
         get_fingertip_body_ids_from_env,
         refine_hand_to_start_grasp,
     )
-    from .grasp_sampler import _compute_obj_pose_hand
 
     robot = env.scene["robot"]
     obj = env.scene["object"]
     device = env.device
     env_ids = torch.tensor([0], device=device, dtype=torch.long)
     ft_ids = get_fingertip_body_ids_from_env(robot, env)
+    finger_body_ids = _resolve_finger_body_ids(robot)
 
     solved = []
-    skipped = 0
+    ik_fail = 0
+    collision_fail = 0
+
+    if verbose:
+        print(f"    [IK+Collision] Processing {len(grasps)} grasps")
 
     for i, grasp in enumerate(grasps):
-        # Already has joint angles → pass through
-        if grasp.joint_angles is not None:
-            solved.append(grasp)
-            continue
-
-        fp = grasp.fingertip_positions  # (F, 3) in object frame
+        fp = grasp.fingertip_positions  # (F, 3) on object surface
         fp_tensor = torch.tensor(
             fp, device=device, dtype=torch.float32,
         ).unsqueeze(0)  # (1, F, 3)
 
-        # 1. Default wrist pose
+        # Step 3: Set default wrist + midpoint joints
         root_state = robot.data.default_root_state[env_ids, :7].clone()
         root_state[:, :3] += env.scene.env_origins[env_ids]
         set_robot_root_pose(env, env_ids, root_state[:, :3], root_state[:, 3:7])
 
-        # 2. Midpoint joints as IK starting point
-        set_adaptive_joint_pose(env, env_ids, 0.06)
+        set_adaptive_joint_pose(env, env_ids, object_size)
         robot.update(0.0)
 
-        # 3. Place object at fingertip centroid
+        # Place object at fingertip centroid (object frame = world shifted)
         ft_pos = robot.data.body_pos_w[env_ids][:, ft_ids, :]
-        obj_pos = ft_pos.mean(dim=1)
+        obj_pos = ft_pos.mean(dim=1)  # (1, 3)
         obj_quat = torch.tensor(
             [[1, 0, 0, 0]], device=device, dtype=torch.float32,
         )
@@ -245,36 +215,75 @@ def solve_ik_for_grasps(
         obj.write_root_state_to_sim(obj_state, env_ids=env_ids)
         obj.update(0.0)
 
-        # 4. IK refinement
+        # Step 4: IK — solve joint angles to reach surface contact points
         refine_hand_to_start_grasp(env, env_ids, fp_tensor)
         robot.update(0.0)
 
-        # 5. Read solved joint angles
+        # Check IK quality: are fingertips actually near target?
+        ft_after = robot.data.body_pos_w[0, ft_ids, :]
+        ft_obj_after = (ft_after - obj_pos[0]).cpu().numpy()
+        _, ik_dists, _ = trimesh.proximity.closest_point(mesh, ft_obj_after)
+        ik_mean_err = float(ik_dists.mean())
+
+        if ik_mean_err > 0.03:  # IK failed to converge within 3cm
+            ik_fail += 1
+            continue
+
+        # Read solved joint angles
         q = robot.data.joint_pos[0].cpu().numpy().copy()
 
-        # 6. Compute object pose in hand frame
+        # Step 5: Collision check — finger links vs object mesh
+        fl_world = robot.data.body_pos_w[0, finger_body_ids, :]
+        fl_obj = (fl_world - obj_pos[0]).cpu().numpy()
+        fl_closest, fl_dists, fl_face = trimesh.proximity.closest_point(
+            mesh, fl_obj,
+        )
+        to_pt = fl_obj - fl_closest
+        fl_normals = mesh.face_normals[fl_face]
+        sign = np.sum(to_pt * fl_normals, axis=-1)
+        penetration = np.where(sign < 0, fl_dists, 0.0)
+
+        if np.any(penetration > penetration_margin):
+            collision_fail += 1
+            continue
+
+        # Compute object pose in hand frame
         pos_hand, quat_hand = _compute_obj_pose_hand(
             robot, obj_pos[0], device, obj_quat_w=obj_quat[0],
         )
+
+        # Use actual IK-solved fingertip positions (on mesh surface)
+        _, _, face_idx_final = trimesh.proximity.closest_point(
+            mesh, ft_obj_after,
+        )
+        normals_final = mesh.face_normals[face_idx_final].astype(np.float32)
 
         grasp.joint_angles = q
         grasp.object_pos_hand = pos_hand
         grasp.object_quat_hand = quat_hand
         grasp.object_pose_frame = "hand_root"
+        grasp.contact_normals = normals_final
         solved.append(grasp)
 
         if verbose and (i + 1) % 50 == 0:
-            print(f"    [IK] {i+1}/{len(grasps)} solved")
+            print(f"      [{i+1}/{len(grasps)}] solved={len(solved)} "
+                  f"(ik_fail={ik_fail}, collision={collision_fail})")
+
+        if verbose and i == 0:
+            print(f"      [Debug grasp 0] ik_mean_err={ik_mean_err*1000:.1f}mm, "
+                  f"max_pen={float(penetration.max())*1000:.1f}mm, "
+                  f"quality={grasp.quality:.4f}")
+            print(f"      joint_angles (first 10): {q[:10].tolist()}")
 
     if verbose:
-        print(f"    [IK] Done: {len(solved)} solved "
-              f"({skipped} skipped, had joint_angles)")
+        print(f"    [IK+Collision] {len(solved)}/{len(grasps)} passed "
+              f"(ik_fail={ik_fail}, collision={collision_fail})")
 
     return solved
 
 
 # ---------------------------------------------------------------------------
-# Physics Validator
+# Step 6: Physics Validation
 # ---------------------------------------------------------------------------
 
 class SimGraspValidator:
@@ -282,7 +291,7 @@ class SimGraspValidator:
     Validates grasps via PhysX physics settle.
 
     Forces joints to stored values each step (write_joint_state_to_sim)
-    to prevent actuator drift, while PhysX handles object collision.
+    to keep the hand configuration fixed while PhysX handles object collision.
     """
 
     def __init__(
@@ -323,9 +332,8 @@ class SimGraspValidator:
         robot = self.robot
         obj = self.obj
         valid = []
-        reject_counts = {"velocity": 0, "height": 0, "drift": 0, "no_joints": 0}
+        reject_counts = {"velocity": 0, "height": 0, "drift": 0}
 
-        # Filter out grasps without joint angles
         grasps = [g for g in grasps if g.joint_angles is not None]
 
         if verbose:
@@ -343,8 +351,7 @@ class SimGraspValidator:
             root_state[:, :3] += env.scene.env_origins[env_ids]
             set_robot_root_pose(env, env_ids, root_state[:, :3], root_state[:, 3:7])
 
-            joint_list = [g.joint_angles for g in batch]
-            set_robot_joints_direct(env, env_ids, joint_list)
+            set_robot_joints_direct(env, env_ids, [g.joint_angles for g in batch])
 
             q_batch = torch.stack([
                 torch.tensor(g.joint_angles, device=self.device,
@@ -352,7 +359,7 @@ class SimGraspValidator:
                 for g in batch
             ])
 
-            # 2. Object far away → FK → re-write joints → FK again
+            # 2. Object far away → FK → re-write joints → FK
             temp = obj.data.default_root_state[env_ids].clone()
             temp[:, :3] = (
                 env.scene.env_origins[env_ids]
@@ -362,7 +369,6 @@ class SimGraspValidator:
             obj.write_root_state_to_sim(temp, env_ids=env_ids)
             obj.update(0.0)
 
-            # FK step + re-write to fix actuator drift
             env.sim.step(render=self.render)
             env.scene.update(dt=env.physics_dt)
             robot.write_joint_state_to_sim(
@@ -370,11 +376,6 @@ class SimGraspValidator:
             )
             env.sim.step(render=self.render)
             env.scene.update(dt=env.physics_dt)
-
-            if debug:
-                q_now = robot.data.joint_pos[env_ids[0]]
-                diff = torch.abs(q_batch[0] - q_now).max().item()
-                print(f"    Joint diff after setup: {diff:.6f}")
 
             # 3. Place object at fingertip centroid
             ft_pos = robot.data.body_pos_w[env_ids][:, self.ft_ids, :]
@@ -402,8 +403,8 @@ class SimGraspValidator:
                         obj.data.root_lin_vel_w[env_ids[0]],
                     ).item()
                     obj_p = obj.data.root_pos_w[env_ids[0]].tolist()
-                    print(f"    step {step_i:3d}: obj_vel={obj_v:.4f} "
-                          f"obj_pos={[f'{x:.3f}' for x in obj_p]}")
+                    print(f"      step {step_i:3d}: vel={obj_v:.4f} "
+                          f"pos={[f'{x:.3f}' for x in obj_p]}")
 
             # 5. Check stability
             speed = torch.norm(
@@ -438,7 +439,7 @@ class SimGraspValidator:
 
 
 # ---------------------------------------------------------------------------
-# Full pipeline: Seed → RRT → IK → Physics
+# Full pipeline: Algorithm 3 + Physics Validation
 # ---------------------------------------------------------------------------
 
 def generate_and_validate(
@@ -447,21 +448,14 @@ def generate_and_validate(
     object_shape: str,
     object_size: float,
     num_grasps: int = 300,
-    # HeuristicSampler (Phase 1)
-    num_seed_candidates: int = 20000,
-    num_seeds: int = 500,
-    noise_std: float = 0.3,
-    contact_threshold: float = 0.03,
-    min_contact_fingers: int = 3,
-    penetration_margin: float = 0.008,
-    # Surface RRT (Phase 2)
-    rrt_target_size: int = 300,
-    delta_pos: float = 0.008,
-    delta_max: float = 0.04,
+    # Step 1-2: Surface sampling + NFO
+    num_candidates: int = 50000,
+    num_surface_grasps: int = 1000,
     nfo_min_quality: float = 0.03,
-    max_attempts_per_step: int = 30,
     min_finger_spacing: float = 0.01,
-    # Physics validation (Phase 4)
+    # Step 3-5: IK + Collision
+    penetration_margin: float = 0.008,
+    # Step 6: Physics validation
     settle_steps: int = 40,
     vel_threshold: float = 0.01,
     # Misc
@@ -470,96 +464,67 @@ def generate_and_validate(
     verbose: bool = True,
 ) -> GraspSet:
     """
-    Full pipeline:
-      Phase 1: HeuristicSampler → seed grasps
-      Phase 2: Surface RRT expansion → expanded grasps
-      Phase 3: IK → joint angles for expanded grasps
-      Phase 4: Physics validation → final grasps
-    """
-    from envs.mdp.sim_utils import get_fingertip_body_ids_from_env
+    DexterityGen Algorithm 3 + Physics Validation.
 
-    robot = env.scene["robot"]
-    device = env.device
+    Phase 1 (Steps 1-2): Sample contact points on surface + NFO quality
+    Phase 2 (Steps 3-5): IK to find joints + collision check
+    Phase 3 (Step 6): Physics settle validation
+    """
     mesh = make_primitive_mesh(object_shape, object_size)
-    ft_ids = get_fingertip_body_ids_from_env(robot, env)
 
     nfo = NetForceOptimizer(
         mu=0.5, num_edges=8, min_quality=nfo_min_quality,
     )
 
-    # ── Phase 1: Seed generation ─────────────────────────────────
+    # ── Phase 1: Surface sampling + NFO (Steps 1-2) ─────────────
     if verbose:
-        print(f"\n  Phase 1: HeuristicSampler → seeds")
+        print(f"\n  Phase 1: Surface sampling + NFO (Algorithm 3, Steps 1-2)")
 
-    sampler = HeuristicSampler(
+    surface_sampler = SurfaceGraspSampler(
         mesh=mesh,
-        object_name=object_name,
-        object_scale=object_size,
-        num_candidates=num_seed_candidates,
-        num_grasps=num_seeds,
-        num_fingers=5,
         nfo=nfo,
-        env=env,
-        ft_ids=ft_ids,
-        noise_std=noise_std,
-        contact_threshold=contact_threshold,
-        min_contact_fingers=min_contact_fingers,
-        penetration_margin=penetration_margin,
+        num_fingers=5,
+        min_quality=nfo_min_quality,
+        min_finger_spacing=min_finger_spacing,
         seed=seed,
     )
-    seeds = sampler.sample()
+    surface_grasps = surface_sampler.sample(
+        num_candidates=num_candidates,
+        num_grasps=num_surface_grasps,
+        verbose=verbose,
+    )
 
-    if len(seeds) == 0:
-        print("  WARNING: 0 seeds")
+    if len(surface_grasps) == 0:
+        print("  WARNING: 0 surface grasps")
         return GraspSet(object_name=object_name)
 
     if verbose:
-        print(f"  → {len(seeds)} seeds")
+        print(f"  → {len(surface_grasps)} NFO-valid surface grasps")
 
-    # ── Phase 2: Surface RRT expansion ───────────────────────────
+    # ── Phase 2: IK + Collision (Steps 3-5) ──────────────────────
     if verbose:
-        print(f"\n  Phase 2: Surface RRT expansion → target {rrt_target_size}")
+        print(f"\n  Phase 2: IK + Collision check (Algorithm 3, Steps 3-5)")
 
-    expander = SurfaceRRTExpander(
+    ik_grasps = assign_ik_and_check_collision(
+        env=env,
+        grasps=surface_grasps,
         mesh=mesh,
-        nfo=nfo,
-        delta_pos=delta_pos,
-        delta_max=delta_max,
-        min_quality=nfo_min_quality,
-        max_attempts_per_step=max_attempts_per_step,
-        min_finger_spacing=min_finger_spacing,
-        num_fingers=5,
-        seed=seed,
-    )
-    expanded = expander.expand(
-        seeds.grasps, target_size=rrt_target_size, verbose=verbose,
+        object_size=object_size,
+        penetration_margin=penetration_margin,
+        render=render,
+        verbose=verbose,
     )
 
-    if verbose:
-        with_joints = sum(1 for g in expanded if g.joint_angles is not None)
-        without_joints = len(expanded) - with_joints
-        print(f"  → {len(expanded)} total "
-              f"({with_joints} with joints, {without_joints} need IK)")
-
-    # ── Phase 3: IK for grasps without joint angles ──────────────
-    needs_ik = [g for g in expanded if g.joint_angles is None]
-    if needs_ik and verbose:
-        print(f"\n  Phase 3: IK for {len(needs_ik)} grasps")
-
-    if needs_ik:
-        expanded = solve_ik_for_grasps(
-            env, expanded, render=render, verbose=verbose,
-        )
-
-    # Filter out any that still don't have joints
-    expanded = [g for g in expanded if g.joint_angles is not None]
+    if len(ik_grasps) == 0:
+        print("  WARNING: 0 grasps survived IK + collision")
+        return GraspSet(object_name=object_name)
 
     if verbose:
-        print(f"  → {len(expanded)} with joint angles")
+        print(f"  → {len(ik_grasps)} IK-solved grasps")
 
-    # ── Phase 4: Physics validation ──────────────────────────────
+    # ── Phase 3: Physics validation (Step 6) ─────────────────────
     if verbose:
-        print(f"\n  Phase 4: Physics validation")
+        print(f"\n  Phase 3: Physics validation (settle test)")
 
     validator = SimGraspValidator(
         env=env,
@@ -567,12 +532,19 @@ def generate_and_validate(
         vel_threshold=vel_threshold,
         render=render,
     )
-    valid = validator.validate(expanded, verbose=verbose)
+    valid = validator.validate(ik_grasps, verbose=verbose)
 
     valid.sort(key=lambda g: g.quality, reverse=True)
     valid = valid[:num_grasps]
 
     if verbose:
-        print(f"\n  Final: {len(valid)} physics-validated grasps")
+        print(f"\n  Final: {len(valid)} physics-validated grasps "
+              f"(surface={len(surface_grasps)}, IK={len(ik_grasps)}, "
+              f"physics={len(valid)})")
+
+    # Set object name
+    for g in valid:
+        g.object_name = object_name
+        g.object_scale = object_size
 
     return GraspSet(grasps=valid, object_name=object_name)
