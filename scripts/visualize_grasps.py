@@ -128,7 +128,24 @@ def main():
     grasps = g.grasp_set.grasps
     grasp_idx = 0
 
-    print(f"[GraspViz] Cycling through grasps every {args.interval}s")
+    # Print Isaac Sim joint info for debugging MJCF→USD mapping
+    joint_names = robot.data.joint_names
+    print(f"\n[GraspViz] Isaac USD joint order ({len(joint_names)} joints):")
+    for i, name in enumerate(joint_names):
+        q = float(robot.data.joint_pos[0, i].item())
+        lo = float(robot.data.soft_joint_pos_limits[0, i, 0].item())
+        hi = float(robot.data.soft_joint_pos_limits[0, i, 1].item())
+        print(f"  [{i:2d}] {name:30s}  pos={q:.4f}  limits=[{lo:.3f}, {hi:.3f}]")
+
+    # Print first grasp's MJCF→Isaac mapped joints
+    if grasps[0].joint_angles is not None:
+        ja = grasps[0].joint_angles
+        print(f"\n[GraspViz] First grasp joint_angles ({len(ja)} DOF):")
+        for i in range(len(ja)):
+            name = joint_names[i] if i < len(joint_names) else "???"
+            print(f"  [{i:2d}] {name:30s}  stored={ja[i]:.4f}")
+
+    print(f"\n[GraspViz] Cycling through grasps every {args.interval}s")
     print(f"[GraspViz] Press Ctrl+C to stop")
 
     last_switch = time.time()
