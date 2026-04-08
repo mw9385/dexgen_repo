@@ -356,53 +356,54 @@ def main():
             physics_sim_view.set_gravity(carb.Float3(*grav))
             gravity_id = (gravity_id + 1) % len(GRAVITY_DIRECTIONS)
 
-        # ── Validation (every episode end) ─────────────────────
-        # Check which envs reached max episode length
+        # ── Validation EVERY STEP (sharpa style: fail → immediate reset) ──
+        fingertip_pos = hand.data.body_pos_w[:, env.finger_bodies, :]
+        object_pos = obj.data.root_pos_w[:, :3]
+        object_rot = obj.data.root_quat_w
+        hand_dof_pos = hand.data.joint_pos
+
+        # Condition 1: all fingertips within 0.1m
+        ft_dists = torch.norm(
+            fingertip_pos - object_pos.unsqueeze(1), dim=-1, p=2,
+        )
+        cond1 = (ft_dists < 0.1).all(dim=-1)
+
+        # Condition 2: contact force > 0.5N on >= 3 fingers
+        forces = []
+        for sensor in env._contact_sensors:
+            f = sensor.data.force_matrix_w[:, 0, 0, :]
+            forces.append(torch.norm(f, dim=-1, p=2))
+        contact_forces = torch.stack(forces, dim=1)
+        cond2 = (contact_forces > 0.5).sum(dim=-1) >= 3
+
+        # Condition 3: object rotation < 30°
+        default_rot = obj.data.default_root_state[:, 3:7]
+        delta_rot = quat_mul(object_rot, quat_conjugate(default_rot))
+        delta_rot = delta_rot / (torch.norm(delta_rot, dim=-1, keepdim=True) + 1e-8)
+        angle = 2 * torch.acos(delta_rot[:, 0].clamp(-1, 1))
+        cond3 = angle < reset_angle_diff
+
+        cond_all = cond1 & cond2 & cond3
+
+        # Fail → mark for immediate reset (sharpa: reset_buf[cond < 1] = 1)
+        fail_ids = torch.where(~cond_all)[0]
+
+        # Success at episode end → save
         at_end = (env.episode_length_buf == env.max_episode_length - 1)
+        success = at_end & cond_all
+        if success.any():
+            states = torch.cat([
+                hand_dof_pos[success],
+                object_pos[success],
+                object_rot[success],
+            ], dim=1)
+            saved = torch.cat([saved, states], dim=0)
 
-        if at_end.any():
-            # Read current state
-            fingertip_pos = hand.data.body_pos_w[:, env.finger_bodies, :]  # (N, 5, 3)
-            object_pos = obj.data.root_pos_w[:, :3]  # (N, 3)
-            object_rot = obj.data.root_quat_w  # (N, 4)
-            hand_dof_pos = hand.data.joint_pos  # (N, 22)
-
-            # Condition 1: all fingertips within 0.1m
-            ft_dists = torch.norm(
-                fingertip_pos - object_pos.unsqueeze(1), dim=-1, p=2,
-            )  # (N, 5)
-            cond1 = (ft_dists < 0.1).all(dim=-1)  # (N,)
-
-            # Condition 2: contact force > 0.5N on >= 3 fingers
-            forces = []
-            for sensor in env._contact_sensors:
-                f = sensor.data.force_matrix_w[:, 0, 0, :]  # (N, 3)
-                forces.append(torch.norm(f, dim=-1, p=2))  # (N,)
-            contact_forces = torch.stack(forces, dim=1)  # (N, 5)
-            cond2 = (contact_forces > 0.5).sum(dim=-1) >= 3  # (N,)
-
-            # Condition 3: object rotation < 30°
-            default_rot = obj.data.default_root_state[:, 3:7]
-            delta_rot = quat_mul(object_rot, quat_conjugate(default_rot))
-            delta_rot = delta_rot / (torch.norm(delta_rot, dim=-1, keepdim=True) + 1e-8)
-            angle = 2 * torch.acos(delta_rot[:, 0].clamp(-1, 1))
-            cond3 = angle < reset_angle_diff
-
-            success = at_end & cond1 & cond2 & cond3
-
-            if success.any():
-                # Save: (22 joints + 3 pos + 4 quat) = 29
-                states = torch.cat([
-                    hand_dof_pos[success],
-                    object_pos[success],
-                    object_rot[success],
-                ], dim=1)
-                saved = torch.cat([saved, states], dim=0)
-
-        # ── Reset envs that ended ─────────────────────────────
-        done_ids = torch.where(
-            env.episode_length_buf >= env.max_episode_length - 1
-        )[0]
+        # ── Reset: failed envs + completed envs ──────────────
+        done_ids = torch.unique(torch.cat([
+            fail_ids,
+            torch.where(at_end)[0],
+        ]))
 
         if len(done_ids) > 0:
             # Reset hand DOF: default + 0.15 * noise (from sharpa)
