@@ -297,14 +297,23 @@ def _validate_physics(args, grasps, obj_name):
         if grasp.joint_angles is None:
             continue
 
-        # Set joints and force FK computation
+        # Set joints
         q = torch.tensor(grasp.joint_angles, device=device, dtype=torch.float32).unsqueeze(0)
         robot.write_joint_state_to_sim(q, torch.zeros_like(q), env_ids=env_ids)
         robot.set_joint_position_target(q, env_ids=env_ids)
+
+        # Move object far away before FK step to prevent collision ejection
+        temp_state = obj.data.default_root_state[env_ids].clone()
+        temp_state[:, :3] = torch.tensor([[0, 0, -10.0]], device=device)
+        temp_state[:, 7:] = 0.0
+        obj.write_root_state_to_sim(temp_state, env_ids=env_ids)
+        obj.update(0.0)
+
+        # FK step
         env.sim.step(render=False)
         env.scene.update(dt=env.physics_dt)
 
-        # Place object at Isaac FK fingertip centroid (ignore MJCF local offset)
+        # Place object at Isaac FK fingertip centroid
         from envs.mdp.sim_utils import get_fingertip_body_ids_from_env
         ft_ids = get_fingertip_body_ids_from_env(robot, env)
         ft_pos_w = robot.data.body_pos_w[env_ids][:, ft_ids, :]
@@ -318,16 +327,20 @@ def _validate_physics(args, grasps, obj_name):
         obj.write_root_state_to_sim(obj_state, env_ids=env_ids)
         obj.update(0.0)
 
-        # Physics settle
-        for _ in range(5):
+        # Physics settle (30 steps = 0.25s at 120Hz)
+        for _ in range(30):
             env.sim.step(render=False)
             env.scene.update(dt=env.physics_dt)
 
-        # Check stability
+        # Check stability: low velocity + object still near hand
         speed = float(torch.norm(obj.data.root_lin_vel_w[0]).item())
         obj_z = float(obj.data.root_pos_w[0, 2].item())
+        # Check object didn't drift far from fingertip centroid
+        ft_pos_after = robot.data.body_pos_w[env_ids][:, ft_ids, :]
+        centroid_after = ft_pos_after.mean(dim=1)[0]
+        obj_drift = float(torch.norm(obj.data.root_pos_w[0] - centroid_after).item())
 
-        if speed < 0.5 and obj_z > 0.15:
+        if speed < 0.3 and obj_z > 0.15 and obj_drift < 0.05:
             valid.append(grasp)
 
         if (i + 1) % 50 == 0:
