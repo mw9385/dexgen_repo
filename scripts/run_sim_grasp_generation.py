@@ -50,7 +50,9 @@ def parse_args():
     p.add_argument("--min_finger_spacing", type=float, default=0.01,
                    help="Min pairwise fingertip distance (m)")
 
-    # Phase 2: IK + Collision (Algorithm 3, Steps 3-5)
+    # Phase 2: Random Pose + IK + Collision (Algorithm 3, Steps 3-5)
+    p.add_argument("--num_pose_samples", type=int, default=10,
+                   help="Object poses to try per contact set")
     p.add_argument("--penetration_margin", type=float, default=0.001,
                    help="Max finger-mesh penetration (m), near-zero for collision-free")
 
@@ -197,8 +199,9 @@ def main():
                 num_surface_grasps=args.num_surface_grasps,
                 nfo_min_quality=args.nfo_min_quality,
                 min_finger_spacing=args.min_finger_spacing,
-                # Phase 2: IK + Collision
+                # Phase 2: Random Pose + IK + Collision
                 penetration_margin=args.penetration_margin,
+                num_pose_samples=args.num_pose_samples,
                 # Phase 3: Physics
                 settle_steps=args.settle_steps,
                 vel_threshold=args.vel_threshold,
