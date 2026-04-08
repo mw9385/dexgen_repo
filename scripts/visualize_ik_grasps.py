@@ -203,13 +203,11 @@ def main():
             print(f"    obj_center={obj_pos[0].tolist()}")
             print(f"    (holding for {args.interval}s — inspect in GUI)")
 
-            # Hold and render for interval seconds
+            # Hold and render for interval seconds (NO PHYSICS — static view)
             t0 = time.time()
             while time.time() - t0 < args.interval and sim_app.is_running():
-                # Keep joints forced, render only
-                robot.write_joint_state_to_sim(q, torch.zeros_like(q), env_ids=env_ids)
-                env.sim.step(render=True)
-                env.scene.update(dt=env.physics_dt)
+                # Render only, no physics step — object stays in place
+                sim_app.update()
 
             grasp_idx += 1
 
