@@ -148,21 +148,20 @@ def make_default_object_mesh(object_type: str = "cube", size: float = 0.06) -> t
 # Shared helpers for FK-based grasp validation
 # ---------------------------------------------------------------------------
 
-_SHADOW_FINGER_LINKS = [
-    "robot0_ffknuckle", "robot0_ffproximal", "robot0_ffmiddle", "robot0_ffdistal",
-    "robot0_mfknuckle", "robot0_mfproximal", "robot0_mfmiddle", "robot0_mfdistal",
-    "robot0_rfknuckle", "robot0_rfproximal", "robot0_rfmiddle", "robot0_rfdistal",
-    "robot0_lfmetacarpal", "robot0_lfknuckle", "robot0_lfproximal",
-    "robot0_lfmiddle", "robot0_lfdistal",
-    "robot0_thbase", "robot0_thproximal", "robot0_thhub",
-    "robot0_thmiddle", "robot0_thdistal",
+_SHARPA_FINGER_LINKS = [
+    "right_thumb_fingertip", "right_index_fingertip",
+    "right_middle_fingertip", "right_ring_fingertip",
+    "right_pinky_fingertip",
+    "right_thumb_elastomer", "right_index_elastomer",
+    "right_middle_elastomer", "right_ring_elastomer",
+    "right_pinky_elastomer",
 ]
 
 
 def _resolve_finger_body_ids(robot) -> list:
-    """Get all finger link body IDs for penetration check."""
+    """Get finger link body IDs for penetration check."""
     ids = []
-    for name in _SHADOW_FINGER_LINKS:
+    for name in _SHARPA_FINGER_LINKS:
         try:
             found = robot.find_bodies(name)[0]
             if len(found) > 0:

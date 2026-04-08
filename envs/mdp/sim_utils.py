@@ -83,8 +83,9 @@ def expand_grasp_joint_vector(
     target_num_dof: int,
 ) -> torch.Tensor:
     """
-    Expand/pad a stored grasp joint vector to the full 24-DOF articulation count.
+    Expand/pad a stored grasp joint vector to the target DOF count.
 
+    Sharpa Wave Hand (22 DOF): pass-through (all joints actuated, no conversion).
     Shadow Hand USD (24 DOF):
       [0-1]:   WRJ1, WRJ0           (wrist)
       [2-5]:   FFJ4(passive), FFJ3, FFJ2, FFJ1
@@ -193,7 +194,9 @@ def get_local_palm_normal(robot, env) -> torch.Tensor:
     key = id(robot)
     if key not in _PALM_NORMAL_CACHE:
         hand_cfg = getattr(env.cfg, "hand", None) or {}
-        if hand_cfg.get("name") == "shadow":
+    if hand_cfg.get("name") == "sharpa":
+            base_names = ["right_index_fingertip", "right_ring_fingertip", "right_thumb_fingertip"]
+        elif hand_cfg.get("name") == "shadow":
             base_names = ["robot0_ffknuckle", "robot0_rfknuckle", "robot0_thbase"]
         else:
             base_names = ["index_link_0", "ring_link_0", "thumb_link_0"]
@@ -217,7 +220,9 @@ def get_palm_body_id_from_env(robot, env) -> int:
         return cached
 
     hand_cfg = getattr(env.cfg, "hand", None) or {}
-    if hand_cfg.get("name") == "shadow":
+    if hand_cfg.get("name") == "sharpa":
+        candidate_names = ["right_palm", "right_palm_link", "palm"]
+    elif hand_cfg.get("name") == "shadow":
         candidate_names = ["robot0_palm", "robot0:palm", "palm"]
     else:
         candidate_names = ["palm_link", "base_link", "palm"]
@@ -637,7 +642,9 @@ def get_fingertip_body_ids_from_env(robot, env) -> list[int]:
         hand_cfg = getattr(env.cfg, "hand", None) or {}
         tip_names = hand_cfg.get(
             "fingertip_links",
-            ["index_link_3", "middle_link_3", "ring_link_3", "thumb_link_3"],
+            ["right_thumb_fingertip", "right_index_fingertip",
+             "right_middle_fingertip", "right_ring_fingertip",
+             "right_pinky_fingertip"],
         )
         _FT_IDS_CACHE[key] = [robot.find_bodies(name)[0][0] for name in tip_names]
     return _FT_IDS_CACHE[key]
