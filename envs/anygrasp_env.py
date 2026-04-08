@@ -76,7 +76,6 @@ try:
     from isaaclab.scene import InteractiveSceneCfg
     from isaaclab.sensors import ContactSensorCfg
     from isaaclab.utils import configclass
-    from isaaclab.actuators import ImplicitActuatorCfg
 
     try:
         from isaaclab.envs.mdp import JointPositionToLimitsActionCfg
@@ -191,11 +190,7 @@ if _ISAACLAB_AVAILABLE:
                 },
             ),
             actuators={
-                "fingers": ImplicitActuatorCfg(
-                    joint_names_expr=["robot0_.*"],
-                    stiffness=10.0,
-                    damping=7.0,
-                ),
+                **SHADOW_HAND_CFG.actuators,
             },
             spawn=SHADOW_HAND_CFG.spawn.replace(
                 activate_contact_sensors=True,
