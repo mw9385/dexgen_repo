@@ -407,21 +407,6 @@ if _ISAACLAB_AVAILABLE:
 
     @configclass
     class AnyGraspEventsCfg:
-        randomize_object_physics = EventTerm(
-            func=mdp_dr.randomize_object_physics,
-            mode="reset",
-            params={"mass_range": (0.05, 0.10), "friction_range": (0.80, 1.20), "restitution_range": (0.00, 0.10)},
-        )
-        randomize_robot_physics = EventTerm(
-            func=mdp_dr.randomize_robot_physics,
-            mode="reset",
-            params={"damping_range": (0.01, 0.10), "armature_range": (0.001, 0.01)},
-        )
-        randomize_action_delay = EventTerm(
-            func=mdp_dr.randomize_action_delay,
-            mode="reset",
-            params={"max_delay": 1},
-        )
         reset_to_random_grasp = EventTerm(func=mdp_events.reset_to_random_grasp, mode="reset")
 
 
@@ -448,7 +433,7 @@ if _ISAACLAB_AVAILABLE:
 
         episode_length_s: float = 10.0
         action_scale:     float = 1.0
-        decimation:       int   = 4
+        decimation:       int   = 6   # 120Hz sim / 6 = 20Hz control
 
         def __post_init__(self):
             super().__post_init__()
@@ -490,16 +475,12 @@ if _ISAACLAB_AVAILABLE:
                 }
 
             if self.reset_randomization is None:
-                # Diverse wrist poses force the policy to learn active grasping
-                # under varied gravity directions, not just passive balancing.
-                # Stage 0 data is valid for any wrist orientation because
-                # fingertip and object poses are stored in hand-relative frames.
                 self.reset_randomization = {
-                    "object_pos_jitter_std": 0.0,           # no object position jitter
-                    "object_rot_jitter_deg": 0.0,           # no object rotation jitter
-                    "wrist_pos_jitter_std": 0.005,          # 5mm wrist position noise
-                    "wrist_rot_std_deg": 15.0,              # ±15° wrist tilt noise (paper: diverse wrist poses)
-                    "align_palm_up": True,                  # base pose is palm-up, then tilt noise is applied
+                    "object_pos_jitter_std": 0.0,
+                    "object_rot_jitter_deg": 0.0,
+                    "wrist_pos_jitter_std": 0.0,
+                    "wrist_rot_std_deg": 0.0,
+                    "align_palm_up": True,
                 }
 
             if self.reset_refinement is None:
