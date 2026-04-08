@@ -9,13 +9,19 @@ env:
   task: DexGen-AnyGrasp-Sharpa-v0
   num_envs: 512
   episode_length_s: 10.0
-  action_scale: 1.0              # normalized [-1, 1] action mapped to full soft joint range
-  action_mode: "absolute"        # "absolute" or "delta"
-  # Delta params (IsaacGymEnvs ShadowHand style):
-  #   delta = dof_speed_scale * dt * action = 20.0 * (1/30) = 0.67 rad/step
-  delta_scale: 1.0               # dof_speed_scale * dt (20.0 * 1/20)
+  action_scale: 1.0              # keep full normalized joint range available to the delta wrapper
+  action_mode: "delta"           # accumulate normalized joint targets from the current state
+  # Sharpa uses action_scale = 1/24 at 20 Hz in its DirectRLEnv.
+  # In this repo the equivalent should be applied as a delta in normalized target space,
+  # not as the underlying Isaac Lab JointPositionToLimitsAction scale.
+  delta_scale: 0.0416666667      # 1/24 per control step
   actions_moving_average: 1.0    # 1.0=no smoothing, 0.3=strong smoothing
-  decimation: 6                  # control at 20 Hz (120 Hz sim / 6)
+  decimation: 12                 # control at 20 Hz (240 Hz sim / 12), matching Sharpa default
+  gravity_curriculum:
+    enabled: true
+    start_gravity: 0.05
+    end_gravity: 9.81
+    warmup_ratio: 0.30
 
   terminations:
     no_contact_patience: 30          # steps with 0 fingertip contact → reset (30 steps = 1s at 30Hz)

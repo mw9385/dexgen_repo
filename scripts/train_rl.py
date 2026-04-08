@@ -134,6 +134,8 @@ def apply_env_config(env_cfg, env_cfg_dict: dict):
     if "decimation" in env_cfg_dict:
         env_cfg.decimation = int(env_cfg_dict["decimation"])
         env_cfg.sim.render_interval = env_cfg.decimation
+    if "gravity_curriculum" in env_cfg_dict:
+        env_cfg.gravity_curriculum = dict(env_cfg_dict["gravity_curriculum"])
 
     rewards_cfg = env_cfg_dict.get("rewards", {})
     if rewards_cfg:
@@ -492,7 +494,7 @@ def main():
         },
     )
     _action_mode = cfg_file.get("env", {}).get("action_mode", "absolute")
-    _delta_scale = float(cfg_file.get("env", {}).get("delta_scale", 0.67))
+    _delta_scale = float(cfg_file.get("env", {}).get("delta_scale", 1.0 / 24.0))
     _actions_ma = float(cfg_file.get("env", {}).get("actions_moving_average", 1.0))
     if _action_mode == "delta":
         print(f"[Stage 1] Action mode: delta (scale={_delta_scale}, moving_avg={_actions_ma})")

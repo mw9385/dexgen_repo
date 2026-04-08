@@ -740,6 +740,27 @@ def update_curriculum(env, epoch: int, total_epochs: int = 10000):
     min_orn_end = 0.50
     graph._curriculum_min_orn = min_orn_start + t * (min_orn_end - min_orn_start)
 
+    gravity_cfg = dict((getattr(env.cfg, "gravity_curriculum", None) or {}))
+    if gravity_cfg.get("enabled", False):
+        warmup_ratio = float(gravity_cfg.get("warmup_ratio", 0.30))
+        gravity_start = float(gravity_cfg.get("start_gravity", 0.05))
+        gravity_end = float(gravity_cfg.get("end_gravity", 9.81))
+        gravity_warmup_epochs = int(total_epochs * warmup_ratio)
+        gravity_t = min(epoch / max(gravity_warmup_epochs, 1), 1.0)
+        gravity_mag = gravity_start + gravity_t * (gravity_end - gravity_start)
+        try:
+            import carb
+            import isaaclab.sim as sim_utils
+
+            sim_utils.SimulationContext.instance().physics_sim_view.set_gravity(
+                carb.Float3(0.0, 0.0, -gravity_mag)
+            )
+            env._curriculum_gravity = gravity_mag
+        except Exception as exc:
+            if not getattr(env, "_curriculum_gravity_warned", False):
+                print(f"[WARNING] Gravity curriculum update failed: {exc}")
+                env._curriculum_gravity_warned = True
+
 # ---------------------------------------------------------------------------
 # Rolling goal: update goal when current goal is achieved mid-episode
 # ---------------------------------------------------------------------------

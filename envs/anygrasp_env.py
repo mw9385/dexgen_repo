@@ -69,6 +69,7 @@ try:
     from isaaclab.scene import InteractiveSceneCfg
     from isaaclab.sensors import ContactSensorCfg
     from isaaclab.utils import configclass
+    from isaaclab.utils.noise import AdditiveGaussianNoiseCfg as Gnoise
     _ISAACLAB_AVAILABLE = True
 
 except ImportError:
@@ -79,6 +80,7 @@ except ImportError:
 from .mdp import rewards as mdp_rewards
 from .mdp import observations as mdp_obs
 from .mdp import events as mdp_events
+from .mdp import domain_rand as mdp_dr
 
 
 # ── Sharpa Wave Hand default joint positions (from sharpa-rl-lab) ──
@@ -292,8 +294,8 @@ if _ISAACLAB_AVAILABLE:
     class AnyGraspObservationsCfg:
         @configclass
         class PolicyObs(ObsGroup):
-            joint_pos = ObsTerm(func=mdp_obs.joint_positions_normalized)
-            joint_vel = ObsTerm(func=mdp_obs.joint_velocities_normalized)
+            joint_pos = ObsTerm(func=mdp_obs.joint_positions_normalized, noise=Gnoise(std=0.0))
+            joint_vel = ObsTerm(func=mdp_obs.joint_velocities_normalized, noise=Gnoise(std=0.0))
             object_pos = ObsTerm(func=mdp_obs.object_pos_in_hand_frame)
             object_quat = ObsTerm(func=mdp_obs.object_quat_in_hand_frame)
             target_obj_pos = ObsTerm(func=mdp_obs.target_object_pos_in_hand_frame)
@@ -309,8 +311,8 @@ if _ISAACLAB_AVAILABLE:
 
         @configclass
         class CriticObs(ObsGroup):
-            joint_pos = ObsTerm(func=mdp_obs.joint_positions_normalized)
-            joint_vel = ObsTerm(func=mdp_obs.joint_velocities_normalized)
+            joint_pos = ObsTerm(func=mdp_obs.joint_positions_normalized, noise=Gnoise(std=0.0))
+            joint_vel = ObsTerm(func=mdp_obs.joint_velocities_normalized, noise=Gnoise(std=0.0))
             object_pos = ObsTerm(func=mdp_obs.object_pos_in_hand_frame)
             object_quat = ObsTerm(func=mdp_obs.object_quat_in_hand_frame)
             target_obj_pos = ObsTerm(func=mdp_obs.target_object_pos_in_hand_frame)
@@ -385,6 +387,9 @@ if _ISAACLAB_AVAILABLE:
     @configclass
     class AnyGraspEventsCfg:
         reset_to_random_grasp = EventTerm(func=mdp_events.reset_to_random_grasp, mode="reset")
+        randomize_object_physics = EventTerm(func=mdp_dr.randomize_object_physics, mode="reset")
+        randomize_robot_physics = EventTerm(func=mdp_dr.randomize_robot_physics, mode="reset")
+        randomize_action_delay = EventTerm(func=mdp_dr.randomize_action_delay, mode="reset")
 
 
 # ---------------------------------------------------------------------------
@@ -405,6 +410,7 @@ if _ISAACLAB_AVAILABLE:
         object_pool_specs: list = None   # type: ignore
         reset_randomization: dict = None  # type: ignore
         reset_refinement: dict = None    # type: ignore
+        gravity_curriculum: dict = None  # type: ignore
         hand: dict = None                # type: ignore
 
         episode_length_s: float = 20.0
@@ -456,6 +462,16 @@ if _ISAACLAB_AVAILABLE:
                 }
             else:
                 self.hand = dict(self.hand)
+
+            if self.gravity_curriculum is None:
+                self.gravity_curriculum = {
+                    "enabled": False,
+                    "start_gravity": 0.05,
+                    "end_gravity": 9.81,
+                    "warmup_ratio": 0.30,
+                }
+            else:
+                self.gravity_curriculum = dict(self.gravity_curriculum)
 
             # Sensor link mapping for Sharpa Hand
             sensor_attr_by_link = {
