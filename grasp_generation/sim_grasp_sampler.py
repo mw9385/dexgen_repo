@@ -126,6 +126,7 @@ class SimGraspSampler:
         penetration_margin: float = 0.005,
         noise_std: float = 0.25,
         nfo_min_quality: float = 0.0,
+        render: bool = False,
         seed: int = 42,
     ):
         self.env = env
@@ -142,6 +143,7 @@ class SimGraspSampler:
         self.penetration_margin = penetration_margin
         self.noise_std = noise_std
         self.nfo_min_quality = nfo_min_quality
+        self.render = render
         self.rng = np.random.default_rng(seed)
 
         # Env references
@@ -360,7 +362,7 @@ class SimGraspSampler:
         robot.set_joint_position_target(joint_pos, env_ids=env_ids)
 
         # --- 3. Step physics for FK computation ---
-        env.sim.step(render=False)
+        env.sim.step(render=self.render)
         env.scene.update(dt=env.physics_dt)
 
         # --- 4. Read fingertip positions and place objects ---

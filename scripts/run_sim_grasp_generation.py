@@ -8,11 +8,15 @@ Unlike DexGraspNet optimization (MJCF FK + analytical SDF), this approach:
   - Joint angles are in 24-DOF Isaac format directly
 
 Usage:
-    # Basic (single object)
+    # With visualization (default)
     /workspace/IsaacLab/isaaclab.sh -p scripts/run_sim_grasp_generation.py \\
         --shapes cube --size_min 0.06 --size_max 0.06 --num_grasps 300
 
-    # Full object pool
+    # Headless (faster, no GUI)
+    /workspace/IsaacLab/isaaclab.sh -p scripts/run_sim_grasp_generation.py \\
+        --shapes cube --num_grasps 300 --headless
+
+    # Full object pool with visualization
     /workspace/IsaacLab/isaaclab.sh -p scripts/run_sim_grasp_generation.py \\
         --shapes cube sphere cylinder \\
         --size_min 0.05 --size_max 0.08 --num_sizes 3 \\
@@ -71,7 +75,8 @@ def parse_args():
                    help="Max edge distance for graph connectivity")
 
     # Isaac Sim / Isaac Lab arguments
-    p.add_argument("--headless", action="store_true", default=True)
+    p.add_argument("--headless", action="store_true", default=False,
+                   help="Run without visualization (faster)")
     p.add_argument("--num_envs", type=int, default=64,
                    help="Number of parallel environments for batched sampling")
     p.add_argument("--device", type=str, default="cuda:0")
@@ -183,6 +188,7 @@ def main():
     from grasp_generation.sim_grasp_sampler import SimGraspSampler
     from grasp_generation.rrt_expansion import MultiObjectGraspGraph
 
+    render = not args.headless
     num_fingers = 5  # Shadow Hand
     sizes = np.linspace(args.size_min, args.size_max, args.num_sizes)
     multi_graph = MultiObjectGraspGraph(graphs={}, object_specs={})
@@ -202,7 +208,7 @@ def main():
             env = ManagerBasedRLEnv(env_cfg)
 
             # Warm up: step once to initialise physics
-            env.sim.step(render=False)
+            env.sim.step(render=render)
             env.scene.update(dt=env.physics_dt)
 
             # Create sampler and run
@@ -219,6 +225,7 @@ def main():
                 penetration_margin=args.penetration_margin,
                 noise_std=args.noise_std,
                 nfo_min_quality=args.nfo_min_quality,
+                render=render,
                 seed=args.seed,
             )
 
