@@ -1,26 +1,20 @@
 """
 Isaac Sim Batched Grasp Sampler with Physics Validation
 ========================================================
-Batched version of the existing HeuristicSampler + PhysX settle test.
+Generates grasps by sampling joint configs in Isaac Sim, holding them
+via position control for multiple physics steps, and validating that
+the object stays stable in the hand.
 
-Follows the same approach as HeuristicSampler in grasp_sampler.py:
-  - Default wrist pose (palm-up is applied later during training reset)
-  - Object placed at fingertip centroid of midpoint joints
-  - Joint configs sampled as midpoint ± noise
-  - Contact + penetration check via FK + trimesh
-  - NFO quality scoring
+Pipeline per round:
+  1. (Init, once) Apply palm-up transform so palm faces +Z
+  2. Set sampled joint angles as position targets in all N envs
+  3. Place object at fingertip centroid
+  4. Step physics for hold_steps — actuators maintain pose,
+     PhysX handles contact. This gives time for the grasp to stabilise.
+  5. Validate: velocity, height, contact distance, penetration, NFO
 
-Additions over HeuristicSampler:
-  - Batched across N parallel environments (not just env 0)
-  - PhysX physics settle validation as final filter
-  - Perturbation-based diversity expansion from valid seeds
-
-The palm-up transform is NOT applied here — that's done at training
-time by apply_palm_up_transform() in events.py, consistent with the
-existing pipeline.
-
-Usage:
-  Called from scripts/run_sim_grasp_generation.py with a live Isaac Lab env.
+No separate FK/physics phases — everything runs through physics
+so the hand actually holds the object visually and physically.
 """
 
 from __future__ import annotations
@@ -55,29 +49,25 @@ def make_primitive_mesh(shape: str, size: float) -> trimesh.Trimesh:
 
 class SimGraspSampler:
     """
-    Batched HeuristicSampler + PhysX settle validation.
+    Batched grasp sampler with physics-based holding.
 
-    Two-phase pipeline:
-      Phase 1 — FK validation (fast, kinematics only, batched across N envs):
-        Same logic as HeuristicSampler._evaluate():
-        set joints → robot.update(0.0) → check contact distance + penetration
-      Phase 2 — Physics settle (for FK-valid candidates only):
-        Set joints → place object → step physics → check velocity/height/drift
+    Each round:
+      - N envs get different sampled joint targets
+      - Object placed at fingertip centroid
+      - Physics runs for hold_steps with position control active
+      - After hold: check stability + contact + NFO
 
     Args:
         env: Live Isaac Lab ManagerBasedRLEnv.
         object_name: Identifier for output grasps.
         object_shape / object_size: Primitive mesh params.
-        num_fingers: Number of fingers (5 for Shadow Hand).
-        noise_std: Joint noise as fraction of range.
+        hold_steps: Physics steps to hold the grasp (actuators active).
+        vel_threshold: Max object velocity after holding.
         contact_threshold: Max fingertip-to-surface distance for contact.
         min_contact_fingers: Min fingertips in contact.
         penetration_margin: Max finger link penetration depth.
         nfo_min_quality: Min NFO score (0 = disabled).
-        settle_steps: Physics steps for settle validation.
-        vel_threshold: Max object velocity after settle.
-        render: Render physics steps (for visualization).
-        seed: Random seed.
+        render: Render physics steps.
     """
 
     _WRIST_JOINTS = [0, 1]
@@ -90,14 +80,14 @@ class SimGraspSampler:
         object_size: float,
         num_fingers: int = 5,
         noise_std: float = 0.3,
+        hold_steps: int = 40,
+        vel_threshold: float = 0.3,
+        min_height: float = 0.15,
+        max_drift: float = 0.05,
         contact_threshold: float = 0.02,
         min_contact_fingers: int = 3,
         penetration_margin: float = 0.008,
         nfo_min_quality: float = 0.0,
-        settle_steps: int = 15,
-        vel_threshold: float = 0.3,
-        min_height: float = 0.15,
-        max_drift: float = 0.05,
         render: bool = False,
         seed: int = 42,
     ):
@@ -107,14 +97,14 @@ class SimGraspSampler:
         self.object_size = object_size
         self.num_fingers = num_fingers
         self.noise_std = noise_std
+        self.hold_steps = hold_steps
+        self.vel_threshold = vel_threshold
+        self.min_height = min_height
+        self.max_drift = max_drift
         self.contact_threshold = contact_threshold
         self.min_contact_fingers = min_contact_fingers
         self.penetration_margin = penetration_margin
         self.nfo_min_quality = nfo_min_quality
-        self.settle_steps = settle_steps
-        self.vel_threshold = vel_threshold
-        self.min_height = min_height
-        self.max_drift = max_drift
         self.render = render
         self.rng = np.random.default_rng(seed)
 
@@ -140,63 +130,121 @@ class SimGraspSampler:
         self.q_mid = (self.q_low + self.q_high) / 2.0
         self.q_mid[self._WRIST_JOINTS] = 0.0
 
-        # Object mesh (for contact/penetration check)
+        # Noise scale
+        self.noise_scale = self.q_range.clone() * self.noise_std
+        self.noise_scale[self._WRIST_JOINTS] = 0.0
+
+        # Object mesh
         self.mesh = make_primitive_mesh(object_shape, object_size)
 
-        # NFO evaluator
-        self.nfo = None
-        if nfo_min_quality > 0:
-            from .net_force_optimization import NetForceOptimizer
-            self.nfo = NetForceOptimizer(
-                mu=0.5, num_edges=8, min_quality=nfo_min_quality,
-            )
+        # NFO evaluator (always create for debugging, filter only if min_quality > 0)
+        from .net_force_optimization import NetForceOptimizer
+        self.nfo = NetForceOptimizer(
+            mu=0.5, num_edges=8,
+            min_quality=nfo_min_quality if nfo_min_quality > 0 else 0.0,
+        )
+        self.nfo_min_quality = nfo_min_quality
 
-        # Setup: place object at fingertip centroid of midpoint pose
-        # (same approach as HeuristicSampler._setup_object)
-        self.obj_pos_w = self._setup_object_at_centroid()
+        # ── Palm-up initialisation ─────────────────────────────────
+        # 1. Set midpoint joints → step physics → apply palm-up
+        # 2. Store the palm-up wrist pose for all subsequent rounds
+        self._palm_up_wrist_pos, self._palm_up_wrist_quat = \
+            self._init_palm_up()
 
     # ------------------------------------------------------------------
-    # Setup
+    # Init: palm-up wrist pose
     # ------------------------------------------------------------------
 
-    def _setup_object_at_centroid(self) -> torch.Tensor:
+    def _init_palm_up(self) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Place object at fingertip centroid of midpoint joint configuration.
+        Compute palm-up wrist pose using the same approach as
+        apply_palm_up_transform() in events.py.
 
-        Follows HeuristicSampler._setup_object() exactly:
-        set midpoint joints → FK → centroid → place object.
-        This is done for ALL envs simultaneously.
-
-        Returns:
-            obj_pos_w: (num_envs, 3) object position in world frame.
+        Steps:
+          1. Set default wrist + midpoint joints
+          2. Step physics (so body_pos_w is accurate)
+          3. Compute palm normal and correction rotation
+          4. Rotate wrist around fingertip centroid
         """
+        from envs.mdp.sim_utils import (
+            set_robot_root_pose,
+            get_local_palm_normal,
+            get_fingertip_body_ids_from_env,
+        )
+        from envs.mdp.math_utils import quat_from_two_vectors, quat_multiply
+        from isaaclab.utils.math import quat_apply
+
+        env = self.env
+        robot = self.robot
+        obj = self.obj
         env_ids = self.all_env_ids
         N = self.num_envs
 
-        # Set midpoint joints in all envs
-        q_mid_batch = self.q_mid.unsqueeze(0).expand(N, -1)
-        self.robot.write_joint_state_to_sim(
-            q_mid_batch, torch.zeros_like(q_mid_batch), env_ids=env_ids,
+        # 1. Default wrist pose
+        root_state = robot.data.default_root_state[env_ids, :7].clone()
+        root_state[:, :3] += env.scene.env_origins[env_ids]
+        robot.write_root_pose_to_sim(root_state, env_ids=env_ids)
+
+        # Midpoint joints
+        q_mid = self.q_mid.unsqueeze(0).expand(N, -1)
+        robot.write_joint_state_to_sim(
+            q_mid, torch.zeros_like(q_mid), env_ids=env_ids,
         )
-        self.robot.set_joint_position_target(q_mid_batch, env_ids=env_ids)
-        self.robot.update(0.0)
+        robot.set_joint_position_target(q_mid, env_ids=env_ids)
 
-        # Fingertip centroid
-        ft_pos = self.robot.data.body_pos_w[env_ids][:, self.ft_ids, :]
-        obj_pos_w = ft_pos.mean(dim=1)  # (N, 3)
+        # Move object away
+        temp = obj.data.default_root_state[env_ids].clone()
+        temp[:, :3] = env.scene.env_origins[env_ids] + torch.tensor(
+            [[0, 0, -10.0]], device=self.device,
+        )
+        temp[:, 7:] = 0.0
+        obj.write_root_state_to_sim(temp, env_ids=env_ids)
+        obj.update(0.0)
 
-        # Place object at centroid in all envs
-        obj_state = self.obj.data.default_root_state[env_ids].clone()
-        obj_state[:, :3] = obj_pos_w
-        obj_state[:, 3:7] = torch.tensor(
-            [[1, 0, 0, 0]], device=self.device, dtype=torch.float32,
-        ).expand(N, -1)
-        obj_state[:, 7:] = 0.0
-        self.obj.write_root_state_to_sim(obj_state, env_ids=env_ids)
-        self.obj.update(0.0)
+        # 2. Step physics so body positions are accurate
+        env.sim.step(render=self.render)
+        env.scene.update(dt=env.physics_dt)
 
-        print(f"    Object placed at centroid: {obj_pos_w[0].tolist()}")
-        return obj_pos_w
+        # 3. Palm normal → correction quaternion
+        wrist_pos = robot.data.root_pos_w[env_ids].clone()
+        wrist_quat = robot.data.root_quat_w[env_ids].clone()
+
+        palm_normal_local = get_local_palm_normal(robot, env)
+        palm_normal_local = palm_normal_local.unsqueeze(0).expand(N, 3)
+        palm_normal_world = quat_apply(wrist_quat, palm_normal_local)
+
+        target_up = torch.tensor(
+            [0.0, 0.0, 1.0], device=self.device,
+        ).expand(N, 3)
+        correction = quat_from_two_vectors(palm_normal_world, target_up)
+
+        # 4. Rotate wrist around fingertip centroid (same as apply_palm_up_transform)
+        ft_ids = get_fingertip_body_ids_from_env(robot, env)
+        ft_world = robot.data.body_pos_w[env_ids][:, ft_ids, :]
+        pivot = ft_world.mean(dim=1)
+
+        new_quat = quat_multiply(correction, wrist_quat)
+        new_quat = new_quat / (torch.norm(new_quat, dim=-1, keepdim=True) + 1e-8)
+        wrist_rel = wrist_pos - pivot
+        new_pos = quat_apply(correction, wrist_rel) + pivot
+
+        # Apply and verify
+        set_robot_root_pose(env, env_ids, new_pos, new_quat)
+        env.sim.step(render=self.render)
+        env.scene.update(dt=env.physics_dt)
+
+        print(f"    [Palm-up] wrist_pos={new_pos[0].tolist()}")
+        print(f"    [Palm-up] wrist_quat={new_quat[0].tolist()}")
+
+        # Verify: palm normal should now point +Z
+        palm_w_after = quat_apply(
+            robot.data.root_quat_w[env_ids],
+            palm_normal_local,
+        )
+        print(f"    [Palm-up] palm_normal_world={palm_w_after[0].tolist()} "
+              f"(should be ~[0,0,1])")
+
+        return new_pos.clone(), new_quat.clone()
 
     # ------------------------------------------------------------------
     # Main sampling interface
@@ -208,33 +256,33 @@ class SimGraspSampler:
         max_rounds: int = 500,
         verbose: bool = True,
     ) -> GraspSet:
-        """
-        Phase 1: FK validation (batched) → Phase 2: Physics settle.
-
-        Returns GraspSet with physics-validated grasps.
-        """
-        fk_valid: List[Grasp] = []
+        all_grasps: List[Grasp] = []
         total_tested = 0
         perturb_pool: List[torch.Tensor] = []
 
-        # We need more FK-valid candidates than num_grasps because
-        # physics settle will filter some out.
-        fk_target = int(num_grasps * 1.5)
+        # Rejection counters for debugging
+        reject_counts = {
+            "penetration": 0,
+            "contact": 0,
+            "nfo": 0,
+            "velocity": 0,
+            "height": 0,
+            "drift": 0,
+        }
 
         if verbose:
-            print(f"[SimGraspSampler] Target: {num_grasps} grasps "
+            print(f"\n[SimGraspSampler] Target: {num_grasps} grasps "
                   f"for '{self.object_name}'")
-            print(f"  Phase 1: FK validation (batched, {self.num_envs} envs)")
-            print(f"    noise_std={self.noise_std}, "
+            print(f"  hold_steps={self.hold_steps}, "
+                  f"noise_std={self.noise_std}, "
                   f"contact_thresh={self.contact_threshold}m, "
-                  f"min_contact={self.min_contact_fingers}/{self.num_fingers}")
+                  f"min_contact={self.min_contact_fingers}/{self.num_fingers}, "
+                  f"nfo_min={self.nfo_min_quality}")
 
-        # ── Phase 1: FK validation ──────────────────────────────────
         for round_idx in range(max_rounds):
-            if len(fk_valid) >= fk_target:
+            if len(all_grasps) >= num_grasps:
                 break
 
-            # Perturbation strategy after collecting seeds
             use_perturb = (
                 len(perturb_pool) >= 5 and self.rng.random() < 0.3
             )
@@ -243,8 +291,10 @@ class SimGraspSampler:
             else:
                 q_batch = self._sample_joints()
 
-            new_grasps = self._fk_validate_batch(q_batch)
-            fk_valid.extend(new_grasps)
+            new_grasps = self._evaluate_round(
+                q_batch, reject_counts, verbose=(round_idx == 0),
+            )
+            all_grasps.extend(new_grasps)
             total_tested += self.num_envs
 
             for g in new_grasps:
@@ -258,52 +308,37 @@ class SimGraspSampler:
                         )
                         perturb_pool = [perturb_pool[i] for i in idx]
 
-            if verbose and (round_idx + 1) % 10 == 0:
-                rate = (len(fk_valid) / total_tested * 100
+            if verbose and (round_idx + 1) % 5 == 0:
+                rate = (len(all_grasps) / total_tested * 100
                         if total_tested > 0 else 0)
-                print(f"    round {round_idx+1}: {len(fk_valid)} FK-valid "
-                      f"({rate:.1f}%, {total_tested} tested)")
+                print(f"  round {round_idx+1}: {len(all_grasps)}/{num_grasps} "
+                      f"({rate:.1f}%, tested={total_tested})")
+
+        all_grasps.sort(key=lambda g: g.quality, reverse=True)
+        all_grasps = all_grasps[:num_grasps]
 
         if verbose:
-            print(f"  Phase 1 done: {len(fk_valid)} FK-valid grasps")
+            rate = (len(all_grasps) / total_tested * 100
+                    if total_tested > 0 else 0)
+            print(f"\n[SimGraspSampler] Result: {len(all_grasps)} grasps "
+                  f"({rate:.1f}% of {total_tested})")
+            print(f"  Rejections: {reject_counts}")
 
-        if len(fk_valid) == 0:
-            print(f"  WARNING: 0 FK-valid grasps")
-            return GraspSet(object_name=self.object_name)
-
-        # ── Phase 2: Physics settle validation ──────────────────────
-        if verbose:
-            print(f"  Phase 2: Physics settle ({self.settle_steps} steps, "
-                  f"vel_thresh={self.vel_threshold})")
-
-        physics_valid = self._physics_validate(fk_valid, verbose=verbose)
-
-        # Sort by quality, truncate
-        physics_valid.sort(key=lambda g: g.quality, reverse=True)
-        physics_valid = physics_valid[:num_grasps]
-
-        if verbose:
-            print(f"[SimGraspSampler] Done: {len(physics_valid)} grasps "
-                  f"(FK: {len(fk_valid)}, physics: {len(physics_valid)})")
-
-        return GraspSet(grasps=physics_valid, object_name=self.object_name)
+        return GraspSet(grasps=all_grasps, object_name=self.object_name)
 
     # ------------------------------------------------------------------
     # Joint sampling
     # ------------------------------------------------------------------
 
     def _sample_joints(self) -> torch.Tensor:
-        """Sample joints: midpoint + noise (same as HeuristicSampler)."""
         N = self.num_envs
-        noise = torch.randn(N, self.num_dof, device=self.device) * self.noise_std
-        noise[:, self._WRIST_JOINTS] = 0.0
-        q = self.q_mid.unsqueeze(0) + noise * self.q_range.unsqueeze(0)
+        noise = torch.randn(N, self.num_dof, device=self.device)
+        q = self.q_mid.unsqueeze(0) + noise * self.noise_scale.unsqueeze(0)
         return torch.clamp(q, self.q_low, self.q_high)
 
     def _sample_joints_perturb(
         self, pool: List[torch.Tensor], perturb_std: float = 0.08,
     ) -> torch.Tensor:
-        """Perturb previously valid joint configs for diversity."""
         N = self.num_envs
         idx = self.rng.integers(0, len(pool), size=N)
         seeds = torch.stack([pool[i] for i in idx])
@@ -313,56 +348,156 @@ class SimGraspSampler:
         return torch.clamp(q, self.q_low, self.q_high)
 
     # ------------------------------------------------------------------
-    # Phase 1: FK validation (batched, kinematics only)
+    # Per-round evaluation (physics-based)
     # ------------------------------------------------------------------
 
-    def _fk_validate_batch(
-        self, joint_pos: torch.Tensor,
+    def _evaluate_round(
+        self,
+        joint_targets: torch.Tensor,
+        reject_counts: dict,
+        verbose: bool = False,
     ) -> List[Grasp]:
         """
-        Batched FK validation — same logic as HeuristicSampler._evaluate()
-        but for all N envs simultaneously.
+        One round of physics-based grasp evaluation.
 
-        Sets joints → robot.update(0.0) → check contact + penetration.
-        No physics stepping needed (kinematics only).
+        1. Set palm-up wrist + joint targets
+        2. Place object at fingertip centroid
+        3. Hold for hold_steps (position control active)
+        4. Validate after holding
         """
+        from envs.mdp.sim_utils import set_robot_root_pose
+
         N = self.num_envs
         env_ids = self.all_env_ids
+        env = self.env
+        robot = self.robot
+        obj = self.obj
 
-        # Set joints in all envs (kinematics only, no physics)
-        self.robot.write_joint_state_to_sim(
-            joint_pos, torch.zeros_like(joint_pos), env_ids=env_ids,
+        # ── 1. Set palm-up wrist pose ────────────────────────────────
+        set_robot_root_pose(
+            env, env_ids,
+            self._palm_up_wrist_pos, self._palm_up_wrist_quat,
         )
-        self.robot.set_joint_position_target(joint_pos, env_ids=env_ids)
-        self.robot.update(0.0)
 
-        # Read fingertip positions for all envs: (N, F, 3)
-        ft_pos_w = self.robot.data.body_pos_w[env_ids][:, self.ft_ids, :]
+        # ── 2. Set joint targets + state ─────────────────────────────
+        robot.write_joint_state_to_sim(
+            joint_targets, torch.zeros_like(joint_targets), env_ids=env_ids,
+        )
+        robot.set_joint_position_target(joint_targets, env_ids=env_ids)
+
+        # Move object away during FK init
+        temp = obj.data.default_root_state[env_ids].clone()
+        temp[:, :3] = (
+            env.scene.env_origins[env_ids]
+            + torch.tensor([[0, 0, -10.0]], device=self.device)
+        )
+        temp[:, 7:] = 0.0
+        obj.write_root_state_to_sim(temp, env_ids=env_ids)
+        obj.update(0.0)
+
+        # FK step to get fingertip positions
+        env.sim.step(render=self.render)
+        env.scene.update(dt=env.physics_dt)
+
+        # ── 3. Place object at fingertip centroid ────────────────────
+        ft_pos = robot.data.body_pos_w[env_ids][:, self.ft_ids, :]
+        obj_pos_w = ft_pos.mean(dim=1)  # (N, 3)
+
+        obj_state = obj.data.default_root_state[env_ids].clone()
+        obj_state[:, :3] = obj_pos_w
+        obj_state[:, 3:7] = torch.tensor(
+            [[1, 0, 0, 0]], device=self.device, dtype=torch.float32,
+        ).expand(N, -1)
+        obj_state[:, 7:] = 0.0
+        obj.write_root_state_to_sim(obj_state, env_ids=env_ids)
+        obj.update(0.0)
+
+        # ── 4. Hold grasp: step physics with position control ────────
+        # Re-apply joint targets each step to keep actuators locked
+        for step in range(self.hold_steps):
+            robot.set_joint_position_target(joint_targets, env_ids=env_ids)
+            env.sim.step(render=self.render)
+            env.scene.update(dt=env.physics_dt)
+
+        # ── 5. Validate ─────────────────────────────────────────────
+        # Stability
+        speed = torch.norm(obj.data.root_lin_vel_w[env_ids], dim=-1)
+        obj_pos_after = obj.data.root_pos_w[env_ids]
+        obj_z = obj_pos_after[:, 2]
+        ft_after = robot.data.body_pos_w[env_ids][:, self.ft_ids, :]
+        centroid_after = ft_after.mean(dim=1)
+        obj_drift = torch.norm(obj_pos_after[:, :3] - centroid_after, dim=-1)
+
+        # Read actual joint positions (post-contact, may differ from targets)
+        actual_q = robot.data.joint_pos[env_ids].clone()
 
         grasps = []
         for i in range(N):
-            grasp = self._fk_validate_single(
-                i, joint_pos[i], ft_pos_w[i], self.obj_pos_w[i],
+            # Stability checks
+            if speed[i] >= self.vel_threshold:
+                reject_counts["velocity"] += 1
+                continue
+            if obj_z[i] < self.min_height:
+                reject_counts["height"] += 1
+                continue
+            if obj_drift[i] > self.max_drift:
+                reject_counts["drift"] += 1
+                continue
+
+            grasp = self._validate_and_build(
+                i, actual_q[i], ft_after[i],
+                obj_pos_after[i], reject_counts,
+                verbose=(verbose and i == 0),
             )
             if grasp is not None:
                 grasps.append(grasp)
 
         return grasps
 
-    def _fk_validate_single(
+    # ------------------------------------------------------------------
+    # Per-env validation + grasp construction
+    # ------------------------------------------------------------------
+
+    def _validate_and_build(
         self,
         env_idx: int,
-        q: torch.Tensor,           # (num_dof,)
-        ft_pos_w: torch.Tensor,    # (F, 3)
-        obj_pos_w: torch.Tensor,   # (3,)
+        actual_q: torch.Tensor,
+        ft_pos_w: torch.Tensor,
+        obj_pos_w: torch.Tensor,
+        reject_counts: dict,
+        verbose: bool = False,
     ) -> Optional[Grasp]:
-        """
-        Single-env FK validation.
-        Mirrors HeuristicSampler._evaluate() exactly.
-        """
-        # -- Penetration check (finger links vs object mesh) --
-        fl_world = self.robot.data.body_pos_w[env_idx, self.finger_body_ids, :]
-        fl_obj = (fl_world - obj_pos_w).cpu().numpy()
+        """Validate contact/penetration/NFO and build Grasp."""
+
+        # Fingertip positions in object frame
+        ft_obj = (ft_pos_w - obj_pos_w[:3]).cpu().numpy()
+
+        # Closest point on mesh
+        closest, dists, face_idx = trimesh.proximity.closest_point(
+            self.mesh, ft_obj,
+        )
+        normals = self.mesh.face_normals[face_idx].astype(np.float32)
+        in_contact = dists <= self.contact_threshold
+        n_contact = int(in_contact.sum())
+
+        if verbose:
+            print(f"\n    [Debug env={env_idx}] Fingertip distances to surface:")
+            for fi in range(len(dists)):
+                status = "CONTACT" if in_contact[fi] else "far"
+                print(f"      finger {fi}: {dists[fi]*1000:.1f}mm ({status})")
+            print(f"      → {n_contact}/{self.num_fingers} in contact "
+                  f"(need {self.min_contact_fingers})")
+
+        # Contact check
+        if n_contact < self.min_contact_fingers:
+            reject_counts["contact"] += 1
+            return None
+
+        # Penetration check
+        fl_world = self.robot.data.body_pos_w[
+            env_idx, self.finger_body_ids, :
+        ]
+        fl_obj = (fl_world - obj_pos_w[:3]).cpu().numpy()
         fl_closest, fl_dists, fl_face = trimesh.proximity.closest_point(
             self.mesh, fl_obj,
         )
@@ -370,40 +505,52 @@ class SimGraspSampler:
         fl_normals = self.mesh.face_normals[fl_face]
         sign = np.sum(to_pt * fl_normals, axis=-1)
         penetration = np.where(sign < 0, fl_dists, 0.0)
-        if np.any(penetration > self.penetration_margin):
+        max_pen = float(penetration.max())
+
+        if verbose:
+            print(f"    [Debug] Max penetration: {max_pen*1000:.1f}mm "
+                  f"(limit {self.penetration_margin*1000:.1f}mm)")
+
+        if max_pen > self.penetration_margin:
+            reject_counts["penetration"] += 1
             return None
 
-        # -- Partial contact check --
-        ft_obj = (ft_pos_w - obj_pos_w).cpu().numpy()
-        closest, dists, face_idx = trimesh.proximity.closest_point(
-            self.mesh, ft_obj,
-        )
-        in_contact = dists <= self.contact_threshold
-        n_contact = int(in_contact.sum())
-        if n_contact < self.min_contact_fingers:
-            return None
-
-        # -- NFO quality --
-        normals = self.mesh.face_normals[face_idx].astype(np.float32)
+        # NFO quality
         contact_pts = closest[in_contact].astype(np.float32)
         contact_nrm = normals[in_contact]
-        if self.nfo is not None and len(contact_pts) >= 2:
+
+        if len(contact_pts) >= 2:
             quality = self.nfo.evaluate(Grasp(
                 fingertip_positions=contact_pts,
                 contact_normals=contact_nrm,
             ))
-            if quality < self.nfo.min_quality:
-                return None
         else:
-            quality = n_contact / self.num_fingers
+            quality = 0.0
 
-        # -- Object pose in hand frame --
+        if verbose:
+            print(f"    [Debug NFO] n_contact={n_contact}, quality={quality:.4f}")
+            print(f"      contact_pts shape: {contact_pts.shape}")
+            for ci in range(len(contact_pts)):
+                print(f"      pt[{ci}]={contact_pts[ci].tolist()}, "
+                      f"nrm[{ci}]={contact_nrm[ci].tolist()}")
+            if self.nfo_min_quality > 0:
+                print(f"      threshold={self.nfo_min_quality}, "
+                      f"pass={'YES' if quality >= self.nfo_min_quality else 'NO'}")
+
+        if self.nfo_min_quality > 0 and quality < self.nfo_min_quality:
+            reject_counts["nfo"] += 1
+            return None
+
+        # If NFO is disabled, use contact fraction as quality
+        if self.nfo_min_quality <= 0:
+            quality = max(quality, n_contact / self.num_fingers)
+
+        # Object pose in hand frame
         obj_quat_w = self.obj.data.root_quat_w[env_idx]
         pos_hand, quat_hand = _compute_obj_pose_hand(
-            self.robot, obj_pos_w, self.device, obj_quat_w=obj_quat_w,
+            self.robot, obj_pos_w[:3], self.device, obj_quat_w=obj_quat_w,
         )
 
-        # Fingertip positions: use closest surface points (same as HeuristicSampler)
         grasp_centroid = ft_obj.mean(axis=0)
         fp_local = (closest - grasp_centroid).astype(np.float32)
 
@@ -413,104 +560,8 @@ class SimGraspSampler:
             quality=quality,
             object_name=self.object_name,
             object_scale=self.object_size,
-            joint_angles=q.cpu().numpy().copy(),
+            joint_angles=actual_q.cpu().numpy().copy(),
             object_pos_hand=pos_hand,
             object_quat_hand=quat_hand,
             object_pose_frame="hand_root",
         )
-
-    # ------------------------------------------------------------------
-    # Phase 2: Physics settle validation
-    # ------------------------------------------------------------------
-
-    def _physics_validate(
-        self, grasps: List[Grasp], verbose: bool = True,
-    ) -> List[Grasp]:
-        """
-        Validate FK-valid grasps via PhysX physics settle.
-
-        Same approach as clean_grasp_graph.py:
-        set joints → place object → step physics → check velocity.
-
-        Processes grasps in batches of num_envs.
-        """
-        from envs.mdp.sim_utils import (
-            set_robot_joints_direct,
-            set_robot_root_pose,
-            get_fingertip_body_ids_from_env,
-        )
-
-        env = self.env
-        robot = self.robot
-        obj = self.obj
-        valid = []
-
-        # Process in batches of num_envs
-        for batch_start in range(0, len(grasps), self.num_envs):
-            batch = grasps[batch_start:batch_start + self.num_envs]
-            batch_size = len(batch)
-            env_ids = self.all_env_ids[:batch_size]
-
-            # 1. Set default wrist pose
-            root_state = robot.data.default_root_state[env_ids, :7].clone()
-            root_state[:, :3] += env.scene.env_origins[env_ids]
-            robot.write_root_pose_to_sim(root_state, env_ids=env_ids)
-
-            # 2. Set joint angles per env
-            joint_list = [g.joint_angles for g in batch]
-            set_robot_joints_direct(env, env_ids, joint_list)
-
-            # 3. Move object far away for FK step
-            temp_state = obj.data.default_root_state[env_ids].clone()
-            temp_state[:, :3] = (
-                env.scene.env_origins[env_ids]
-                + torch.tensor([[0, 0, -10.0]], device=self.device)
-            )
-            temp_state[:, 7:] = 0.0
-            obj.write_root_state_to_sim(temp_state, env_ids=env_ids)
-            obj.update(0.0)
-
-            # 4. FK step (physics needed to update body_pos_w properly)
-            env.sim.step(render=self.render)
-            env.scene.update(dt=env.physics_dt)
-
-            # 5. Place object at fingertip centroid (Isaac FK)
-            ft_pos = robot.data.body_pos_w[env_ids][:, self.ft_ids, :]
-            obj_pos = ft_pos.mean(dim=1)  # (batch_size, 3)
-
-            obj_state = obj.data.default_root_state[env_ids].clone()
-            obj_state[:, :3] = obj_pos
-            obj_state[:, 3:7] = torch.tensor(
-                [[1, 0, 0, 0]], device=self.device, dtype=torch.float32,
-            ).expand(batch_size, -1)
-            obj_state[:, 7:] = 0.0
-            obj.write_root_state_to_sim(obj_state, env_ids=env_ids)
-            obj.update(0.0)
-
-            # 6. Physics settle
-            for _ in range(self.settle_steps):
-                env.sim.step(render=self.render)
-                env.scene.update(dt=env.physics_dt)
-
-            # 7. Check stability
-            speed = torch.norm(
-                obj.data.root_lin_vel_w[env_ids], dim=-1,
-            )
-            obj_z = obj.data.root_pos_w[env_ids, 2]
-            ft_after = robot.data.body_pos_w[env_ids][:, self.ft_ids, :]
-            centroid_after = ft_after.mean(dim=1)
-            obj_drift = torch.norm(
-                obj.data.root_pos_w[env_ids, :3] - centroid_after, dim=-1,
-            )
-
-            for j in range(batch_size):
-                if (speed[j] < self.vel_threshold
-                        and obj_z[j] > self.min_height
-                        and obj_drift[j] < self.max_drift):
-                    valid.append(batch[j])
-
-            if verbose and batch_start % (self.num_envs * 5) == 0:
-                print(f"    physics: {batch_start+batch_size}/{len(grasps)} "
-                      f"tested, {len(valid)} passed")
-
-        return valid

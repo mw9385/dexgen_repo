@@ -128,13 +128,13 @@ optimization:
 #
 sim_heuristic:
   num_envs: 64                  # parallel environments for batched sampling
-  noise_std: 0.3                # joint noise std (fraction of range, matches HeuristicSampler)
+  noise_std: 0.3                # joint noise std (fraction of range)
+  hold_steps: 40                # physics steps to hold grasp (actuators active)
   contact_threshold: 0.02       # max fingertip-to-surface distance (m)
   min_contact_fingers: 3        # minimum fingertips in contact (out of 5)
   penetration_margin: 0.008     # max finger-mesh penetration depth (m)
   nfo_min_quality: 0.0          # minimum NFO quality (0 = disabled, 0.03 = strict)
-  settle_steps: 15              # physics settle steps for validation
-  vel_threshold: 0.3            # max object velocity after settle (m/s)
+  vel_threshold: 0.3            # max object velocity after holding (m/s)
   max_rounds: 500               # maximum sampling rounds per object
 
 # Surface-projected RRT (recommended — no penetration by construction)
