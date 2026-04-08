@@ -149,6 +149,24 @@ def main():
             name = joint_names[i] if i < len(joint_names) else "???"
             print(f"  [{i:2d}] {name:30s}  stored={ja[i]:.4f}")
 
+    # Print actuator config
+    print(f"\n[GraspViz] Actuator config:")
+    for act_name, act in robot.actuators.items():
+        print(f"  {act_name}: {type(act).__name__}")
+        for attr in ["stiffness", "damping", "effort_limit", "velocity_limit"]:
+            val = getattr(act, attr, None)
+            if val is not None:
+                if hasattr(val, 'mean'):
+                    print(f"    {attr}: {val.mean().item():.2f} (tensor)")
+                else:
+                    print(f"    {attr}: {val}")
+
+    # Print default joint position targets
+    default_targets = robot.data.default_joint_pos[0]
+    print(f"\n[GraspViz] Default joint position targets:")
+    for i, name in enumerate(joint_names):
+        print(f"  [{i:2d}] {name:30s}  default={default_targets[i].item():.4f}")
+
     print(f"\n[GraspViz] Cycling through grasps every {args.interval}s")
     print(f"[GraspViz] Press Ctrl+C to stop")
 
