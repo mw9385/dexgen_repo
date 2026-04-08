@@ -200,10 +200,20 @@ def main():
                     env.sim.step(render=False)
                     env.scene.update(dt=env.physics_dt)
 
-                    # Place object at fingertip centroid
+                    # Place object using stored object_pos_hand (hand frame → world)
                     ft_pos_w = robot.data.body_pos_w[env_ids][:, ft_ids, :]
-                    obj_pos_w = ft_pos_w.mean(dim=1)
-                    obj_quat_w = robot.data.root_quat_w[env_ids].clone()
+                    wrist_p = robot.data.root_pos_w[env_ids]    # (n, 3)
+                    wrist_q = robot.data.root_quat_w[env_ids]   # (n, 4)
+
+                    if grasp.object_pos_hand is not None:
+                        from isaaclab.utils.math import quat_apply
+                        obj_pos_hand_t = torch.tensor(
+                            grasp.object_pos_hand, device=device, dtype=torch.float32
+                        ).unsqueeze(0).expand(args.num_envs, -1)
+                        obj_pos_w = wrist_p + quat_apply(wrist_q, obj_pos_hand_t)
+                    else:
+                        obj_pos_w = ft_pos_w.mean(dim=1)  # fallback to centroid
+                    obj_quat_w = wrist_q.clone()
 
                     obj_state = obj.data.default_root_state[env_ids].clone()
                     obj_state[:, :3] = obj_pos_w
@@ -211,7 +221,6 @@ def main():
                     obj_state[:, 7:] = 0.0
                     obj.write_root_state_to_sim(obj_state, env_ids=env_ids)
                     obj.update(0.0)
-                    timeline.pause()
 
                     # Print grasp diagnostics
                     q = grasp.object_quat_hand

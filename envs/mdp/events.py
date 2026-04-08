@@ -323,12 +323,23 @@ def reset_to_random_grasp(
         env.sim.step(render=False)
         env.scene.update(dt=env.physics_dt)
 
-        # 3. Place object at Isaac FK fingertip centroid
+        # 3. Place object using stored object_pos_hand (hand frame → world)
         ft_ids = get_fingertip_body_ids_from_env(robot, env)
         ft_pos_w = robot.data.body_pos_w[env_ids][:, ft_ids, :]
-        obj_pos_w = ft_pos_w.mean(dim=1)  # (n, 3)
+        wrist_p = robot.data.root_pos_w[env_ids]
+        wrist_q = robot.data.root_quat_w[env_ids]
 
-        obj_quat_w = robot.data.root_quat_w[env_ids].clone()
+        # Use stored object position if available, else fallback to centroid
+        if all(p is not None for p in start_object_pos_hand_list):
+            obj_pos_hand_batch = torch.tensor(
+                np.stack(start_object_pos_hand_list),
+                device=env.device, dtype=torch.float32,
+            )
+            obj_pos_w = wrist_p + quat_apply(wrist_q, obj_pos_hand_batch)
+        else:
+            obj_pos_w = ft_pos_w.mean(dim=1)
+
+        obj_quat_w = wrist_q.clone()
 
         obj_root_state = obj.data.default_root_state[env_ids].clone()
         obj_root_state[:, :3] = obj_pos_w
@@ -424,11 +435,22 @@ def reset_to_random_grasp(
     env.sim.step(render=False)
     env.scene.update(dt=env.physics_dt)
     ft_pos_final = robot.data.body_pos_w[env_ids][:, ft_ids_resync, :]
-    obj_pos_final_w = ft_pos_final.mean(dim=1)
+    wrist_p_final = robot.data.root_pos_w[env_ids]
+    wrist_q_final = robot.data.root_quat_w[env_ids]
+
+    # Use stored object_pos_hand for placement (avoids penetration)
+    if all(p is not None for p in start_object_pos_hand_list):
+        obj_pos_hand_batch = torch.tensor(
+            np.stack(start_object_pos_hand_list),
+            device=env.device, dtype=torch.float32,
+        )
+        obj_pos_final_w = wrist_p_final + quat_apply(wrist_q_final, obj_pos_hand_batch)
+    else:
+        obj_pos_final_w = ft_pos_final.mean(dim=1)
 
     obj_root_state = obj.data.default_root_state[env_ids].clone()
     obj_root_state[:, :3] = obj_pos_final_w
-    obj_root_state[:, 3:7] = robot.data.root_quat_w[env_ids].clone()
+    obj_root_state[:, 3:7] = wrist_q_final.clone()
     obj_root_state[:, 7:] = 0.0
     obj.write_root_state_to_sim(obj_root_state, env_ids=env_ids)
     obj.update(0.0)
