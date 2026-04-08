@@ -194,7 +194,7 @@ if _ISAACLAB_AVAILABLE:
                 "fingers": ImplicitActuatorCfg(
                     joint_names_expr=["robot0_.*"],
                     stiffness=10.0,
-                    damping=1.0,
+                    damping=7.0,
                 ),
             },
             spawn=SHADOW_HAND_CFG.spawn.replace(
