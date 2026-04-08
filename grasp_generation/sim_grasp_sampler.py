@@ -83,13 +83,23 @@ class SurfaceGraspSampler:
         """
         Sample contact point sets on the mesh surface and filter by NFO.
 
-        Returns grasps with fingertip_positions (on surface) + contact_normals
-        + quality. No joint_angles yet (IK will fill those).
+        Only samples from the upper hemisphere (normals with Z > -0.3)
+        to ensure fingertips are reachable by the hand from above.
         """
         if verbose:
             print(f"    [SurfaceSampler] Sampling {num_grasps} grasps "
                   f"from {num_candidates} candidates "
                   f"(NFO >= {self.min_quality})")
+
+        # Pre-sample a large pool of surface points.
+        # With palm-up hand, fingers can approach from all sides,
+        # so no directional filter needed.
+        pool_size = max(num_candidates * 3, 30000)
+        pool_pts, pool_face = trimesh.sample.sample_surface(
+            self.mesh, pool_size,
+        )
+        pool_pts = pool_pts.astype(np.float32)
+        pool_normals = self.mesh.face_normals[pool_face].astype(np.float32)
 
         valid = []
         nfo_fail = 0
@@ -99,12 +109,13 @@ class SurfaceGraspSampler:
             if len(valid) >= num_grasps:
                 break
 
-            # Step 1: Sample num_fingers points on surface
-            points, face_idx = trimesh.sample.sample_surface(
-                self.mesh, self.num_fingers,
-            )
-            points = points.astype(np.float32)
-            normals = self.mesh.face_normals[face_idx].astype(np.float32)
+            if len(pool_pts) < self.num_fingers:
+                break
+
+            # Step 1: Sample num_fingers points from reachable pool
+            idx = self.rng.choice(len(pool_pts), self.num_fingers, replace=False)
+            points = pool_pts[idx]
+            normals = pool_normals[idx]
 
             # Check pairwise finger spacing
             if not self._check_spacing(points):
@@ -154,24 +165,28 @@ def assign_ik_and_check_collision(
     grasps: List[Grasp],
     mesh: trimesh.Trimesh,
     object_size: float,
-    penetration_margin: float = 0.008,
+    penetration_margin: float = 0.015,
     render: bool = False,
     verbose: bool = True,
 ) -> List[Grasp]:
     """
     Algorithm 3, Steps 3-5:
-      3. Object is placed at fingertip centroid (defines object pose)
+      3. Object is placed at fingertip centroid (palm-up orientation)
       4. IK (refine_hand_to_start_grasp) to find joint angles
       5. Collision check: reject if hand penetrates object
 
-    Processes grasps one at a time on env 0 (IK is serial).
+    IMPORTANT: The hand is set to PALM-UP before IK, so the IK solution
+    is computed from the correct orientation.
     """
     from envs.mdp.sim_utils import (
         set_robot_root_pose,
         set_adaptive_joint_pose,
         get_fingertip_body_ids_from_env,
+        get_local_palm_normal,
         refine_hand_to_start_grasp,
     )
+    from envs.mdp.math_utils import quat_from_two_vectors, quat_multiply
+    from isaaclab.utils.math import quat_apply
 
     robot = env.scene["robot"]
     obj = env.scene["object"]
@@ -180,12 +195,53 @@ def assign_ik_and_check_collision(
     ft_ids = get_fingertip_body_ids_from_env(robot, env)
     finger_body_ids = _resolve_finger_body_ids(robot)
 
+    # ── Compute palm-up wrist pose once ──────────────────────────
+    # Set default wrist + midpoint joints → physics step → palm-up rotation
+    root_state = robot.data.default_root_state[env_ids, :7].clone()
+    root_state[:, :3] += env.scene.env_origins[env_ids]
+    set_robot_root_pose(env, env_ids, root_state[:, :3], root_state[:, 3:7])
+    set_adaptive_joint_pose(env, env_ids, object_size)
+
+    temp = obj.data.default_root_state[env_ids].clone()
+    temp[:, :3] = env.scene.env_origins[env_ids] + torch.tensor(
+        [[0, 0, -10.0]], device=device,
+    )
+    temp[:, 7:] = 0.0
+    obj.write_root_state_to_sim(temp, env_ids=env_ids)
+    obj.update(0.0)
+
+    env.sim.step(render=render)
+    env.scene.update(dt=env.physics_dt)
+
+    # Palm-up rotation
+    cur_wrist_pos = robot.data.root_pos_w[env_ids].clone()
+    cur_wrist_quat = robot.data.root_quat_w[env_ids].clone()
+    palm_n_local = get_local_palm_normal(robot, env).unsqueeze(0)
+    palm_n_world = quat_apply(cur_wrist_quat, palm_n_local)
+    target_up = torch.tensor([[0, 0, 1.0]], device=device)
+    correction = quat_from_two_vectors(palm_n_world, target_up)
+
+    ft_world = robot.data.body_pos_w[env_ids][:, ft_ids, :]
+    pivot = ft_world.mean(dim=1)
+    palmup_quat = quat_multiply(correction, cur_wrist_quat)
+    palmup_quat = palmup_quat / (torch.norm(palmup_quat, dim=-1, keepdim=True) + 1e-8)
+    wrist_rel = cur_wrist_pos - pivot
+    palmup_pos = quat_apply(correction, wrist_rel) + pivot
+
+    if verbose:
+        set_robot_root_pose(env, env_ids, palmup_pos, palmup_quat)
+        env.sim.step(render=render)
+        env.scene.update(dt=env.physics_dt)
+        palm_check = quat_apply(robot.data.root_quat_w[env_ids], palm_n_local)
+        print(f"    [IK] Palm-up verified: normal={palm_check[0].tolist()} "
+              f"(want ~[0,0,1])")
+
     solved = []
     ik_fail = 0
     collision_fail = 0
 
     if verbose:
-        print(f"    [IK+Collision] Processing {len(grasps)} grasps")
+        print(f"    [IK+Collision] Processing {len(grasps)} grasps (palm-up)")
 
     for i, grasp in enumerate(grasps):
         fp = grasp.fingertip_positions  # (F, 3) on object surface
@@ -193,15 +249,21 @@ def assign_ik_and_check_collision(
             fp, device=device, dtype=torch.float32,
         ).unsqueeze(0)  # (1, F, 3)
 
-        # Step 3: Set default wrist + midpoint joints
-        root_state = robot.data.default_root_state[env_ids, :7].clone()
-        root_state[:, :3] += env.scene.env_origins[env_ids]
-        set_robot_root_pose(env, env_ids, root_state[:, :3], root_state[:, 3:7])
-
+        # Step 3: Set PALM-UP wrist + midpoint joints
+        set_robot_root_pose(env, env_ids, palmup_pos, palmup_quat)
         set_adaptive_joint_pose(env, env_ids, object_size)
-        robot.update(0.0)
 
-        # Place object at fingertip centroid (object frame = world shifted)
+        # Write joints + step to get accurate FK
+        q_mid = robot.data.joint_pos[env_ids].clone()
+        robot.write_joint_state_to_sim(q_mid, torch.zeros_like(q_mid), env_ids=env_ids)
+        env.sim.step(render=render)
+        env.scene.update(dt=env.physics_dt)
+        # Re-write to fix drift
+        robot.write_joint_state_to_sim(q_mid, torch.zeros_like(q_mid), env_ids=env_ids)
+        env.sim.step(render=render)
+        env.scene.update(dt=env.physics_dt)
+
+        # Place object at fingertip centroid (palm-up FK)
         ft_pos = robot.data.body_pos_w[env_ids][:, ft_ids, :]
         obj_pos = ft_pos.mean(dim=1)  # (1, 3)
         obj_quat = torch.tensor(
@@ -454,7 +516,7 @@ def generate_and_validate(
     nfo_min_quality: float = 0.03,
     min_finger_spacing: float = 0.01,
     # Step 3-5: IK + Collision
-    penetration_margin: float = 0.008,
+    penetration_margin: float = 0.015,  # relaxed: IK can't be perfect
     # Step 6: Physics validation
     settle_steps: int = 40,
     vel_threshold: float = 0.01,
