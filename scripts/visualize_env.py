@@ -45,6 +45,9 @@ def parse_args():
                    help="zero: all-zero actions | random: uniform [-1,1] | hold: maintain initial grasp pose")
     p.add_argument("--hold_steps", type=int, default=0,
                    help="Send zero actions for this many steps before switching to action_mode")
+    p.add_argument("--freeze", action="store_true", default=False,
+                   help="Freeze physics after reset — only render, no sim stepping. "
+                        "Use to inspect initial grasp pose without any movement.")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--config", type=str,
                    default=str(Path(__file__).parent.parent / "configs" / "rl_training.yaml"))
@@ -137,25 +140,30 @@ def main():
 
     steps = 0
     try:
-        while sim_app.is_running():
-            with torch.inference_mode():
-                if args.action_mode == "hold" or (steps < args.hold_steps):
-                    # 수정: 0.0이 아닌, 리셋 시 계산된 현재 관절의 정규화된 행동 값을 입력
-                    actions = env.extras["current_action"].clone()
-                elif args.action_mode == "zero":
-                    # 순수 0.0 입력 (관절이 중간값으로 펴지는 현상 확인용)
-                    actions = torch.zeros(args.num_envs, action_dim, device=env.unwrapped.device)
-                else:
-                    actions = torch.empty(args.num_envs, action_dim, device=env.unwrapped.device).uniform_(-1, 1, generator=rng)
+        if args.freeze:
+            # Freeze mode: render only, no physics stepping
+            print(f"[Viz] FREEZE mode — physics paused. Inspect initial grasp pose.")
+            print(f"[Viz] Close the window or Ctrl+C to exit.")
+            while sim_app.is_running():
+                sim_app.update()
+        else:
+            while sim_app.is_running():
+                with torch.inference_mode():
+                    if args.action_mode == "hold" or (steps < args.hold_steps):
+                        actions = env.extras["current_action"].clone()
+                    elif args.action_mode == "zero":
+                        actions = torch.zeros(args.num_envs, action_dim, device=env.unwrapped.device)
+                    else:
+                        actions = torch.empty(args.num_envs, action_dim, device=env.unwrapped.device).uniform_(-1, 1, generator=rng)
 
-                obs, reward, terminated, truncated, info = env.step(actions)
+                    obs, reward, terminated, truncated, info = env.step(actions)
 
-            steps += 1
-            if steps % 100 == 0:
-                print(f"[Viz] step={steps}  reward_mean={reward.mean():.4f}")
-            if args.num_steps > 0 and steps >= args.num_steps:
-                print(f"[Viz] Reached {args.num_steps} steps, stopping.")
-                break
+                steps += 1
+                if steps % 100 == 0:
+                    print(f"[Viz] step={steps}  reward_mean={reward.mean():.4f}")
+                if args.num_steps > 0 and steps >= args.num_steps:
+                    print(f"[Viz] Reached {args.num_steps} steps, stopping.")
+                    break
     except KeyboardInterrupt:
         print("[Viz] Interrupted.")
 
