@@ -596,13 +596,10 @@ class GraspOptimizer:
             normals = self.mesh.face_normals[face_idx].astype(np.float32)
 
             # Object pose in hand frame.
-            # Object is at world origin with identity orientation.
+            # Object is at world origin (0,0,0) with identity orientation.
             # Hand is at (t, R) in world frame.
-            # Object position in hand frame: R^T @ (obj_pos_world - t)
-            # Object orientation in hand frame: R^T @ I = R^T
-            # We use fingertip centroid as object position proxy.
-            tips_hand = (R.T @ (tips - t).T).T  # (5, 3)
-            obj_pos_hand = tips_hand.mean(axis=0).astype(np.float32)
+            # Object center in hand frame: R^T @ (0 - t) = -R^T @ t
+            obj_pos_hand = (-R.T @ t).astype(np.float32)
             # Object orientation in hand frame = inverse of hand rotation
             obj_rot_hand = R.T  # (3, 3) rotation matrix
             obj_quat_hand = R_scipy.from_matrix(obj_rot_hand).as_quat()  # (x,y,z,w)
