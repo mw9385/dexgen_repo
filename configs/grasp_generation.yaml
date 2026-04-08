@@ -7,7 +7,7 @@
 # ==============================================================================
 hand:
   name: shadow
-  num_fingers: 5
+  num_fingers: 5                    # N_pts: 3, 4, or 5 contact points per grasp
   num_dof: 24                    # total USD joints (22 actuated + 2 wrist)
   dof_per_finger: 4
   fingertip_links:
