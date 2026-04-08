@@ -1,208 +1,164 @@
 # DexGen
 
-Reproduction of **DEXTERITYGEN: Foundation Controller for Unprecedented Dexterity**.
+Reproduction work for **DEXTERITYGEN: Foundation Controller for Unprecedented Dexterity** on the **Sharpa Wave Hand** in Isaac Lab.
 
-Paper: [arXiv](https://arxiv.org/abs/2502.04307)
+This repo is currently centered on the Stage 0 -> Stage 1 pipeline:
 
-## Pipeline
-
-```
-Stage 0   Grasp Optimization (DexGraspNet)           ->  data/grasp_graph_clean.pkl
-Stage 1   RL Policy Training (PPO)                   ->  logs/rl/shadow_anygrasp_v1/
-Stage 2   Dataset Collection                         ->  data/dataset.h5
-Stage 3   DexGen Controller                          ->  logs/dexgen/
+```text
+Stage 0  Grasp generation (.npy, hand-frame pose)  -> data/sharpa_grasp_*.npy
+Stage 1  RL training (PPO, Isaac Lab + rl_games)   -> logs/rl/sharpa_anygrasp_v1/
 ```
 
-## Quick Start
+Older optimization / `pkl`-based paths are not the active workflow.
+
+## Current Status
+
+- Hand: Sharpa Wave, 22 DOF, 5 fingertips
+- Grasp cache format: `.npy`
+- Stored grasp state: `joint_pos(22) + object_pos_hand(3) + object_quat_hand(4)`
+- RL reset: start grasp sampled from the saved `.npy`
+- RL goal: K-nearest-neighbor goal sampled from the same `.npy`, constrained to stay near the sampled start pose
+- RL logging/checkpoints: `logs/rl/sharpa_anygrasp_v1`
+
+## Setup
 
 ```bash
-# Setup
 ./setup_isaaclab.sh
-./docker/run.sh up && ./docker/run.sh exec
-
-# Install dependencies (inside container)
-/isaac-sim/python.sh -m pip install transforms3d transformations lxml
-git submodule update --init third_party/DexGraspNet
-
-# Stage 0: Generate grasp graph (optimization-based)
-python scripts/run_grasp_optimization.py \
-    --shapes cube sphere cylinder \
-    --size_min 0.04 --size_max 0.08 --num_sizes 3 \
-    --num_grasps 2000 --batch_size 1000 \
-    --output data/grasp_graph_clean.pkl
-
-# Visualize environment
-/workspace/IsaacLab/isaaclab.sh -p scripts/visualize_env.py \
-    --grasp_graph data/grasp_graph_clean.pkl
-
-# Stage 1: Train RL
-/workspace/IsaacLab/isaaclab.sh -p scripts/train_rl.py \
-    --grasp_graph data/grasp_graph_clean.pkl --num_envs 4096 --headless
+./docker/run.sh up
+./docker/run.sh exec
 ```
 
-## Stage 0: Grasp Generation
-
-DexGraspNet-style simulated annealing optimization on GPU. Generates stable grasps for Shadow Hand with per-grasp object pose in hand frame.
-
-Each grasp stores:
-- `fingertip_positions`: (F, 3) contact points relative to fingertip centroid
-- `joint_angles`: (24,) Isaac Sim joint configuration
-- `object_pos_hand`: (3,) object position in hand root frame
-- `object_quat_hand`: (4,) object orientation in hand root frame (derived from hand rotation R^T)
-
-The `object_quat_hand` varies per grasp because each grasp has a different hand pose `(t, R)`, making the object's relative orientation `R^T` unique. This provides meaningful orientation goals for in-hand reorientation.
-
-```bash
-# Full pool (9 objects: cube/sphere/cylinder x 3 sizes)
-python scripts/run_grasp_optimization.py \
-    --shapes cube sphere cylinder \
-    --size_min 0.04 --size_max 0.08 --num_sizes 3 \
-    --num_grasps 2000 --batch_size 1000 \
-    --output data/grasp_graph_clean.pkl
-
-# Single object (quick test)
-python scripts/run_grasp_optimization.py \
-    --shapes cube --size_min 0.06 --size_max 0.06 \
-    --num_grasps 300 --output data/grasp_graph_clean.pkl
-
-# Key parameters
-#   --num_grasps    Target grasps per object (more = denser orientation coverage)
-#   --batch_size    Optimization batch size (higher = faster, more GPU memory)
-#   --n_iter        Simulated annealing iterations (default: 6000)
-#   --thres_fc      Force closure threshold (default: 0.3)
-#   --thres_dis     Contact distance threshold (default: 0.005m)
-#   --thres_pen     Penetration threshold (default: 0.001m)
-#   --delta_max     Graph edge distance threshold (default: 0.04)
-```
-
-Output: `data/grasp_graph_clean.pkl` — `MultiObjectGraspGraph` containing per-object grasp graphs with edges.
-
-## Stage 1: RL Training
-
-Symmetric actor-critic PPO for in-hand object reorientation. Both actor and critic receive the same 101-dim observation (all spatial quantities in hand root frame).
-
-Each episode samples a random start grasp and a nearby goal grasp from the grasp graph. Goal selection uses KNN ranked by **orientation distance** (quaternion geodesic), filtered by minimum fingertip distance. The start and goal are distinct from step 0 — the policy must reorient the object toward the goal immediately.
-
-When the goal is achieved (pos < 2cm, rot < 0.1rad), a new nearby goal is selected via kNN (rolling goal).
-
-Hand orientation: palm-up base + diverse wrist poses (±15° tilt noise, 5mm position jitter). This forces the policy to learn active prehensile manipulation under varied gravity directions, not just passive balancing.
-
-Object pool: 4-8cm cube/sphere/cylinder, mass 50-100g. Sized for single-hand precision grasp and in-hand rotation.
-
-```bash
-/workspace/IsaacLab/isaaclab.sh -p scripts/train_rl.py \
-    --grasp_graph data/grasp_graph_clean.pkl --num_envs 4096 --headless
-```
-
-### Observation (101 dims, hand root frame)
-
-| Component | Dims | Description |
-|-----------|------|-------------|
-| Joint positions (normalized) | 22 | Finger joints, normalized to [-1, 1] |
-| Joint velocities (normalized) | 22 | Finger joints, clipped by 5 rad/s |
-| Object position | 3 | Current object pos in hand frame |
-| Object quaternion | 4 | Current object quat in hand frame |
-| Target object position | 3 | Goal object pos in hand frame |
-| Target object quaternion | 4 | Goal object quat in hand frame |
-| Object linear velocity | 3 | In hand frame |
-| Object angular velocity | 3 | In hand frame |
-| Fingertip contact forces | 15 | 3-D force per fingertip (5x3), normalized by 10N |
-| Last action | 22 | Previous joint position targets |
-
-### Reward Function (DexterityGen Eq. 4-9)
-
-All terms normalized to [-1,1] or [0,1]. Weights control relative importance.
-
-| Term | Range | Weight | Description |
-|------|-------|--------|-------------|
-| `object_orientation` | (0, 1] | 10.0 | exp(-2 * rot_err) in hand frame (PRIMARY) |
-| `object_position` | (0, 1] | 0.5 | exp(-10 * \|\|pos_err\|\|) in hand frame |
-| `goal_bonus` | {0, 1} | 10.0 | 1 if pos < 2cm AND rot < 0.1rad |
-| `work` | [-1, 0] | 0.01 | -tanh(0.01 * \|torque\| * \|vel\|) |
-| `action` | [-1, 0] | 0.01 | -tanh(0.5 * \|\|a\|\|^2) |
-| `torque` | [-1, 0] | 0.01 | -tanh(0.005 * \|\|tau\|\|^2) |
-
-### Termination
-
-- `object_drop`: object height < 0.2m
-- `object_left_hand`: palm-object distance > 20cm
-- `no_fingertip_contact`: no fingertip touches object for 30 consecutive steps (~1s)
-- `time_out`: episode length limit
-
-### Rolling Goal
-
-When the object reaches the current goal (pos < 2cm, rot < 0.1rad), a new nearby goal is selected via kNN (orientation-ranked) from the grasp graph. Same criteria as `goal_bonus`.
-
-### Reset
-
-1. Set wrist at default world position
-2. Set stored `joint_angles` directly from grasp graph
-3. Place object at FK fingertip centroid
-4. Compute goal object pose as delta(start→goal) applied to actual sim state
-5. Palm-up rotation + wrist pose diversity (position jitter + tilt noise)
-
-Start ≠ goal from step 0; the policy must reorient the object immediately.
-
-### Resume Training
-
-```bash
-/workspace/IsaacLab/isaaclab.sh -p scripts/train_rl.py \
-    --resume logs/rl/shadow_anygrasp_v1/checkpoints/model_10000.pt \
-    --grasp_graph data/grasp_graph_clean.pkl --num_envs 4096 --headless
-```
-
-### Evaluate Trained Policy
-
-```bash
-# Headless evaluation (metrics only)
-/workspace/IsaacLab/isaaclab.sh -p scripts/evaluate_policy.py \
-    --checkpoint logs/rl/shadow_anygrasp_v1/checkpoints/model_30000.pt \
-    --grasp_graph data/grasp_graph_clean.pkl \
-    --num_envs 16 --num_episodes 100 --headless
-
-# Visual evaluation (opens viewer)
-/workspace/IsaacLab/isaaclab.sh -p scripts/evaluate_policy.py \
-    --checkpoint logs/rl/shadow_anygrasp_v1/checkpoints/model_30000.pt \
-    --grasp_graph data/grasp_graph_clean.pkl
-```
-
-## Visualization
-
-```bash
-# Hold initial grasp pose
-/workspace/IsaacLab/isaaclab.sh -p scripts/visualize_env.py \
-    --grasp_graph data/grasp_graph_clean.pkl --action_mode hold
-
-# Zero actions (check if object falls)
-/workspace/IsaacLab/isaaclab.sh -p scripts/visualize_env.py \
-    --grasp_graph data/grasp_graph_clean.pkl --action_mode zero
-```
-
-## Stage 2 & 3
-
-```bash
-# Collect dataset from trained policy
-/workspace/IsaacLab/isaaclab.sh -p scripts/collect_data.py \
-    --checkpoint logs/rl/shadow_anygrasp_v1/checkpoints/model_30000.pt
-
-# Train DexGen controller
-/workspace/IsaacLab/isaaclab.sh -p scripts/train_dexgen.py --data data/dataset.h5
-```
-
-## Dependencies
+Inside the container:
 
 ```bash
 /isaac-sim/python.sh -m pip install transforms3d transformations lxml
-git submodule update --init third_party/DexGraspNet
 ```
+
+Working directory in the container:
+
+```bash
+/workspace/dexgen
+```
+
+## Stage 0: Generate Grasp Cache
+
+Generate Sharpa grasp data and save it directly to `data/` as `.npy`.
+
+Example:
+
+```bash
+/workspace/IsaacLab/isaaclab.sh -p scripts/gen_grasp.py \
+    --shape cube \
+    --size 0.05 \
+    --num_grasps 1000 \
+    --headless
+```
+
+Output example:
+
+```text
+data/sharpa_grasp_cube_050.npy
+```
+
+The saved format is:
+
+```text
+[joint_pos(22) | object_pos_hand(3) | object_quat_hand(4)]
+```
+
+Notes:
+
+- Default output directory comes from [grasp_generation.yaml](/home/mw/ws/dexgen_repo/configs/grasp_generation.yaml) and is currently `data`.
+- The `.npy` now stores object pose in **hand frame**. This is required for Stage 1 reset and goal generation to work correctly.
+
+## Stage 1: Train RL
+
+Train PPO from the generated `.npy` grasp cache:
+
+```bash
+/workspace/IsaacLab/isaaclab.sh -p scripts/train_rl.py \
+    --grasp_graph data/sharpa_grasp_cube_050.npy \
+    --num_envs 4096 \
+    --headless
+```
+
+Quick sanity check:
+
+```bash
+/workspace/IsaacLab/isaaclab.sh -p scripts/train_rl.py \
+    --grasp_graph data/sharpa_grasp_cube_050.npy \
+    --num_envs 1 \
+    --max_iterations 1 \
+    --headless
+```
+
+Verified current behavior:
+
+- The `.npy` file is loaded successfully by `train_rl.py`
+- Start grasp is sampled from the saved cache
+- Goal grasp is selected by KNN from the same cache
+- Goal is kept near the start pose in hand-frame pose space
+- Checkpoints and summaries are written under `logs/rl/sharpa_anygrasp_v1`
+
+## Observation
+
+The policy and critic both use the same 101D observation:
+
+- joint positions: 22
+- joint velocities: 22
+- object position in hand frame: 3
+- object quaternion in hand frame: 4
+- target object position in hand frame: 3
+- target object quaternion in hand frame: 4
+- object linear velocity in hand frame: 3
+- object angular velocity in hand frame: 3
+- fingertip contact forces: 15
+- last action: 22
+
+## Reset / Goal Logic
+
+Current reset flow:
+
+1. Sample a start grasp from the saved `.npy`
+2. Sample a nearby goal grasp from the same file using KNN in pose space
+3. Reset the Sharpa hand to the sampled joint configuration
+4. Reconstruct the object pose in sim
+5. Rebase the target goal pose from the sampled start->goal delta
+
+Rolling goal update:
+
+- When the current goal is reached, a new nearby goal is selected again from the same grasp cache
+
+## Logging
+
+Training outputs are written here:
+
+```text
+logs/rl/sharpa_anygrasp_v1/
+```
+
+Typical contents:
+
+```text
+logs/rl/sharpa_anygrasp_v1/nn/
+logs/rl/sharpa_anygrasp_v1/summaries/
+```
+
+## Important Files
+
+- [scripts/gen_grasp.py](/home/mw/ws/dexgen_repo/scripts/gen_grasp.py)
+- [scripts/train_rl.py](/home/mw/ws/dexgen_repo/scripts/train_rl.py)
+- [envs/anygrasp_env.py](/home/mw/ws/dexgen_repo/envs/anygrasp_env.py)
+- [envs/mdp/events.py](/home/mw/ws/dexgen_repo/envs/mdp/events.py)
+- [configs/grasp_generation.yaml](/home/mw/ws/dexgen_repo/configs/grasp_generation.yaml)
+- [configs/rl_training.yaml](/home/mw/ws/dexgen_repo/configs/rl_training.yaml)
 
 ## Troubleshooting
 
-| Problem | Solution |
-|---------|----------|
-| `DexGraspNet assets not found` | `git submodule update --init third_party/DexGraspNet` |
+| Problem | Action |
+|---|---|
+| `train_rl.py` goal distance is extremely large | Re-generate the `.npy` so it stores hand-frame pose |
+| Logs appear under `runs/` instead of `logs/rl/...` | Use the updated `train_rl.py`; current config writes to `logs/rl/sharpa_anygrasp_v1` |
+| Grasp generation is slow at startup | Isaac Sim scene creation and simulation start take time, especially at `4096` envs |
 | `ModuleNotFoundError: transformations` | `/isaac-sim/python.sh -m pip install transformations` |
-| GPU OOM during generation | Reduce `--batch_size` |
-| Object falls at reset | Increase `--num_grasps` for denser graph, or lower `--thres_pen` |
-| Goal orientation too large | Increase `--num_grasps` for denser orientation coverage |
-| Low grasp yield | Relax `--thres_fc` or `--thres_dis` |
+| No grasps appear early in Stage 0 | Let it run; early progress can stay at `0/1000` before filling rapidly |

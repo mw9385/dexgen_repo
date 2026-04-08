@@ -33,6 +33,7 @@ import time
 from pathlib import Path
 
 import numpy as np
+import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -52,13 +53,38 @@ def parse_args():
     p.add_argument("--num_envs", type=int, default=4096)
     p.add_argument("--episode_steps", type=int, default=50,
                    help="Steps per episode (at decimation=12, ~2.5s)")
-    p.add_argument("--output_dir", type=str, default="cache")
+    p.add_argument(
+        "--config",
+        type=str,
+        default=str(_REPO_ROOT / "configs" / "grasp_generation.yaml"),
+        help="Path to grasp generation YAML config",
+    )
+    p.add_argument(
+        "--output_dir",
+        type=str,
+        default=None,
+        help="Output directory for generated .npy grasp cache. Defaults to config output_dir.",
+    )
     p.add_argument("--headless", action="store_true", default=False)
     p.add_argument("--device", type=str, default="cuda:0")
     p.add_argument("--physics_gpu", type=int, default=0)
     p.add_argument("--multi_gpu", action="store_true", default=False)
     p.add_argument("--seed", type=int, default=42)
-    return p.parse_args()
+    args = p.parse_args()
+
+    cfg = load_config(args.config)
+    if args.output_dir is None:
+        args.output_dir = str(cfg.get("output_dir", "data"))
+
+    return args
+
+
+def load_config(path: str) -> dict:
+    cfg_path = Path(path)
+    if not cfg_path.exists():
+        return {}
+    with cfg_path.open("r", encoding="utf-8") as f:
+        return yaml.safe_load(f) or {}
 
 
 # ── Sharpa Hand 22-DOF default pre-grasp (from sharpa_wave_env_cfg.py) ──
@@ -263,7 +289,7 @@ def main():
     from isaaclab.envs import DirectRLEnv
     from isaaclab.sensors import ContactSensor
     from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
-    from isaaclab.utils.math import quat_conjugate, quat_mul, saturate
+    from isaaclab.utils.math import quat_apply_inverse, quat_conjugate, quat_mul, saturate
 
     render = not args.headless
 
@@ -378,6 +404,11 @@ def main():
         fingertip_pos = hand.data.body_pos_w[:, env.finger_bodies, :]
         object_pos = obj.data.root_pos_w[:, :3]
         object_rot = obj.data.root_quat_w
+        hand_root_pos = hand.data.root_pos_w
+        hand_root_quat = hand.data.root_quat_w
+        object_pos_hand = quat_apply_inverse(hand_root_quat, object_pos - hand_root_pos)
+        object_rot_hand = quat_mul(quat_conjugate(hand_root_quat), object_rot)
+        object_rot_hand = object_rot_hand / (torch.norm(object_rot_hand, dim=-1, keepdim=True) + 1e-8)
         hand_dof_pos = hand.data.joint_pos
 
         # Condition 1: all fingertips within 0.1m
@@ -412,8 +443,8 @@ def main():
         if success.any():
             states = torch.cat([
                 hand_dof_pos[success],
-                object_pos[success],
-                object_rot[success],
+                object_pos_hand[success],
+                object_rot_hand[success],
             ], dim=1)
             saved = torch.cat([saved, states], dim=0)
 
@@ -443,7 +474,7 @@ def main():
 
     print(f"\n[GenGrasp] Saved {len(data)} grasps to {out_path}")
     print(f"  shape: {data.shape}")
-    print(f"  format: [joint_pos(22) | obj_pos(3) | obj_quat(4)]")
+    print(f"  format: [joint_pos(22) | obj_pos_hand(3) | obj_quat_hand(4)]")
 
     env.close()
     sim_app.close()

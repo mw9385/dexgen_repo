@@ -221,7 +221,7 @@ def get_palm_body_id_from_env(robot, env) -> int:
 
     hand_cfg = getattr(env.cfg, "hand", None) or {}
     if hand_cfg.get("name") == "sharpa":
-        candidate_names = ["right_palm", "right_palm_link", "palm"]
+        candidate_names = ["right_hand_C_MC", "right_palm", "right_palm_link", "palm"]
     elif hand_cfg.get("name") == "shadow":
         candidate_names = ["robot0_palm", "robot0:palm", "palm"]
     else:
@@ -659,4 +659,3 @@ def get_fingertip_body_ids_from_env(robot, env) -> list[int]:
         )
         _FT_IDS_CACHE[key] = [robot.find_bodies(name)[0][0] for name in tip_names]
     return _FT_IDS_CACHE[key]
-

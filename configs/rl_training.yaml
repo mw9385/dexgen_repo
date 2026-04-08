@@ -127,7 +127,7 @@ central_value:
   minibatch_size: 8192
 
 logging:
-  log_dir: logs/rl/shadow_anygrasp_v1
+  log_dir: logs/rl/sharpa_anygrasp_v1
   save_frequency: 1000
   print_stats: true
 
