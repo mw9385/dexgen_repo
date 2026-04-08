@@ -14,7 +14,7 @@ env:
   # Sharpa uses action_scale = 1/24 at 20 Hz in its DirectRLEnv.
   # In this repo the equivalent should be applied as a delta in normalized target space,
   # not as the underlying Isaac Lab JointPositionToLimitsAction scale.
-  delta_scale: 0.0416666667      # 1/24 per control step
+  delta_scale: 0.0625            # 1/16 per control step
   actions_moving_average: 1.0    # 1.0=no smoothing, 0.3=strong smoothing
   decimation: 12                 # control at 20 Hz (240 Hz sim / 12), matching Sharpa default
   gravity_curriculum:

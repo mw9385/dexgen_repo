@@ -389,7 +389,6 @@ if _ISAACLAB_AVAILABLE:
         reset_to_random_grasp = EventTerm(func=mdp_events.reset_to_random_grasp, mode="reset")
         randomize_object_physics = EventTerm(func=mdp_dr.randomize_object_physics, mode="reset")
         randomize_robot_physics = EventTerm(func=mdp_dr.randomize_robot_physics, mode="reset")
-        randomize_action_delay = EventTerm(func=mdp_dr.randomize_action_delay, mode="reset")
 
 
 # ---------------------------------------------------------------------------
@@ -408,7 +407,6 @@ if _ISAACLAB_AVAILABLE:
 
         grasp_graph_path: str = "data/grasp_graph.pkl"
         object_pool_specs: list = None   # type: ignore
-        reset_randomization: dict = None  # type: ignore
         reset_refinement: dict = None    # type: ignore
         gravity_curriculum: dict = None  # type: ignore
         hand: dict = None                # type: ignore
@@ -437,12 +435,6 @@ if _ISAACLAB_AVAILABLE:
             specs = self.object_pool_specs or _DEFAULT_POOL
             spawner = _build_object_spawner(specs)
             self.scene.object = self.scene.object.replace(spawn=spawner)
-
-            if self.reset_randomization is None:
-                self.reset_randomization = {
-                    "wrist_pos_jitter_std": 0.0,
-                    "wrist_rot_std_deg": 0.0,
-                }
 
             if self.reset_refinement is None:
                 self.reset_refinement = {
