@@ -54,8 +54,8 @@ def parse_args():
     # Phase 2: Physics validation
     p.add_argument("--settle_steps", type=int, default=40,
                    help="Physics steps to hold grasp during validation")
-    p.add_argument("--vel_threshold", type=float, default=0.0,
-                   help="Max object velocity after settle (0 = must be still)")
+    p.add_argument("--vel_threshold", type=float, default=0.01,
+                   help="Max object velocity after settle (m/s, near-zero)")
 
     # Graph
     p.add_argument("--delta_max", type=float, default=0.04)

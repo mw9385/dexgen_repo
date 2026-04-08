@@ -58,7 +58,7 @@ class SimGraspValidator:
         self,
         env,
         settle_steps: int = 40,
-        vel_threshold: float = 0.0,
+        vel_threshold: float = 0.01,
         min_height: float = 0.15,
         max_drift: float = 0.05,
         render: bool = False,
@@ -153,16 +153,21 @@ class SimGraspValidator:
             obj.write_root_state_to_sim(temp, env_ids=env_ids)
             obj.update(0.0)
 
-            # FK step
+            # FK step — then re-write joints (physics drifts them)
+            env.sim.step(render=self.render)
+            env.scene.update(dt=env.physics_dt)
+            # Re-write joints after physics step to fix drift
+            robot.write_joint_state_to_sim(
+                q_batch, torch.zeros_like(q_batch), env_ids=env_ids,
+            )
+            robot.set_joint_position_target(q_batch, env_ids=env_ids)
             env.sim.step(render=self.render)
             env.scene.update(dt=env.physics_dt)
 
             if debug:
                 q_after_fk = robot.data.joint_pos[env_ids[0]]
-                print(f"    Sim joint_pos AFTER FK step (first 10): "
-                      f"{q_after_fk[:10].tolist()}")
                 diff = torch.abs(q_batch[0] - q_after_fk).max().item()
-                print(f"    Max joint diff (stored vs sim): {diff:.6f}")
+                print(f"    Joint diff after FK + re-write: {diff:.6f}")
 
             # ── 2. Palm-up rotation ──────────────────────────────────
             cur_wrist_pos = robot.data.root_pos_w[env_ids].clone()
@@ -185,7 +190,11 @@ class SimGraspValidator:
             wrist_rel = cur_wrist_pos - pivot
             new_wrist_pos = quat_apply(correction, wrist_rel) + pivot
 
-            set_robot_root_pose(env, env_ids, new_wrist_pos, new_wrist_quat)
+            # ── Palm-up 후 관절 재설정 (palm-up step이 관절을 흘림) ──
+            robot.write_joint_state_to_sim(
+                q_batch, torch.zeros_like(q_batch), env_ids=env_ids,
+            )
+            robot.set_joint_position_target(q_batch, env_ids=env_ids)
             env.sim.step(render=self.render)
             env.scene.update(dt=env.physics_dt)
 
@@ -197,8 +206,8 @@ class SimGraspValidator:
                 print(f"    Palm normal after rotation: "
                       f"{palm_after[0].tolist()} (want ~[0,0,1])")
                 q_after_palmup = robot.data.joint_pos[env_ids[0]]
-                print(f"    Sim joint_pos AFTER palm-up (first 10): "
-                      f"{q_after_palmup[:10].tolist()}")
+                q_diff = torch.abs(q_batch[0] - q_after_palmup).max().item()
+                print(f"    Joint diff after palm-up + re-write: {q_diff:.6f}")
 
             # ── 3. Place object at fingertip centroid ────────────────
             ft_pos = robot.data.body_pos_w[env_ids][:, self.ft_ids, :]
@@ -219,8 +228,14 @@ class SimGraspValidator:
             obj.write_root_state_to_sim(obj_state, env_ids=env_ids)
             obj.update(0.0)
 
-            # ── 4. Hold grasp ────────────────────────────────────────
+            # ── 4. Hold grasp: FORCE joints each step ────────────────
+            # write_joint_state_to_sim teleports joints to exact position
+            # each step, so actuator weakness doesn't matter.
+            # PhysX still handles object-hand collision normally.
             for step_i in range(self.settle_steps):
+                robot.write_joint_state_to_sim(
+                    q_batch, torch.zeros_like(q_batch), env_ids=env_ids,
+                )
                 robot.set_joint_position_target(q_batch, env_ids=env_ids)
                 env.sim.step(render=self.render)
                 env.scene.update(dt=env.physics_dt)
@@ -300,7 +315,7 @@ def generate_and_validate(
     nfo_min_quality: float = 0.03,
     # Validator params
     settle_steps: int = 40,
-    vel_threshold: float = 0.0,
+    vel_threshold: float = 0.01,
     # Misc
     render: bool = False,
     seed: int = 42,
