@@ -51,8 +51,8 @@ def parse_args():
     # RRT Expand
     p.add_argument("--rrt_target", type=int, default=300,
                    help="Target graph size after RRT expansion")
-    p.add_argument("--delta_pos", type=float, default=0.008)
-    p.add_argument("--delta_max", type=float, default=0.04)
+    p.add_argument("--delta_step", type=float, default=0.1,
+                   help="Interpolation step size for RRT steer")
     p.add_argument("--max_attempts", type=int, default=30)
     p.add_argument("--rrt_collision_threshold", type=float, default=0.002)
 
@@ -183,8 +183,7 @@ def main():
                 seed_grasps=seeds,
                 mesh=mesh, nfo=nfo, env=env,
                 target_size=args.rrt_target,
-                delta_pos=args.delta_pos,
-                delta_max=args.delta_max,
+                delta_step=args.delta_step,
                 min_quality=args.nfo_min_quality,
                 max_attempts_per_step=args.max_attempts,
                 collision_threshold=args.rrt_collision_threshold,

@@ -366,7 +366,20 @@ def generate_grasp_set(
         current_n_pts = int(rng.choice([2, 3, 4]))
 
         P, n = sample_surface(mesh, current_n_pts, rng)
-        
+
+        # Fast pre-filter: skip if any two points are too close
+        skip = False
+        for ii in range(len(P)):
+            for jj in range(ii + 1, len(P)):
+                if np.linalg.norm(P[ii] - P[jj]) < 0.005:
+                    skip = True
+                    break
+            if skip:
+                break
+        if skip:
+            stats["nfo_fail"] += 1
+            continue
+
         # 내부 NFO 함수 사용
         quality = grasp_analysis(P, n, mu=0.5, num_edges=8)
         
