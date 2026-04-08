@@ -41,9 +41,9 @@ def parse_args():
     p.add_argument("--output", type=str, default="data/grasp_graph_sim.pkl")
 
     # Phase 1: Surface sampling + NFO (Algorithm 3, Steps 1-2)
-    p.add_argument("--num_candidates", type=int, default=50000,
+    p.add_argument("--num_candidates", type=int, default=100000,
                    help="Surface contact point sets to try")
-    p.add_argument("--num_surface_grasps", type=int, default=1000,
+    p.add_argument("--num_surface_grasps", type=int, default=3000,
                    help="NFO-valid surface grasps to generate")
     p.add_argument("--nfo_min_quality", type=float, default=0.03,
                    help="Min NFO force-closure quality")
@@ -51,8 +51,8 @@ def parse_args():
                    help="Min pairwise fingertip distance (m)")
 
     # Phase 2: IK + Collision (Algorithm 3, Steps 3-5)
-    p.add_argument("--penetration_margin", type=float, default=0.008,
-                   help="Max finger-mesh penetration (m)")
+    p.add_argument("--penetration_margin", type=float, default=0.001,
+                   help="Max finger-mesh penetration (m), near-zero for collision-free")
 
     # Phase 3: Physics validation (Step 6)
     p.add_argument("--settle_steps", type=int, default=40)
@@ -117,7 +117,7 @@ def _build_env_cfg(shape: str, size: float, num_envs: int):
         restitution=0.0, friction_combine_mode="max",
     )
     rigid_props = sim_utils.RigidBodyPropertiesCfg(
-        disable_gravity=False, max_depenetration_velocity=5.0,
+        disable_gravity=False, max_depenetration_velocity=0.1,
         enable_gyroscopic_forces=True,
     )
     mass_props = sim_utils.MassPropertiesCfg(mass=0.05)

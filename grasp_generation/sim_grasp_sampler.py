@@ -603,12 +603,12 @@ def generate_and_validate(
     object_size: float,
     num_grasps: int = 300,
     # Step 1-2: Surface sampling + NFO
-    num_candidates: int = 50000,
-    num_surface_grasps: int = 1000,
+    num_candidates: int = 100000,
+    num_surface_grasps: int = 3000,
     nfo_min_quality: float = 0.03,
     min_finger_spacing: float = 0.01,
     # Step 3-5: IK + Collision
-    penetration_margin: float = 0.015,  # relaxed: IK can't be perfect
+    penetration_margin: float = 0.001,  # near-zero: only collision-free grasps
     # Step 6: Physics validation
     settle_steps: int = 40,
     vel_threshold: float = 0.01,
