@@ -77,7 +77,6 @@ try:
     from isaaclab.sensors import ContactSensorCfg
     from isaaclab.utils import configclass
     from isaaclab.actuators import ImplicitActuatorCfg
-    from isaaclab.utils.noise import AdditiveGaussianNoiseCfg as GaussianNoise
 
     try:
         from isaaclab.envs.mdp import JointPositionToLimitsActionCfg
@@ -283,14 +282,8 @@ if _ISAACLAB_AVAILABLE:
         @configclass
         class PolicyObs(ObsGroup):
             # ── Proprioception (joint space) ──
-            joint_pos = ObsTerm(
-                func=mdp_obs.joint_positions_normalized,
-                noise=GaussianNoise(std=0.005),
-            )
-            joint_vel = ObsTerm(
-                func=mdp_obs.joint_velocities_normalized,
-                noise=GaussianNoise(std=0.04),
-            )
+            joint_pos = ObsTerm(func=mdp_obs.joint_positions_normalized)
+            joint_vel = ObsTerm(func=mdp_obs.joint_velocities_normalized)
             # ── Current object state (hand frame) ──
             object_pos   = ObsTerm(func=mdp_obs.object_pos_in_hand_frame)
             object_quat  = ObsTerm(func=mdp_obs.object_quat_in_hand_frame)
@@ -311,14 +304,8 @@ if _ISAACLAB_AVAILABLE:
         @configclass
         class CriticObs(ObsGroup):
             # Same as actor (symmetric)
-            joint_pos = ObsTerm(
-                func=mdp_obs.joint_positions_normalized,
-                noise=GaussianNoise(std=0.005),
-            )
-            joint_vel = ObsTerm(
-                func=mdp_obs.joint_velocities_normalized,
-                noise=GaussianNoise(std=0.04),
-            )
+            joint_pos = ObsTerm(func=mdp_obs.joint_positions_normalized)
+            joint_vel = ObsTerm(func=mdp_obs.joint_velocities_normalized)
             object_pos   = ObsTerm(func=mdp_obs.object_pos_in_hand_frame)
             object_quat  = ObsTerm(func=mdp_obs.object_quat_in_hand_frame)
             target_obj_pos  = ObsTerm(func=mdp_obs.target_object_pos_in_hand_frame)
