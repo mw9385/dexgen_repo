@@ -40,22 +40,28 @@ def parse_args():
     p.add_argument("--num_grasps", type=int, default=300)
     p.add_argument("--output", type=str, default="data/grasp_graph_sim.pkl")
 
-    # Phase 1: HeuristicSampler
-    p.add_argument("--num_candidates", type=int, default=20000,
-                   help="Max FK candidates to try")
+    # Phase 1: HeuristicSampler (seed generation)
+    p.add_argument("--num_seed_candidates", type=int, default=20000,
+                   help="Max FK candidates to try for seeds")
+    p.add_argument("--num_seeds", type=int, default=500,
+                   help="Number of seed grasps from HeuristicSampler")
     p.add_argument("--noise_std", type=float, default=0.3)
-    p.add_argument("--contact_threshold", type=float, default=0.03,
-                   help="Fingertip-to-surface distance for contact (m)")
+    p.add_argument("--contact_threshold", type=float, default=0.03)
     p.add_argument("--min_contact_fingers", type=int, default=3)
     p.add_argument("--penetration_margin", type=float, default=0.008)
-    p.add_argument("--nfo_min_quality", type=float, default=0.03,
-                   help="NFO force-closure quality threshold")
 
-    # Phase 2: Physics validation
-    p.add_argument("--settle_steps", type=int, default=40,
-                   help="Physics steps to hold grasp during validation")
-    p.add_argument("--vel_threshold", type=float, default=0.01,
-                   help="Max object velocity after settle (m/s, near-zero)")
+    # Phase 2: Surface RRT expansion
+    p.add_argument("--rrt_target_size", type=int, default=300,
+                   help="Target grasps from RRT expansion")
+    p.add_argument("--delta_pos", type=float, default=0.008,
+                   help="Fingertip perturbation std (m)")
+    p.add_argument("--nfo_min_quality", type=float, default=0.03)
+    p.add_argument("--max_attempts_per_step", type=int, default=30)
+    p.add_argument("--min_finger_spacing", type=float, default=0.01)
+
+    # Phase 4: Physics validation
+    p.add_argument("--settle_steps", type=int, default=40)
+    p.add_argument("--vel_threshold", type=float, default=0.01)
 
     # Graph
     p.add_argument("--delta_max", type=float, default=0.04)
@@ -186,12 +192,20 @@ def main():
                 object_shape=shape,
                 object_size=size,
                 num_grasps=args.num_grasps,
-                num_candidates=args.num_candidates,
+                # Phase 1: Seeds
+                num_seed_candidates=args.num_seed_candidates,
+                num_seeds=args.num_seeds,
                 noise_std=args.noise_std,
                 contact_threshold=args.contact_threshold,
                 min_contact_fingers=args.min_contact_fingers,
                 penetration_margin=args.penetration_margin,
+                # Phase 2: Surface RRT
+                rrt_target_size=args.rrt_target_size,
+                delta_pos=args.delta_pos,
                 nfo_min_quality=args.nfo_min_quality,
+                max_attempts_per_step=args.max_attempts_per_step,
+                min_finger_spacing=args.min_finger_spacing,
+                # Phase 4: Physics
                 settle_steps=args.settle_steps,
                 vel_threshold=args.vel_threshold,
                 render=render,
