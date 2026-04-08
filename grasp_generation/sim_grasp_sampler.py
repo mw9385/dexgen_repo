@@ -58,7 +58,7 @@ class SimGraspValidator:
         self,
         env,
         settle_steps: int = 40,
-        vel_threshold: float = 0.3,
+        vel_threshold: float = 0.0,
         min_height: float = 0.15,
         max_drift: float = 0.05,
         render: bool = False,
@@ -104,21 +104,44 @@ class SimGraspValidator:
                   f"settle_steps={self.settle_steps}, "
                   f"vel_thresh={self.vel_threshold}")
 
+        # imports used in loop
+        from envs.mdp.sim_utils import (
+            get_local_palm_normal,
+            get_fingertip_body_ids_from_env,
+        )
+        from envs.mdp.math_utils import quat_from_two_vectors, quat_multiply
+        from isaaclab.utils.math import quat_apply
+
+        is_first_batch = True
+
         for batch_start in range(0, len(grasps), self.num_envs):
             batch = grasps[batch_start:batch_start + self.num_envs]
             bs = len(batch)
             env_ids = self.all_env_ids[:bs]
+            debug = is_first_batch and verbose
+            is_first_batch = False
 
-            # ── 1. Set wrist pose + palm-up ──────────────────────────
+            # ── 1. Set wrist pose + joints ───────────────────────────
             root_state = robot.data.default_root_state[env_ids, :7].clone()
             root_state[:, :3] += env.scene.env_origins[env_ids]
-            wrist_pos = root_state[:, :3]
-            wrist_quat = root_state[:, 3:7]
-            set_robot_root_pose(env, env_ids, wrist_pos, wrist_quat)
+            set_robot_root_pose(env, env_ids, root_state[:, :3], root_state[:, 3:7])
 
-            # Set joints first so body positions are valid for palm normal
             joint_list = [g.joint_angles for g in batch]
             set_robot_joints_direct(env, env_ids, joint_list)
+
+            q_batch = torch.stack([
+                torch.tensor(g.joint_angles, device=self.device,
+                             dtype=torch.float32)
+                for g in batch
+            ])
+
+            if debug:
+                print(f"\n    ── DEBUG: Grasp 0 ──")
+                print(f"    Stored joint_angles (first 10): "
+                      f"{batch[0].joint_angles[:10].tolist()}")
+                q_in_sim = robot.data.joint_pos[env_ids[0]]
+                print(f"    Sim joint_pos BEFORE physics (first 10): "
+                      f"{q_in_sim[:10].tolist()}")
 
             # Move object far away
             temp = obj.data.default_root_state[env_ids].clone()
@@ -130,18 +153,18 @@ class SimGraspValidator:
             obj.write_root_state_to_sim(temp, env_ids=env_ids)
             obj.update(0.0)
 
-            # FK step so body_pos_w is accurate
+            # FK step
             env.sim.step(render=self.render)
             env.scene.update(dt=env.physics_dt)
 
-            # Apply palm-up rotation (same as apply_palm_up_transform)
-            from envs.mdp.sim_utils import (
-                get_local_palm_normal,
-                get_fingertip_body_ids_from_env,
-            )
-            from envs.mdp.math_utils import quat_from_two_vectors, quat_multiply
-            from isaaclab.utils.math import quat_apply
+            if debug:
+                q_after_fk = robot.data.joint_pos[env_ids[0]]
+                print(f"    Sim joint_pos AFTER FK step (first 10): "
+                      f"{q_after_fk[:10].tolist()}")
+                diff = torch.abs(q_batch[0] - q_after_fk).max().item()
+                print(f"    Max joint diff (stored vs sim): {diff:.6f}")
 
+            # ── 2. Palm-up rotation ──────────────────────────────────
             cur_wrist_pos = robot.data.root_pos_w[env_ids].clone()
             cur_wrist_quat = robot.data.root_quat_w[env_ids].clone()
             palm_n_local = get_local_palm_normal(robot, env)
@@ -163,14 +186,29 @@ class SimGraspValidator:
             new_wrist_pos = quat_apply(correction, wrist_rel) + pivot
 
             set_robot_root_pose(env, env_ids, new_wrist_pos, new_wrist_quat)
-
-            # FK step after palm-up rotation
             env.sim.step(render=self.render)
             env.scene.update(dt=env.physics_dt)
 
-            # ── 2. Place object at fingertip centroid (palm-up FK) ───
+            if debug:
+                palm_after = quat_apply(
+                    robot.data.root_quat_w[env_ids[:1]],
+                    palm_n_local[:1],
+                )
+                print(f"    Palm normal after rotation: "
+                      f"{palm_after[0].tolist()} (want ~[0,0,1])")
+                q_after_palmup = robot.data.joint_pos[env_ids[0]]
+                print(f"    Sim joint_pos AFTER palm-up (first 10): "
+                      f"{q_after_palmup[:10].tolist()}")
+
+            # ── 3. Place object at fingertip centroid ────────────────
             ft_pos = robot.data.body_pos_w[env_ids][:, self.ft_ids, :]
             obj_pos = ft_pos.mean(dim=1)
+
+            if debug:
+                print(f"    Fingertip positions (env 0):")
+                for fi in range(len(self.ft_ids)):
+                    print(f"      ft[{fi}]: {ft_pos[0, fi].tolist()}")
+                print(f"    Object placed at centroid: {obj_pos[0].tolist()}")
 
             obj_state = obj.data.default_root_state[env_ids].clone()
             obj_state[:, :3] = obj_pos
@@ -181,18 +219,22 @@ class SimGraspValidator:
             obj.write_root_state_to_sim(obj_state, env_ids=env_ids)
             obj.update(0.0)
 
-            # ── 3. Hold grasp: re-apply targets each step ───────────
-            q_batch = torch.stack([
-                torch.tensor(g.joint_angles, device=self.device,
-                             dtype=torch.float32)
-                for g in batch
-            ])
-            for _ in range(self.settle_steps):
+            # ── 4. Hold grasp ────────────────────────────────────────
+            for step_i in range(self.settle_steps):
                 robot.set_joint_position_target(q_batch, env_ids=env_ids)
                 env.sim.step(render=self.render)
                 env.scene.update(dt=env.physics_dt)
 
-            # ── 4. Check stability ──────────────────────────────────
+                if debug and step_i in (0, 9, 19, self.settle_steps - 1):
+                    q_now = robot.data.joint_pos[env_ids[0]]
+                    obj_v = torch.norm(obj.data.root_lin_vel_w[env_ids[0]]).item()
+                    obj_p = obj.data.root_pos_w[env_ids[0]].tolist()
+                    q_diff = torch.abs(q_batch[0] - q_now).max().item()
+                    print(f"    step {step_i:3d}: obj_vel={obj_v:.4f} "
+                          f"obj_pos={[f'{x:.3f}' for x in obj_p]} "
+                          f"max_joint_diff={q_diff:.4f}")
+
+            # ── 5. Check stability ───────────────────────────────────
             speed = torch.norm(
                 obj.data.root_lin_vel_w[env_ids], dim=-1,
             )
@@ -204,14 +246,29 @@ class SimGraspValidator:
             )
 
             for j in range(bs):
+                passed = True
+                reason = ""
                 if speed[j] >= self.vel_threshold:
                     reject_counts["velocity"] += 1
+                    reason = f"vel={speed[j].item():.4f}"
+                    passed = False
                 elif obj_z[j] < self.min_height:
                     reject_counts["height"] += 1
+                    reason = f"z={obj_z[j].item():.4f}"
+                    passed = False
                 elif obj_drift[j] > self.max_drift:
                     reject_counts["drift"] += 1
-                else:
+                    reason = f"drift={obj_drift[j].item():.4f}"
+                    passed = False
+
+                if passed:
                     valid.append(batch[j])
+
+                if debug and j < 3:
+                    status = "PASS" if passed else f"FAIL({reason})"
+                    print(f"    grasp {batch_start+j}: vel={speed[j].item():.4f} "
+                          f"z={obj_z[j].item():.3f} "
+                          f"drift={obj_drift[j].item():.4f} → {status}")
 
             if verbose:
                 done = min(batch_start + bs, len(grasps))
@@ -242,8 +299,8 @@ def generate_and_validate(
     penetration_margin: float = 0.008,
     nfo_min_quality: float = 0.03,
     # Validator params
-    settle_steps: int = 15,
-    vel_threshold: float = 0.3,
+    settle_steps: int = 40,
+    vel_threshold: float = 0.0,
     # Misc
     render: bool = False,
     seed: int = 42,
@@ -298,6 +355,17 @@ def generate_and_validate(
     if len(candidates) == 0:
         print("  WARNING: HeuristicSampler produced 0 candidates")
         return GraspSet(object_name=object_name)
+
+    # Debug: inspect first candidate from Phase 1
+    if verbose and len(candidates) > 0:
+        g0 = candidates[0]
+        print(f"\n  [Phase 1 Debug] First candidate:")
+        print(f"    quality={g0.quality:.4f}")
+        print(f"    joint_angles ({len(g0.joint_angles)} DOF, first 10): "
+              f"{g0.joint_angles[:10].tolist()}")
+        print(f"    fingertip_positions:\n      {g0.fingertip_positions}")
+        print(f"    object_pos_hand={g0.object_pos_hand}")
+        print(f"    object_quat_hand={g0.object_quat_hand}")
 
     if verbose:
         print(f"\n{'='*60}")
