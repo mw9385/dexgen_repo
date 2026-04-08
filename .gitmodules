@@ -1,4 +1,0 @@
-[submodule "third_party/DexGraspNet"]
-	path = third_party/DexGraspNet
-	url = https://github.com/PKU-EPIC/DexGraspNet.git
-	branch = main

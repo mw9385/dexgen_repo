@@ -6,16 +6,15 @@
 # Hand configuration
 # ==============================================================================
 hand:
-  name: shadow
+  name: sharpa
   num_fingers: 5
-  num_dof: 24                    # total USD joints (22 actuated + 2 wrist)
-  dof_per_finger: 4
+  num_dof: 22                    # Sharpa Wave Hand (all actuated, no wrist)
   fingertip_links:
-    - robot0_ffdistal   # forefinger
-    - robot0_mfdistal   # middle finger
-    - robot0_rfdistal   # ring finger
-    - robot0_lfdistal   # little finger
-    - robot0_thdistal   # thumb
+    - right_thumb_fingertip
+    - right_index_fingertip
+    - right_middle_fingertip
+    - right_ring_fingertip
+    - right_pinky_fingertip
 
 # Object pool — generates grasps for all combinations of shape × size
 object_pool:

@@ -15,7 +15,7 @@ Usage:
 
     # Resume from checkpoint
     python scripts/train_rl.py \
-        --resume logs/rl/allegro_anygrasp_v2/checkpoints/model_10000.pt
+        --resume logs/rl/sharpa_anygrasp_v1/checkpoints/model_10000.pt
 """
 
 import argparse
@@ -29,7 +29,7 @@ import torch
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from isaaclab.app import AppLauncher
-from grasp_generation.graph_io import load_merged_graph, parse_graph_paths
+from grasp_generation.graph_io import MultiObjectGraspGraph, load_merged_graph, parse_graph_paths
 
 
 def parse_args():
@@ -46,7 +46,7 @@ def parse_args():
                    help="Maximum PPO training iterations")
     p.add_argument("--resume", type=str, default=None,
                    help="Resume from checkpoint path")
-    p.add_argument("--log_dir", type=str, default="logs/rl/allegro_anygrasp_v2",
+    p.add_argument("--log_dir", type=str, default=None,
                    help="Training log / checkpoint directory")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--config", type=str,
@@ -56,7 +56,10 @@ def parse_args():
     AppLauncher.add_app_launcher_args(p)
     args = p.parse_args()
     if args.grasp_graph is None:
-        args.grasp_graph = ["data/grasp_graph_clean.pkl"]
+        args.grasp_graph = ["data/sharpa_grasp_cube_050.npy"]
+    cfg = load_config(args.config)
+    if args.log_dir is None:
+        args.log_dir = cfg.get("logging", {}).get("log_dir", "logs/rl/sharpa_anygrasp_v1")
     return args
 
 
@@ -109,11 +112,13 @@ def apply_dr_config(env_cfg, dr_cfg: dict):
     noise = dr_cfg.get("obs_noise", {})
     if noise:
         obs = env_cfg.observations
-        if "joint_pos_std"     in noise:
+        if "joint_pos_std" in noise and getattr(obs.policy.joint_pos, "noise", None) is not None:
             obs.policy.joint_pos.noise.std     = float(noise["joint_pos_std"])
+        if "joint_pos_std" in noise and getattr(obs.critic.joint_pos, "noise", None) is not None:
             obs.critic.joint_pos.noise.std     = float(noise["joint_pos_std"])
-        if "joint_vel_std"     in noise:
+        if "joint_vel_std" in noise and getattr(obs.policy.joint_vel, "noise", None) is not None:
             obs.policy.joint_vel.noise.std     = float(noise["joint_vel_std"])
+        if "joint_vel_std" in noise and getattr(obs.critic.joint_vel, "noise", None) is not None:
             obs.critic.joint_vel.noise.std     = float(noise["joint_vel_std"])
 
 
@@ -237,6 +242,7 @@ def build_rl_games_config(args, cfg_file: dict) -> dict:
     """
     ppo_cfg = cfg_file.get("ppo", {})
     cv_cfg = cfg_file.get("central_value", {})
+    log_dir = Path(args.log_dir)
 
     horizon_length, seq_length, minibatch_size = _resolve_ppo_sizes(args, cfg_file)
     batch_size = args.num_envs * horizon_length
@@ -259,7 +265,7 @@ def build_rl_games_config(args, cfg_file: dict) -> dict:
             "load_checkpoint": args.resume is not None,
             "load_path": args.resume or "",
             "config": {
-                "name": "DexGen-AnyGrasp-Allegro",
+                "name": "DexGen-AnyGrasp-Sharpa",
                 "env_name": "rlgpu",
                 "device": args.device,
                 "device_name": args.device,
@@ -299,7 +305,9 @@ def build_rl_games_config(args, cfg_file: dict) -> dict:
                 # bounds_loss was exploding (0→70) causing policy to saturate actions.
                 # 0.0001 was too small to prevent action clamping. 0.005 adds real penalty.
                 "bounds_loss_coef": float(ppo_cfg.get("bounds_loss_coef", 0.005)),
-                "log_dir": args.log_dir,
+                # rl_games writes to train_dir/full_experiment_name, not log_dir.
+                "train_dir": str(log_dir.parent),
+                "full_experiment_name": log_dir.name,
 
                 # Symmetric Actor-Critic (actor sees full obs = critic obs)
                 "use_central_value": False,
@@ -377,8 +385,8 @@ def main():
     missing_graph_paths = [path for path in grasp_graph_paths if not Path(path).exists()]
     if missing_graph_paths:
         print(f"ERROR: GraspGraph not found at {missing_graph_paths}")
-        print("Run Stage 0 first:")
-        print("  python scripts/run_grasp_generation.py")
+        print("Run Stage 0 first, for example:")
+        print("  /workspace/IsaacLab/isaaclab.sh -p scripts/gen_grasp.py --shape cube --size 0.05 --num_grasps 1000 --headless")
         sim_app.close()
         sys.exit(1)
 
@@ -395,7 +403,6 @@ def main():
     # same object pool that was used during Stage 0 grasp generation.
     try:
         _graph = merged_graph
-        from grasp_generation.rrt_expansion import MultiObjectGraspGraph
         if isinstance(_graph, MultiObjectGraspGraph) and _graph.object_specs:
             _specs = list(_graph.object_specs.values())
             from envs.anygrasp_env import _build_object_spawner
@@ -415,10 +422,10 @@ def main():
         if graph_num_fingers is not None:
             graph_num_fingers = int(graph_num_fingers)
             tip_subsets = {
-                2: ["robot0_ffdistal", "robot0_thdistal"],
-                3: ["robot0_ffdistal", "robot0_mfdistal", "robot0_thdistal"],
-                4: ["robot0_ffdistal", "robot0_mfdistal", "robot0_rfdistal", "robot0_thdistal"],
-                5: ["robot0_ffdistal", "robot0_mfdistal", "robot0_rfdistal", "robot0_lfdistal", "robot0_thdistal"],
+                2: ["right_thumb_fingertip", "right_index_fingertip"],
+                3: ["right_thumb_fingertip", "right_index_fingertip", "right_middle_fingertip"],
+                4: ["right_thumb_fingertip", "right_index_fingertip", "right_middle_fingertip", "right_ring_fingertip"],
+                5: ["right_thumb_fingertip", "right_index_fingertip", "right_middle_fingertip", "right_ring_fingertip", "right_pinky_fingertip"],
             }
             env_cfg.hand = dict(getattr(env_cfg, "hand", {}) or {})
             env_cfg.hand["num_fingers"] = graph_num_fingers
@@ -441,18 +448,22 @@ def main():
 
     # ── Verify final config after YAML overrides ──
     try:
-        _dr_obj = env_cfg.events.randomize_object_physics.params
+        _dr_obj = getattr(getattr(env_cfg.events, "randomize_object_physics", None), "params", {})
         _rw = env_cfg.rewards
         _term = env_cfg.terminations
         print("=" * 60)
         print("[CONFIG] ── Final values (after YAML override) ──")
-        print(f"[CONFIG] mass_range:      {_dr_obj.get('mass_range')}")
-        print(f"[CONFIG] friction_range:  {_dr_obj.get('friction_range')}")
-        print(f"[CONFIG] restitution:     {_dr_obj.get('restitution_range')}")
-        print(f"[CONFIG] rewards:  orientation={_rw.object_orientation.weight}  "
-              f"position={_rw.object_position.weight}  "
-              f"goal_bonus={_rw.goal_bonus.weight}  "
-              f"work={_rw.work.weight}  action={_rw.action.weight}  torque={_rw.torque.weight}")
+        if _dr_obj:
+            print(f"[CONFIG] mass_range:      {_dr_obj.get('mass_range')}")
+            print(f"[CONFIG] friction_range:  {_dr_obj.get('friction_range')}")
+            print(f"[CONFIG] restitution:     {_dr_obj.get('restitution_range')}")
+        reward_parts = []
+        for reward_name in ("object_orientation", "object_position", "goal_bonus", "drop", "work", "action", "torque"):
+            reward_term = getattr(_rw, reward_name, None)
+            if reward_term is not None and hasattr(reward_term, "weight"):
+                reward_parts.append(f"{reward_name}={reward_term.weight}")
+        if reward_parts:
+            print(f"[CONFIG] rewards:  {'  '.join(reward_parts)}")
         if hasattr(_term, "no_fingertip_contact"):
             print(f"[CONFIG] no_contact_patience: {_term.no_fingertip_contact.params.get('patience')}")
         print(f"[CONFIG] episode_length_s: {env_cfg.episode_length_s}")
@@ -462,7 +473,7 @@ def main():
         import traceback; traceback.print_exc()
 
     print(f"[Stage 1] Config:   {args.config}")
-    print(f"[Stage 1] Task: DexGen-AnyGrasp-Allegro-v0")
+    print(f"[Stage 1] Task: DexGen-AnyGrasp-Sharpa-v0")
     print(f"[Stage 1] Num envs: {args.num_envs}")
     print(f"[Stage 1] Max iterations: {args.max_iterations}")
     print(f"[Stage 1] Grasp graph(s): {', '.join(grasp_graph_paths)}")

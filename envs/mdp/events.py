@@ -144,7 +144,7 @@ def reset_to_random_grasp(
     start_idx_list = [0] * n
     goal_idx_list = [0] * n
 
-    from grasp_generation.rrt_expansion import MultiObjectGraspGraph
+    from grasp_generation.graph_io import MultiObjectGraspGraph
     # Group env indices by object name
     name_to_envs: dict = {}
     for i in range(n):
@@ -519,10 +519,10 @@ def _sample_start_and_nn_goal(
     Sample a start grasp directly from the Stage 0 grasp_set and choose the
     nearest-neighbor grasp in fingertip-position space as the goal.
 
-    env_num_fingers: the env's fixed finger count.  Grasp fingertip_positions
+    env_num_fingers: the env's fixed finger count. Grasp fingertip_positions
     are padded / truncated to match so all tensors have uniform shape.
     """
-    from grasp_generation.rrt_expansion import MultiObjectGraspGraph, GraspGraph
+    from grasp_generation.graph_io import MultiObjectGraspGraph
 
     if isinstance(graph, MultiObjectGraspGraph):
         obj_name = object_name or graph.sample_object(rng)
@@ -539,18 +539,18 @@ def _sample_start_and_nn_goal(
         )
     if N < 2:
         grasp = g.grasp_set[0]
-        _pos  = getattr(grasp, "object_pos_hand",  None)
+        _pos = getattr(grasp, "object_pos_hand", None)
         _quat = getattr(grasp, "object_quat_hand", None)
-        _ja   = getattr(grasp, "joint_angles",      None)
-        _fps  = pad_fingertip_positions(grasp.fingertip_positions.copy(), env_num_fingers)
+        _ja = getattr(grasp, "joint_angles", None)
+        _fps = pad_fingertip_positions(grasp.fingertip_positions.copy(), env_num_fingers)
         return (
             obj_name, _fps, _fps,
             _ja,
-            _pos.copy()  if _pos  is not None else None,
+            _pos.copy() if _pos is not None else None,
             _quat.copy() if _quat is not None else None,
             getattr(grasp, "object_pose_frame", None),
             _ja,
-            _pos.copy()  if _pos  is not None else None,
+            _pos.copy() if _pos is not None else None,
             _quat.copy() if _quat is not None else None,
             getattr(grasp, "object_pose_frame", None),
             0, 0,
@@ -558,21 +558,22 @@ def _sample_start_and_nn_goal(
 
     start_idx = int(rng.integers(0, N))
     start_grasp = g.grasp_set[start_idx]
-    # Curriculum: start with easy goals, increase min_orn over time
     cur_min_orn = getattr(graph, "_curriculum_min_orn", 0.15)
-    goal_idx = _sample_nearby_goal_index(g, start_idx, rng, min_orn=cur_min_orn, num_fingers=env_num_fingers)
+    goal_idx = _sample_nearby_goal_index(
+        g, start_idx, rng, min_orn=cur_min_orn, num_fingers=env_num_fingers,
+    )
     goal_grasp = g.grasp_set[goal_idx]
 
-    start_fps  = pad_fingertip_positions(start_grasp.fingertip_positions.copy(), env_num_fingers)
-    goal_fps   = pad_fingertip_positions(goal_grasp.fingertip_positions.copy(),  env_num_fingers)
+    start_fps = pad_fingertip_positions(start_grasp.fingertip_positions.copy(), env_num_fingers)
+    goal_fps = pad_fingertip_positions(goal_grasp.fingertip_positions.copy(), env_num_fingers)
 
-    start_joints           = getattr(start_grasp, "joint_angles",     None)
-    start_object_pos_hand  = getattr(start_grasp, "object_pos_hand",  None)
+    start_joints = getattr(start_grasp, "joint_angles", None)
+    start_object_pos_hand = getattr(start_grasp, "object_pos_hand", None)
     start_object_quat_hand = getattr(start_grasp, "object_quat_hand", None)
     start_object_pose_frame = getattr(start_grasp, "object_pose_frame", None)
-    goal_joints            = getattr(goal_grasp,  "joint_angles",     None)
-    goal_object_pos_hand   = getattr(goal_grasp,  "object_pos_hand",  None)
-    goal_object_quat_hand  = getattr(goal_grasp,  "object_quat_hand", None)
+    goal_joints = getattr(goal_grasp, "joint_angles", None)
+    goal_object_pos_hand = getattr(goal_grasp, "object_pos_hand", None)
+    goal_object_quat_hand = getattr(goal_grasp, "object_quat_hand", None)
     goal_object_pose_frame = getattr(goal_grasp, "object_pose_frame", None)
 
     return (
@@ -580,12 +581,12 @@ def _sample_start_and_nn_goal(
         start_fps,
         goal_fps,
         start_joints,
-        start_object_pos_hand.copy()  if start_object_pos_hand  is not None else None,
+        start_object_pos_hand.copy() if start_object_pos_hand is not None else None,
         start_object_quat_hand.copy() if start_object_quat_hand is not None else None,
         start_object_pose_frame,
         goal_joints,
-        goal_object_pos_hand.copy()   if goal_object_pos_hand   is not None else None,
-        goal_object_quat_hand.copy()  if goal_object_quat_hand  is not None else None,
+        goal_object_pos_hand.copy() if goal_object_pos_hand is not None else None,
+        goal_object_quat_hand.copy() if goal_object_quat_hand is not None else None,
         goal_object_pose_frame,
         int(start_idx),
         int(goal_idx),
@@ -594,13 +595,15 @@ def _sample_start_and_nn_goal(
 def _sample_nearby_goal_index(
     graph, start_idx: int, rng: np.random.Generator,
     top_k: int = 5, min_orn: float = 0.15,
+    max_pos: float = 0.05,
     num_fingers: int = 5,
 ) -> int:
     """
-    Sample a goal grasp ranked by orientation distance (geodesic).
+    Sample a nearby goal grasp using K-nearest neighbors in pose space.
 
     Args:
         min_orn: minimum orientation distance (rad) to avoid trivial goals.
+        max_pos: maximum hand-frame position delta (m) for "nearby" goals.
     """
     grasps = graph.grasp_set.grasps
     N = len(grasps)
@@ -612,29 +615,74 @@ def _sample_nearby_goal_index(
         idx = int(rng.integers(0, N))
         return idx if idx != start_idx else (start_idx + 1) % N
 
-    # Build quaternion array (cached on graph for speed)
+    # Build cached pose arrays
     all_quats = _get_cached_quats(graph)
-    if all_quats is None:
+    all_pos = _get_cached_positions(graph)
+    if all_quats is None and all_pos is None:
         idx = int(rng.integers(0, N))
         return idx if idx != start_idx else (start_idx + 1) % N
 
-    # Vectorized orientation distance
-    sq = all_quats[start_idx]
-    dots = np.abs(np.dot(all_quats, sq))
-    np.clip(dots, 0.0, 1.0, out=dots)
-    orn_dists = 2.0 * np.arccos(dots)
-    orn_dists[start_idx] = np.inf
+    if all_quats is not None:
+        sq = all_quats[start_idx]
+        dots = np.abs(np.dot(all_quats, sq))
+        np.clip(dots, 0.0, 1.0, out=dots)
+        orn_dists = 2.0 * np.arccos(dots)
+        orn_dists[start_idx] = np.inf
+    else:
+        orn_dists = np.full(N, np.inf, dtype=np.float64)
+        orn_dists[start_idx] = np.inf
 
-    # Filter: orientation >= min_orn
-    valid_idx = np.where((np.isfinite(orn_dists)) & (orn_dists >= min_orn))[0]
+    if all_pos is not None:
+        sp = all_pos[start_idx]
+        pos_dists = np.linalg.norm(all_pos - sp, axis=-1)
+        pos_dists[start_idx] = np.inf
+    else:
+        pos_dists = np.full(N, np.inf, dtype=np.float64)
+        pos_dists[start_idx] = np.inf
+
+    valid_mask = np.ones(N, dtype=bool)
+    valid_mask[start_idx] = False
+    if all_quats is not None:
+        valid_mask &= np.isfinite(orn_dists)
+        valid_mask &= orn_dists >= min_orn
+    if all_pos is not None:
+        valid_mask &= np.isfinite(pos_dists)
+        valid_mask &= pos_dists <= max_pos
+
+    valid_idx = np.where(valid_mask)[0]
+
+    # Progressive fallback to preserve KNN behavior when the nearby set is empty.
+    if len(valid_idx) == 0 and all_pos is not None and all_quats is not None:
+        valid_idx = np.where(
+            (np.arange(N) != start_idx)
+            & np.isfinite(pos_dists)
+            & np.isfinite(orn_dists)
+            & (orn_dists >= min_orn)
+        )[0]
+    if len(valid_idx) == 0 and all_pos is not None:
+        valid_idx = np.where((np.arange(N) != start_idx) & np.isfinite(pos_dists))[0]
+    if len(valid_idx) == 0 and all_quats is not None:
+        valid_idx = np.where(
+            (np.arange(N) != start_idx)
+            & np.isfinite(orn_dists)
+            & (orn_dists >= min_orn)
+        )[0]
+    if len(valid_idx) == 0 and all_quats is not None:
+        valid_idx = np.where((np.arange(N) != start_idx) & np.isfinite(orn_dists))[0]
     if len(valid_idx) == 0:
-        valid_idx = np.where(np.isfinite(orn_dists))[0]
-        if len(valid_idx) == 0:
-            return start_idx
+        valid_idx = np.where(np.arange(N) != start_idx)[0]
+    if len(valid_idx) == 0:
+        return start_idx
 
-    # Select top-k closest by orientation, randomly pick one
+    # KNN in pose space: smaller position/orientation deltas are closer.
+    pose_score = np.zeros(len(valid_idx), dtype=np.float64)
+    if all_pos is not None:
+        pose_score += pos_dists[valid_idx] / max(max_pos, 1e-6)
+    if all_quats is not None:
+        pose_score += orn_dists[valid_idx] / max(min_orn, 1e-6)
+
     k = min(top_k, len(valid_idx))
-    top_k_local = np.argpartition(orn_dists[valid_idx], k - 1)[:k]
+    top_k_local = np.argpartition(pose_score, k - 1)[:k]
     top_k_indices = valid_idx[top_k_local]
     return int(rng.choice(top_k_indices))
 
@@ -657,7 +705,20 @@ def _get_cached_quats(graph) -> Optional[np.ndarray]:
     graph._cached_quats = arr
     return arr
 
-    return chosen
+def _get_cached_positions(graph) -> Optional[np.ndarray]:
+    """Cache hand-frame object positions on the graph object."""
+    if hasattr(graph, "_cached_positions"):
+        return graph._cached_positions
+    grasps = graph.grasp_set.grasps
+    pos = []
+    for g in grasps:
+        p = getattr(g, "object_pos_hand", None)
+        if p is None:
+            graph._cached_positions = None
+            return None
+        pos.append(np.array(p, dtype=np.float64))
+    graph._cached_positions = np.stack(pos)
+    return graph._cached_positions
 
 # ---------------------------------------------------------------------------
 # Curriculum: gradually increase goal difficulty
@@ -746,7 +807,7 @@ def update_rolling_goal(
     )
     fp_dim = env_num_fingers * 3
 
-    from grasp_generation.rrt_expansion import MultiObjectGraspGraph
+    from grasp_generation.graph_io import MultiObjectGraspGraph
 
     updated = 0
     for env_id in success_ids.tolist():
@@ -825,7 +886,7 @@ def _resolve_scene_graph_object_name(
     this ensures Stage 1 only samples from graphs whose num_fingers == env
     finger count.
     """
-    from grasp_generation.rrt_expansion import MultiObjectGraspGraph
+    from grasp_generation.graph_io import MultiObjectGraspGraph
 
     if not isinstance(graph, MultiObjectGraspGraph):
         return None
@@ -938,7 +999,7 @@ def _detect_env_graph_names(
 
     Returns None if ``graph`` is not a MultiObjectGraspGraph.
     """
-    from grasp_generation.rrt_expansion import MultiObjectGraspGraph
+    from grasp_generation.graph_io import MultiObjectGraspGraph
 
     if not isinstance(graph, MultiObjectGraspGraph):
         return None
@@ -1003,10 +1064,10 @@ def _get_action_dim(env, num_dof: int) -> int:
     try:
         return env.action_manager.action.shape[-1]
     except (AttributeError, RuntimeError):
-        # Fallback: Shadow Hand excludes 2 wrist joints
+        # Sharpa: all 22 DOF are action space. Shadow: exclude 2 wrist.
         hand_cfg = getattr(env.cfg, "hand", None) or {}
-        if hand_cfg.get("name", "shadow") == "shadow" and num_dof == 24:
-            return num_dof - 2   # 22 finger joints
+        if hand_cfg.get("name") == "shadow" and num_dof == 24:
+            return num_dof - 2
         return num_dof
 
 def _reset_to_default_pose(env, env_ids: torch.Tensor):
