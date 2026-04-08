@@ -79,7 +79,6 @@ except ImportError:
 from .mdp import rewards as mdp_rewards
 from .mdp import observations as mdp_obs
 from .mdp import events as mdp_events
-from .mdp import domain_rand as mdp_dr
 
 
 # ── Sharpa Wave Hand default joint positions (from sharpa-rl-lab) ──
