@@ -13,9 +13,9 @@ env:
   action_mode: "absolute"        # "absolute" or "delta"
   # Delta params (IsaacGymEnvs ShadowHand style):
   #   delta = dof_speed_scale * dt * action = 20.0 * (1/30) = 0.67 rad/step
-  delta_scale: 0.67              # dof_speed_scale * dt
+  delta_scale: 1.0               # dof_speed_scale * dt (20.0 * 1/20)
   actions_moving_average: 1.0    # 1.0=no smoothing, 0.3=strong smoothing
-  decimation: 4                  # control at 30 Hz (120 Hz sim / 4)
+  decimation: 6                  # control at 20 Hz (120 Hz sim / 6)
 
   terminations:
     no_contact_patience: 30          # steps with 0 fingertip contact → reset (30 steps = 1s at 30Hz)
