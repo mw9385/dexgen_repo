@@ -107,20 +107,44 @@ def _build_graph(grasps, object_name, num_fingers, delta_max):
 
 
 def _expand_joints_22_to_24(joint_angles_22):
-    """Convert MJCF 22-DOF to Isaac Sim 24-DOF. No Isaac Sim dependency."""
+    """Convert MJCF 22-DOF to Isaac Sim USD 24-DOF.
+
+    MJCF order (per-finger): FFJ3210, MFJ3210, RFJ3210, LFJ43210, THJ43210
+    Isaac USD order (per-level): WRJ10, {FFJ3,MFJ3,RFJ3,LFJ4,THJ4},
+        {FFJ2,MFJ2,RFJ2,LFJ3,THJ3}, {FFJ1,MFJ1,RFJ1,LFJ2,THJ2},
+        {FFJ0,MFJ0,RFJ0,LFJ1,THJ1}, {LFJ0,THJ0}
+    """
     import numpy as np
     out = np.zeros(24, dtype=np.float32)
     j = joint_angles_22
-    # FF: in[0:3]=(FFJ3,2,1) → out[3:6], skip in[3]=FFJ0
-    out[3:6] = j[0:3]
-    # MF: in[4:7]=(MFJ3,2,1) → out[7:10], skip in[7]=MFJ0
-    out[7:10] = j[4:7]
-    # RF: in[8:11]=(RFJ3,2,1) → out[11:14], skip in[11]=RFJ0
-    out[11:14] = j[8:11]
-    # LF: in[12:16]=(LFJ4,3,2,1) → out[15:19], skip in[16]=LFJ0
-    out[15:19] = j[12:16]
-    # TH: in[17:22]=(THJ4,3,2,1,0) → out[19:24]
-    out[19:24] = j[17:22]
+    # WRJ1, WRJ0 = 0 (not in MJCF 22-DOF)
+    # MJCF: FF=[0]J3 [1]J2 [2]J1 [3]J0
+    out[2]  = j[0]   # FFJ3
+    out[7]  = j[1]   # FFJ2
+    out[12] = j[2]   # FFJ1
+    out[17] = j[3]   # FFJ0
+    # MJCF: MF=[4]J3 [5]J2 [6]J1 [7]J0
+    out[3]  = j[4]   # MFJ3
+    out[8]  = j[5]   # MFJ2
+    out[13] = j[6]   # MFJ1
+    out[18] = j[7]   # MFJ0
+    # MJCF: RF=[8]J3 [9]J2 [10]J1 [11]J0
+    out[4]  = j[8]   # RFJ3
+    out[9]  = j[9]   # RFJ2
+    out[14] = j[10]  # RFJ1
+    out[19] = j[11]  # RFJ0
+    # MJCF: LF=[12]J4 [13]J3 [14]J2 [15]J1 [16]J0
+    out[5]  = j[12]  # LFJ4
+    out[10] = j[13]  # LFJ3
+    out[15] = j[14]  # LFJ2
+    out[20] = j[15]  # LFJ1
+    out[22] = j[16]  # LFJ0
+    # MJCF: TH=[17]J4 [18]J3 [19]J2 [20]J1 [21]J0
+    out[6]  = j[17]  # THJ4
+    out[11] = j[18]  # THJ3
+    out[16] = j[19]  # THJ2
+    out[21] = j[20]  # THJ1
+    out[23] = j[21]  # THJ0
     return out
 
 
