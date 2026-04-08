@@ -54,23 +54,23 @@ def parse_args():
                    help="Max sampling rounds per object (each tests num_envs candidates)")
     p.add_argument("--output", type=str, default="data/grasp_graph_sim.pkl")
 
-    # Sampler parameters
-    p.add_argument("--noise_std", type=float, default=0.25,
+    # Phase 1: FK validation parameters (same defaults as HeuristicSampler)
+    p.add_argument("--noise_std", type=float, default=0.3,
                    help="Joint noise std (fraction of joint range)")
-    p.add_argument("--closing_steps", type=int, default=40,
-                   help="Physics steps for finger closing phase")
-    p.add_argument("--settle_steps", type=int, default=10,
-                   help="Physics steps for stability verification after closing")
-    p.add_argument("--vel_threshold", type=float, default=0.25,
-                   help="Max object velocity after settle (m/s)")
-    p.add_argument("--contact_threshold", type=float, default=0.015,
+    p.add_argument("--contact_threshold", type=float, default=0.02,
                    help="Max fingertip-to-surface distance for contact (m)")
     p.add_argument("--min_contact_fingers", type=int, default=3,
                    help="Minimum fingertips in contact with object")
-    p.add_argument("--penetration_margin", type=float, default=0.005,
+    p.add_argument("--penetration_margin", type=float, default=0.008,
                    help="Max finger-mesh penetration depth (m)")
     p.add_argument("--nfo_min_quality", type=float, default=0.0,
                    help="Minimum NFO quality (0 = disabled)")
+
+    # Phase 2: Physics settle validation
+    p.add_argument("--settle_steps", type=int, default=15,
+                   help="Physics settle steps for validation")
+    p.add_argument("--vel_threshold", type=float, default=0.3,
+                   help="Max object velocity after settle (m/s)")
 
     # Graph construction
     p.add_argument("--delta_max", type=float, default=0.04,
@@ -220,14 +220,13 @@ def main():
                 object_shape=shape,
                 object_size=size,
                 num_fingers=num_fingers,
-                closing_steps=args.closing_steps,
-                settle_steps=args.settle_steps,
-                vel_threshold=args.vel_threshold,
+                noise_std=args.noise_std,
                 contact_threshold=args.contact_threshold,
                 min_contact_fingers=args.min_contact_fingers,
                 penetration_margin=args.penetration_margin,
-                noise_std=args.noise_std,
                 nfo_min_quality=args.nfo_min_quality,
+                settle_steps=args.settle_steps,
+                vel_threshold=args.vel_threshold,
                 render=render,
                 seed=args.seed,
             )
