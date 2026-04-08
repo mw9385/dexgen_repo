@@ -62,6 +62,10 @@ def parse_args():
     # Graph
     p.add_argument("--delta_max", type=float, default=0.04)
 
+    # Visualization
+    p.add_argument("--pause", action="store_true", default=False,
+                   help="Pause after each physics batch for visual inspection")
+
     # Isaac Sim
     p.add_argument("--headless", action="store_true", default=False)
     p.add_argument("--num_envs", type=int, default=64)
@@ -199,6 +203,7 @@ def main():
                 settle_steps=args.settle_steps,
                 vel_threshold=args.vel_threshold,
                 render=render,
+                pause=args.pause,
                 seed=args.seed,
             )
 

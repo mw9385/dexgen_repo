@@ -364,6 +364,7 @@ class SimGraspValidator:
         min_height: float = 0.15,
         max_drift: float = 0.05,
         render: bool = False,
+        pause_after_batch: bool = False,
     ):
         self.env = env
         self.robot = env.scene["robot"]
@@ -375,6 +376,7 @@ class SimGraspValidator:
         self.min_height = min_height
         self.max_drift = max_drift
         self.render = render
+        self.pause_after_batch = pause_after_batch
 
         from envs.mdp.sim_utils import get_fingertip_body_ids_from_env
         self.ft_ids = get_fingertip_body_ids_from_env(self.robot, env)
@@ -385,10 +387,14 @@ class SimGraspValidator:
     def validate(
         self, grasps: List[Grasp], verbose: bool = True,
     ) -> List[Grasp]:
+        import time
         from envs.mdp.sim_utils import (
             set_robot_joints_direct,
             set_robot_root_pose,
+            get_local_palm_normal,
         )
+        from envs.mdp.math_utils import quat_from_two_vectors, quat_multiply
+        from isaaclab.utils.math import quat_apply
 
         env = self.env
         robot = self.robot
@@ -402,16 +408,19 @@ class SimGraspValidator:
             print(f"\n    [Validator] {len(grasps)} grasps, "
                   f"settle={self.settle_steps}, vel_thresh={self.vel_threshold}")
 
+        # Pre-compute palm-up wrist pose (same as Phase 2)
+        palmup_pos, palmup_quat = self._compute_palm_up_pose()
+
         for batch_start in range(0, len(grasps), self.num_envs):
             batch = grasps[batch_start:batch_start + self.num_envs]
             bs = len(batch)
             env_ids = self.all_env_ids[:bs]
             debug = (batch_start == 0 and verbose)
 
-            # 1. Wrist + joints
-            root_state = robot.data.default_root_state[env_ids, :7].clone()
-            root_state[:, :3] += env.scene.env_origins[env_ids]
-            set_robot_root_pose(env, env_ids, root_state[:, :3], root_state[:, 3:7])
+            # 1. Palm-up wrist + joints
+            palmup_pos_batch = palmup_pos.expand(bs, -1)
+            palmup_quat_batch = palmup_quat.expand(bs, -1)
+            set_robot_root_pose(env, env_ids, palmup_pos_batch, palmup_quat_batch)
 
             set_robot_joints_direct(env, env_ids, [g.joint_angles for g in batch])
 
@@ -493,11 +502,79 @@ class SimGraspValidator:
                 done = min(batch_start + bs, len(grasps))
                 print(f"    [{done}/{len(grasps)}] passed: {len(valid)}")
 
+            # Pause to let user inspect in GUI
+            if self.pause_after_batch and self.render:
+                print(f"\n    >>> Paused for visual inspection. "
+                      f"Press Enter to continue...")
+                # Keep rendering while waiting
+                try:
+                    import threading
+                    proceed = threading.Event()
+
+                    def _wait_input():
+                        input()
+                        proceed.set()
+
+                    t = threading.Thread(target=_wait_input, daemon=True)
+                    t.start()
+                    while not proceed.is_set():
+                        # Keep sim alive for rendering
+                        env.sim.render()
+                        time.sleep(0.05)
+                except Exception:
+                    input()
+
         if verbose:
             print(f"    [Validator] {len(valid)}/{len(grasps)} passed. "
                   f"Rejects: {reject_counts}")
 
         return valid
+
+    def _compute_palm_up_pose(self):
+        """Compute palm-up wrist pose (reusable across batches)."""
+        from envs.mdp.sim_utils import (
+            set_robot_root_pose,
+            set_adaptive_joint_pose,
+            get_local_palm_normal,
+        )
+        from envs.mdp.math_utils import quat_from_two_vectors, quat_multiply
+        from isaaclab.utils.math import quat_apply
+
+        env = self.env
+        robot = self.robot
+        obj = self.obj
+        env_ids = self.all_env_ids[:1]
+
+        root_state = robot.data.default_root_state[env_ids, :7].clone()
+        root_state[:, :3] += env.scene.env_origins[env_ids]
+        set_robot_root_pose(env, env_ids, root_state[:, :3], root_state[:, 3:7])
+        set_adaptive_joint_pose(env, env_ids, 0.06)
+
+        temp = obj.data.default_root_state[env_ids].clone()
+        temp[:, :3] = env.scene.env_origins[env_ids] + torch.tensor(
+            [[0, 0, -10.0]], device=self.device,
+        )
+        temp[:, 7:] = 0.0
+        obj.write_root_state_to_sim(temp, env_ids=env_ids)
+        obj.update(0.0)
+
+        env.sim.step(render=self.render)
+        env.scene.update(dt=env.physics_dt)
+
+        wrist_pos = robot.data.root_pos_w[env_ids].clone()
+        wrist_quat = robot.data.root_quat_w[env_ids].clone()
+        palm_n = get_local_palm_normal(robot, env).unsqueeze(0)
+        palm_w = quat_apply(wrist_quat, palm_n)
+        target_up = torch.tensor([[0, 0, 1.0]], device=self.device)
+        correction = quat_from_two_vectors(palm_w, target_up)
+
+        ft_world = robot.data.body_pos_w[env_ids][:, self.ft_ids, :]
+        pivot = ft_world.mean(dim=1)
+        new_quat = quat_multiply(correction, wrist_quat)
+        new_quat = new_quat / (torch.norm(new_quat, dim=-1, keepdim=True) + 1e-8)
+        new_pos = quat_apply(correction, wrist_pos - pivot) + pivot
+
+        return new_pos, new_quat
 
 
 # ---------------------------------------------------------------------------
@@ -522,6 +599,7 @@ def generate_and_validate(
     vel_threshold: float = 0.01,
     # Misc
     render: bool = False,
+    pause: bool = False,
     seed: int = 42,
     verbose: bool = True,
 ) -> GraspSet:
@@ -593,6 +671,7 @@ def generate_and_validate(
         settle_steps=settle_steps,
         vel_threshold=vel_threshold,
         render=render,
+        pause_after_batch=pause,
     )
     valid = validator.validate(ik_grasps, verbose=verbose)
 
