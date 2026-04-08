@@ -160,10 +160,8 @@ def main():
             seeds = generate_grasp_set(
                 env=env, mesh=mesh,
                 object_name=obj_name, object_size=size,
-                n_pts=args.n_pts,
                 num_grasps=args.num_seeds,
                 max_candidates=args.max_candidates,
-                num_pose_samples=args.num_pose_samples,
                 nfo_min_quality=args.nfo_min_quality,
                 collision_margin=args.collision_margin,
                 render=render, seed=args.seed,
@@ -184,7 +182,6 @@ def main():
             graph = rrt_expand(
                 seed_grasps=seeds,
                 mesh=mesh, nfo=nfo, env=env,
-                n_pts=args.n_pts,
                 target_size=args.rrt_target,
                 delta_pos=args.delta_pos,
                 delta_max=args.delta_max,
