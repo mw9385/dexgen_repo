@@ -17,6 +17,14 @@ import numpy as np
 import trimesh
 
 from .grasp_sampler import Grasp, GraspSet
+import numpy as np
+import torch
+import trimesh
+from scipy.spatial.transform import Rotation as R_scipy, Slerp
+from typing import Tuple, Optional
+
+from .grasp_sampler import Grasp, GraspSet, _resolve_finger_body_ids, _compute_obj_pose_hand
+from .sim_grasp_sampler import grasp_analysis, solve_ik, check_collision
 
 
 # ---------------------------------------------------------------------------
@@ -158,36 +166,106 @@ class MultiObjectGraspGraph:
 # RRT Expand Algorithm
 # ---------------------------------------------------------------------------
 
-def nearest_neighbor(
-    graph_fps: np.ndarray,  # (N, n_pts*3) flattened fingertip positions
-    target_fp: np.ndarray,  # (n_pts*3,) flattened
-) -> int:
-    """Find nearest node in graph by fingertip L2 distance."""
-    dists = np.linalg.norm(graph_fps - target_fp, axis=-1)
-    return int(np.argmin(dists))
-
-
-def steer(
-    fp_near: np.ndarray,  # (n_pts, 3)
-    fp_rand: np.ndarray,  # (n_pts, 3)
-    delta: float,
-    mesh: trimesh.Trimesh,
-) -> Tuple[np.ndarray, np.ndarray]:
+def random_sample_qp(
+    nodes: list[Grasp],
+    rng: np.random.Generator,
+    q_noise_std: float = 0.5,
+    p_pos_noise_std: float = 0.05,
+    p_rot_noise_std: float = 0.5
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
-    Move from fp_near toward fp_rand by delta, then project to surface.
-
-    Returns (new_points, new_normals) on the mesh surface.
+    [span_3](start_span)Algorithm 5, Line 2: (q, p) <- RandomSample()[span_3](end_span)
+    기존 탐색된 노드 중 하나를 무작위로 선택한 후 Perturbation을 가하여
+    새로운 Target Configuration (q, p)를 샘플링합니다.
     """
-    direction = fp_rand - fp_near
-    dist = np.linalg.norm(direction, axis=-1, keepdims=True)
-    direction = direction / (dist + 1e-8)
-    step = np.minimum(delta, dist)
-    fp_new = fp_near + direction * step
+    rand_idx = rng.integers(0, len(nodes))
+    g_base = nodes[rand_idx]
+    
+    # 1. q (finger configuration) perturbation
+    q_rand = g_base.joint_angles + rng.normal(0, q_noise_std, size=g_base.joint_angles.shape)
+    
+    # 2. p (object pose) perturbation
+    p_pos_rand = g_base.object_pos_hand + rng.normal(0, p_pos_noise_std, size=3).astype(np.float32)
+    
+    base_rot = R_scipy.from_quat(g_base.object_quat_hand[[1, 2, 3, 0]])
+    angle = rng.normal(0, p_rot_noise_std)
+    axis = rng.normal(0, 1, size=3)
+    axis /= (np.linalg.norm(axis) + 1e-8)
+    rot_noise = R_scipy.from_rotvec(angle * axis)
+    
+    p_rot_rand = (rot_noise * base_rot).as_matrix().astype(np.float32)
+    
+    return q_rand, p_pos_rand, p_rot_rand
 
-    # Project to mesh surface
-    closest, _, face_idx = trimesh.proximity.closest_point(mesh, fp_new)
+def interpolate_qp(
+    q1: np.ndarray, p_pos1: np.ndarray, p_rot1: np.ndarray, 
+    q2: np.ndarray, p_pos2: np.ndarray, p_rot2: np.ndarray, 
+    step_size: float
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    [span_4](start_span)Algorithm 5, Line 4: (q, p) <- Interpolate((q, p), (q*, p*))[span_4](end_span)
+    (q1, p1)에서 (q2, p2) 방향으로 step_size 만큼 보간합니다.
+    """
+    # Joint (C-space) 및 Position 보간 (선형 보간)
+    q_new = q1 + step_size * (q2 - q1)
+    p_pos_new = p_pos1 + step_size * (p_pos2 - p_pos1)
+    
+    # Rotation 보간 (구면 선형 보간, Slerp)
+    rots = R_scipy.from_matrix([p_rot1, p_rot2])
+    slerp = Slerp([0, 1], rots)
+    p_rot_new = slerp([step_size])[0].as_matrix().astype(np.float32)
+    
+    return q_new, p_pos_new, p_rot_new
+
+
+def fix_contact_and_collision(
+    env, q_interp: np.ndarray, p_pos: np.ndarray, p_rot: np.ndarray, 
+    mesh: trimesh.Trimesh, nfo, nfo_min_quality: float,
+    palmup_pos: np.ndarray, palmup_quat: torch.Tensor, 
+    object_size: float, ft_ids: list, finger_body_ids: list, 
+    collision_margin: float, render: bool
+) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray], float]:
+    """
+    [span_5](start_span)Algorithm 5, Line 5: (q, p) <- FixContactAndCollision(q, p, M)[span_5](end_span)
+    보간된 상태가 물리적 정합성을 갖도록 메쉬 표면 투영 및 IK, 충돌 검사를 통해 보정합니다.
+    """
+    robot = env.scene["robot"]
+    device = env.device
+    env_ids = torch.tensor([0], device=device, dtype=torch.long)
+
+    # 1. 보간된 q로 로봇 FK 수행하여 Fingertip의 World 좌표 확보
+    q_tensor = torch.tensor(q_interp, device=device, dtype=torch.float32).unsqueeze(0)
+    robot.write_joint_state_to_sim(q_tensor, torch.zeros_like(q_tensor), env_ids=env_ids)
+    env.sim.step(render=render)
+    env.scene.update(dt=env.physics_dt)
+    
+    fl_world = robot.data.body_pos_w[0, ft_ids, :].cpu().numpy()
+
+    # 2. 메쉬 표면으로 투영 (Project to surface)
+    rot_inv = p_rot.T
+    fl_obj = (rot_inv @ (fl_world - p_pos).T).T
+    closest, _, face_idx = trimesh.proximity.closest_point(mesh, fl_obj)
     normals = mesh.face_normals[face_idx].astype(np.float32)
-    return closest.astype(np.float32), normals
+    
+    # 3. NFO 품질 평가
+    quality = grasp_analysis(closest, normals, nfo)
+    if quality < nfo_min_quality:
+        return None, None, None, quality
+    
+    # 4. 투영된 점(표면)을 목표로 IK를 풀어 관절 각도(q) 보정
+    q_fixed = solve_ik(
+        env, closest, p_pos, p_rot,
+        palmup_pos, palmup_quat, object_size, ft_ids,
+        ik_iterations=15, render=render  # 보간된 값이므로 적은 iteration으로도 수렴 가능
+    )
+    if q_fixed is None:
+        return None, None, None, quality
+        
+    # 5. 충돌 검사 (Collision check)
+    if check_collision(env, finger_body_ids, p_pos, p_rot, mesh, margin=collision_margin):
+        return None, None, None, quality
+        
+    return q_fixed, closest, normals, float(quality)
 
 
 def rrt_expand(
@@ -195,10 +273,8 @@ def rrt_expand(
     mesh: trimesh.Trimesh,
     nfo,
     env,
-    n_pts: int = 5,
     target_size: int = 300,
-    delta_pos: float = 0.008,
-    delta_max: float = 0.04,
+    delta_step: float = 0.1,  
     min_quality: float = 0.03,
     max_attempts_per_step: int = 30,
     collision_threshold: float = 0.002,
@@ -206,31 +282,12 @@ def rrt_expand(
     render: bool = False,
     seed: int = 42,
     verbose: bool = True,
-) -> GraspGraph:
-    """
-    RRT-based grasp graph expansion from seed grasps.
-
-    Algorithm:
-      1. q_rand ← sampleSurface(mesh, n_pts)
-      2. q_near ← nearestNeighbor(graph, q_rand)
-      3. q_new ← steer(q_near, q_rand, delta_pos) → project to surface
-      4. NFO quality check
-      5. IK + collision check
-      6. Edge distance check (< delta_max)
-      7. Add node + edge to graph
-    """
-    from .sim_grasp_sampler import (
-        sample_surface,
-        grasp_analysis,
-        solve_ik,
-        check_collision,
-    )
-    from .grasp_sampler import _resolve_finger_body_ids, _compute_obj_pose_hand
+) -> "GraspGraph":
     from envs.mdp.sim_utils import (
         get_fingertip_body_ids_from_env,
         set_robot_root_pose,
         set_adaptive_joint_pose,
-        get_local_palm_normal,
+        get_local_palm_normal
     )
     from envs.mdp.math_utils import quat_from_two_vectors, quat_multiply
     from isaaclab.utils.math import quat_apply
@@ -239,16 +296,18 @@ def rrt_expand(
     robot = env.scene["robot"]
     device = env.device
     rng = np.random.default_rng(seed)
-
-    ft_ids = get_fingertip_body_ids_from_env(robot, env)[:n_pts]
+    
+    # 전체 핑거팁 ID 확보 (동적 할당을 위해 전부 가져옴)
+    ft_ids_all = get_fingertip_body_ids_from_env(robot, env)
     finger_body_ids = _resolve_finger_body_ids(robot)
 
-    # Compute palm-up pose
+    # ── Compute palm-up wrist pose ──
     env_ids = torch.tensor([0], device=device, dtype=torch.long)
     root_state = robot.data.default_root_state[env_ids, :7].clone()
     root_state[:, :3] += env.scene.env_origins[env_ids]
     set_robot_root_pose(env, env_ids, root_state[:, :3], root_state[:, 3:7])
     set_adaptive_joint_pose(env, env_ids, object_size)
+    
     tmp = env.scene["object"].data.default_root_state[env_ids].clone()
     tmp[:, :3] = env.scene.env_origins[env_ids] + torch.tensor([[0, 0, -10.0]], device=device)
     tmp[:, 7:] = 0.0
@@ -262,118 +321,100 @@ def rrt_expand(
     pn = get_local_palm_normal(robot, env).unsqueeze(0)
     pw = quat_apply(wq, pn)
     corr = quat_from_two_vectors(pw, torch.tensor([[0, 0, 1.0]], device=device))
-    ft_w = robot.data.body_pos_w[env_ids][:, ft_ids, :]
+    
+    # Pivot 계산 시 최대 길이(4개) 기준 임시 적용
+    ft_w = robot.data.body_pos_w[env_ids][:, ft_ids_all[:4], :]
     piv = ft_w.mean(dim=1)
     palmup_quat = quat_multiply(corr, wq)
     palmup_quat = palmup_quat / (torch.norm(palmup_quat, dim=-1, keepdim=True) + 1e-8)
     palmup_pos = quat_apply(corr, wp - piv) + piv
 
-    # Base object position
-    set_robot_root_pose(env, env_ids, palmup_pos, palmup_quat)
-    q_mid = robot.data.joint_pos[env_ids].clone()
-    robot.write_joint_state_to_sim(q_mid, torch.zeros_like(q_mid), env_ids=env_ids)
-    env.sim.step(render=render)
-    env.scene.update(dt=env.physics_dt)
-    robot.write_joint_state_to_sim(q_mid, torch.zeros_like(q_mid), env_ids=env_ids)
-    env.sim.step(render=render)
-    env.scene.update(dt=env.physics_dt)
-    base_obj_pos = robot.data.body_pos_w[0, ft_ids, :].mean(dim=0).cpu().numpy()
-
-    # Init graph with seeds
     nodes = list(seed_grasps.grasps)
     edges = []
+    stats = {"nfo_fail": 0, "ik_fail": 0, "collision_fail": 0}
 
-    # Build fps array for nearest neighbor
-    graph_fps = np.stack([g.fingertip_positions.flatten() for g in nodes])
+    # 탐색용 C-space 배열 사전 스택 (반복문 외곽으로 이동)
+    graph_q = np.stack([g.joint_angles for g in nodes])
 
     stall = 0
     max_stall = 300
-    stats = {"nfo_fail": 0, "ik_fail": 0, "collision_fail": 0, "dist_fail": 0}
 
     if verbose:
-        print(f"  [RRT] seeds={len(nodes)}, target={target_size}, "
-              f"delta_pos={delta_pos}")
+        print(f"  [RRT Expand] seeds={len(nodes)}, target={target_size}")
 
     while len(nodes) < target_size and stall < max_stall:
         added = False
-
+        
         for _ in range(max_attempts_per_step):
-            # 1. q_rand: random surface grasp
-            P_rand, n_rand = sample_surface(mesh, n_pts, rng)
+            # Algorithm 5, Line 2: RandomSample
+            q_rand, p_pos_rand, p_rot_rand = random_sample_qp(nodes, rng)
 
-            # 2. q_near: nearest neighbor
-            near_idx = nearest_neighbor(graph_fps, P_rand.flatten())
-            fp_near = nodes[near_idx].fingertip_positions
+            # Algorithm 5, Line 3: NearestNeighbor (미리 계산된 graph_q 사용)
+            dists = np.linalg.norm(graph_q - q_rand, axis=-1)
+            near_idx = int(np.argmin(dists))
+            
+            g_near = nodes[near_idx]
+            q_near = g_near.joint_angles
+            p_pos_near = g_near.object_pos_hand
+            p_rot_near = R_scipy.from_quat(g_near.object_quat_hand[[1, 2, 3, 0]]).as_matrix().astype(np.float32)
 
-            # 3. steer: move toward q_rand, project to surface
-            P_new, n_new = steer(fp_near, P_rand, delta_pos, mesh)
+            # [핵심 수정] g_near의 핑거팁 개수 파악 후 동적 할당
+            current_n_pts = len(g_near.fingertip_positions)
+            current_ft_ids = ft_ids_all[:current_n_pts]
 
-            # 4. NFO quality
-            quality = grasp_analysis(P_new, n_new, nfo)
-            if quality < min_quality:
-                stats["nfo_fail"] += 1
-                continue
-
-            # 5. IK + collision
-            obj_pos = base_obj_pos.copy()
-            obj_rot = np.eye(3, dtype=np.float32)
-
-            q = solve_ik(
-                env, P_new, obj_pos, obj_rot,
-                palmup_pos, palmup_quat,
-                object_size, ft_ids,
-                ik_iterations=30, render=render,
+            # Algorithm 5, Line 4: Interpolate
+            q_new, p_pos_new, p_rot_new = interpolate_qp(
+                q_near, p_pos_near, p_rot_near,
+                q_rand, p_pos_rand, p_rot_rand, 
+                step_size=delta_step
             )
-            if q is None:
-                stats["ik_fail"] += 1
+
+            # Algorithm 5, Line 5: FixContactAndCollision (동적 current_ft_ids 전달)
+            q_fixed, fp_fixed, normals_fixed, quality = fix_contact_and_collision(
+                env, q_new, p_pos_new, p_rot_new, mesh, nfo, min_quality,
+                palmup_pos, palmup_quat, object_size, current_ft_ids, finger_body_ids, 
+                collision_threshold, render
+            )
+
+            if q_fixed is None:
+                stats["collision_fail"] += 1 
                 continue
 
-            if check_collision(env, finger_body_ids, obj_pos, obj_rot,
-                               mesh, margin=collision_threshold):
-                stats["collision_fail"] += 1
-                continue
-
-            # 6. Edge distance check
-            dist = float(np.linalg.norm(P_new.flatten() - fp_near.flatten()))
-            if dist > delta_max * n_pts:
-                stats["dist_fail"] += 1
-                continue
-
-            # 7. Add to graph
+            # Algorithm 5, Line 6: S = S U {(q, p)}
             obj_quat_w = env.scene["object"].data.root_quat_w[0]
-            obj_pos_t = torch.tensor(obj_pos, device=device, dtype=torch.float32)
-            pos_hand, quat_hand = _compute_obj_pose_hand(
-                robot, obj_pos_t, device, obj_quat_w=obj_quat_w,
-            )
+            obj_pos_t = torch.tensor(p_pos_new, device=device, dtype=torch.float32)
+            pos_hand, quat_hand = _compute_obj_pose_hand(robot, obj_pos_t, device, obj_quat_w=obj_quat_w)
 
             new_grasp = Grasp(
-                fingertip_positions=P_new,
-                contact_normals=n_new,
+                fingertip_positions=fp_fixed,
+                contact_normals=normals_fixed,
                 quality=quality,
-                joint_angles=q,
+                joint_angles=q_fixed,
                 object_pos_hand=pos_hand,
                 object_quat_hand=quat_hand,
                 object_pose_frame="hand_root",
             )
+            
             nodes.append(new_grasp)
             edges.append((near_idx, len(nodes) - 1))
-            graph_fps = np.vstack([graph_fps, P_new.flatten()[np.newaxis]])
+            
+            # 새 노드 배열 업데이트
+            graph_q = np.vstack([graph_q, q_fixed[np.newaxis]])
             added = True
             break
 
         stall = 0 if added else stall + 1
 
-        if verbose and len(nodes) % 20 == 0:
-            print(f"    [RRT] {len(nodes)}/{target_size} nodes, "
-                  f"{len(edges)} edges")
+        if verbose and len(nodes) % 10 == 0:
+            print(f"    [RRT] {len(nodes)}/{target_size} nodes, {len(edges)} edges")
 
     if verbose:
-        print(f"  [RRT] Final: {len(nodes)} nodes, {len(edges)} edges")
-        print(f"    stats: {stats}")
+        print(f"  [RRT] Final: {len(nodes)} nodes, {len(edges)} edges | stats: {stats}")
 
+    from .rrt_expansion import GraspGraph
     return GraspGraph(
         grasp_set=GraspSet(grasps=nodes, object_name=seed_grasps.object_name),
         edges=edges,
         object_name=seed_grasps.object_name,
-        num_fingers=n_pts,
+        num_fingers=4, # 가변적이므로 의미 없는 속성이 될 수 있으나, 호환성을 위해 유지
     )
