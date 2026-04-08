@@ -121,8 +121,12 @@ def main():
     device = env.device
     env_ids = torch.arange(args.num_envs, device=device, dtype=torch.long)
 
-    # Initial reset to get env running
+    # Initial reset to get env running (applies palm-up transform)
     env.reset()
+
+    # Store palm-up wrist pose from initial reset
+    palm_up_wrist_pos = robot.data.root_pos_w[0].clone()
+    palm_up_wrist_quat = robot.data.root_quat_w[0].clone()
 
     ft_ids = get_fingertip_body_ids_from_env(robot, env)
     grasps = g.grasp_set.grasps
@@ -159,12 +163,9 @@ def main():
                 grasp = grasps[grasp_idx % len(grasps)]
 
                 if grasp.joint_angles is not None:
-                    # Set wrist at default
-                    wrist_pos = (
-                        robot.data.default_root_state[env_ids, :3].clone()
-                        + env.scene.env_origins[env_ids]
-                    )
-                    wrist_quat = robot.data.default_root_state[env_ids, 3:7].clone()
+                    # Set wrist to palm-up pose (from initial reset)
+                    wrist_pos = palm_up_wrist_pos.unsqueeze(0).expand(args.num_envs, -1).clone()
+                    wrist_quat = palm_up_wrist_quat.unsqueeze(0).expand(args.num_envs, -1).clone()
                     set_robot_root_pose(env, env_ids, wrist_pos, wrist_quat)
 
                     # Set stored joints
