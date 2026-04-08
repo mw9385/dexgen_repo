@@ -91,7 +91,7 @@ def randomize_action_delay(
 
     if "action_delay_buf" not in env.extras:
         # Use action-space dim (not full joint dim) so the buffer matches
-        # the actual policy action tensor (wrist joints excluded for Shadow Hand).
+        # the actual policy action tensor.
         try:
             n_dof = env.action_manager.action.shape[-1]
         except (AttributeError, RuntimeError):

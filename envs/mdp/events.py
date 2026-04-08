@@ -1003,10 +1003,10 @@ def _get_action_dim(env, num_dof: int) -> int:
     try:
         return env.action_manager.action.shape[-1]
     except (AttributeError, RuntimeError):
-        # Fallback: Shadow Hand excludes 2 wrist joints
+        # Sharpa: all 22 DOF are action space. Shadow: exclude 2 wrist.
         hand_cfg = getattr(env.cfg, "hand", None) or {}
-        if hand_cfg.get("name", "shadow") == "shadow" and num_dof == 24:
-            return num_dof - 2   # 22 finger joints
+        if hand_cfg.get("name") == "shadow" and num_dof == 24:
+            return num_dof - 2
         return num_dof
 
 def _reset_to_default_pose(env, env_ids: torch.Tensor):

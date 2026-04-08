@@ -513,15 +513,26 @@ def refine_hand_to_start_grasp(
 
     target_obj_state = obj.data.root_state_w[env_ids].clone()
 
-    # Shadow Hand 24-DOF USD finger→joint mapping.
-    # Wrist joints [0,1] are excluded (not modified by IK).
-    _FINGER_JOINT_IDS = [
-        [2, 3, 4, 5],          # FF: FFJ4(passive), FFJ3, FFJ2, FFJ1
-        [6, 7, 8, 9],          # MF: MFJ4(passive), MFJ3, MFJ2, MFJ1
-        [10, 11, 12, 13],      # RF: RFJ4(passive), RFJ3, RFJ2, RFJ1
-        [14, 15, 16, 17, 18],  # LF: LFJ5(passive), LFJ4, LFJ3, LFJ2, LFJ1
-        [19, 20, 21, 22, 23],  # TH: THJ4, THJ3, THJ2, THJ1, THJ0
-    ]
+    # Finger→joint mapping (hand-dependent).
+    hand_cfg = getattr(env.cfg, "hand", None) or {}
+    if hand_cfg.get("name") == "sharpa":
+        # Sharpa Wave Hand 22-DOF (all actuated, no wrist)
+        _FINGER_JOINT_IDS = [
+            [0, 1, 2, 3, 4],      # Thumb: CMC_FE, CMC_AA, MCP_FE, MCP_AA, IP
+            [5, 6, 7, 8],         # Index: MCP_FE, MCP_AA, PIP, DIP
+            [9, 10, 11, 12],      # Middle: MCP_FE, MCP_AA, PIP, DIP
+            [13, 14, 15, 16],     # Ring: MCP_FE, MCP_AA, PIP, DIP
+            [17, 18, 19, 20, 21], # Pinky: CMC, MCP_FE, MCP_AA, PIP, DIP
+        ]
+    else:
+        # Shadow Hand 24-DOF (wrist [0,1] excluded)
+        _FINGER_JOINT_IDS = [
+            [2, 3, 4, 5],
+            [6, 7, 8, 9],
+            [10, 11, 12, 13],
+            [14, 15, 16, 17, 18],
+            [19, 20, 21, 22, 23],
+        ]
     num_fingers = min(len(ft_ids), len(_FINGER_JOINT_IDS))
 
     _debug_ik = bool(os.environ.get("DEBUG_IK", ""))
