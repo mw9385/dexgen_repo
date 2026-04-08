@@ -221,16 +221,35 @@ def main():
                     # Re-pause physics after sim.step
                     timeline.pause()
 
-                    # Print info
+                    # Print grasp diagnostics
                     q = grasp.object_quat_hand
                     q_str = f"[{q[0]:.3f}, {q[1]:.3f}, {q[2]:.3f}, {q[3]:.3f}]" if q is not None else "None"
+
+                    # Per-finger distance to object center
+                    ft_to_obj = ft_pos_w[0] - obj_pos_w[0].unsqueeze(0)  # (F, 3)
+                    ft_dists = torch.norm(ft_to_obj, dim=-1)  # (F,)
+
+                    # Object size from graph spec
+                    obj_spec = merged_graph.object_specs.get(obj_name, {}) if isinstance(merged_graph, MultiObjectGraspGraph) else {}
+                    obj_size = obj_spec.get("size", "?")
+                    obj_half = float(obj_size) / 2 if isinstance(obj_size, (int, float)) else 0
+
+                    # Check penetration: finger closer than half object size
+                    penetrated = (ft_dists < obj_half).sum().item() if obj_half > 0 else "?"
+
                     print(f"[GraspViz] Grasp {grasp_idx}/{len(grasps)}  "
                           f"quality={grasp.quality:.3f}  "
-                          f"obj_quat_hand={q_str}  "
-                          f"obj_pos={obj_pos_w[0].tolist()}")
-
+                          f"obj_size={obj_size}m  "
+                          f"obj_quat_hand={q_str}")
+                    print(f"  obj_center={obj_pos_w[0].tolist()}")
                     for fi in range(len(ft_ids)):
-                        print(f"  finger {fi}: {ft_pos_w[0, fi].tolist()}")
+                        dist = ft_dists[fi].item()
+                        inside = "⚠ INSIDE" if obj_half > 0 and dist < obj_half else ""
+                        print(f"  finger {fi}: pos={ft_pos_w[0, fi].tolist()}  "
+                              f"dist_to_obj={dist*1000:.1f}mm {inside}")
+                    print(f"  penetrated: {penetrated}/{len(ft_ids)}  "
+                          f"min_dist={ft_dists.min().item()*1000:.1f}mm  "
+                          f"max_dist={ft_dists.max().item()*1000:.1f}mm")
 
                 grasp_idx += 1
 
