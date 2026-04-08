@@ -183,15 +183,19 @@ if _ISAACLAB_AVAILABLE:
         robot: ArticulationCfg = SHADOW_HAND_CFG.replace(
             prim_path="{ENV_REGEX_NS}/ShadowHand",
             init_state=ArticulationCfg.InitialStateCfg(
-                pos=(0.0, 0.0, 0.35),     # wrist height (palm-up: object rests on palm)
-                rot=(1.0, 0.0, 0.0, 0.0), # overridden at reset by align_palm_up
+                pos=(0.0, 0.0, 0.35),
+                rot=(1.0, 0.0, 0.0, 0.0),
                 joint_pos={
-                    "robot0_THJ4": 0.5,   # thumb rotation: natural resting pose
+                    "robot0_THJ4": 0.5,
                     "robot0_THJ3": 0.3,
                 },
             ),
             actuators={
-                **SHADOW_HAND_CFG.actuators,
+                "fingers": sim_utils.ImplicitActuatorCfg(
+                    joint_names_expr=["robot0_.*"],
+                    stiffness=10.0,
+                    damping=1.0,
+                ),
             },
             spawn=SHADOW_HAND_CFG.spawn.replace(
                 activate_contact_sensors=True,
