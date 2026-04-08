@@ -208,13 +208,12 @@ def main():
         robot.write_joint_state_to_sim(q_t, torch.zeros_like(q_t), env_ids=env_ids)
         robot.set_joint_position_target(q_t, env_ids=env_ids)
 
-        # 3. Place object at palm center
+        # 3. Place object at fingertip centroid (NOT palm — palm is at wrist)
         env.sim.step(render=render)
         env.scene.update(dt=env.physics_dt)
 
-        palm_pos = robot.data.body_pos_w[env_ids, palm_id, :].clone()
-        obj_pos = palm_pos.clone()
-        obj_pos[:, 2] += args.size * 0.5  # slightly above palm
+        ft_pos = robot.data.body_pos_w[env_ids][:, ft_ids, :]  # (N, 5, 3)
+        obj_pos = ft_pos.mean(dim=1)  # fingertip centroid
 
         obj_state = obj.data.default_root_state[env_ids].clone()
         obj_state[:, :3] = obj_pos
