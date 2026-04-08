@@ -76,6 +76,7 @@ try:
     from isaaclab.scene import InteractiveSceneCfg
     from isaaclab.sensors import ContactSensorCfg
     from isaaclab.utils import configclass
+    from isaaclab.actuators import ImplicitActuatorCfg
     from isaaclab.utils.noise import AdditiveGaussianNoiseCfg as GaussianNoise
 
     try:
@@ -191,7 +192,7 @@ if _ISAACLAB_AVAILABLE:
                 },
             ),
             actuators={
-                "fingers": sim_utils.ImplicitActuatorCfg(
+                "fingers": ImplicitActuatorCfg(
                     joint_names_expr=["robot0_.*"],
                     stiffness=10.0,
                     damping=1.0,
