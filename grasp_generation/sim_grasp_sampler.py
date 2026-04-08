@@ -278,8 +278,21 @@ def assign_ik_and_check_collision(
         obj.update(0.0)
 
         # Step 4: IK — solve joint angles to reach surface contact points
+        # Limit IK iterations via env config (default 200 is slow for 1000 grasps)
+        ik_cfg = getattr(env.cfg, "reset_refinement", None) or {}
+        if not isinstance(ik_cfg, dict):
+            ik_cfg = {}
+        old_iters = ik_cfg.get("iterations", 200)
+        ik_cfg["iterations"] = min(old_iters, 50)  # cap at 50 for speed
+        env.cfg.reset_refinement = ik_cfg
+
+        if verbose and i == 0:
+            print(f"      [IK] Starting grasp 0 (iterations={ik_cfg['iterations']})...")
+
         refine_hand_to_start_grasp(env, env_ids, fp_tensor)
         robot.update(0.0)
+
+        ik_cfg["iterations"] = old_iters  # restore
 
         # Check IK quality: are fingertips actually near target?
         ft_after = robot.data.body_pos_w[0, ft_ids, :]
@@ -289,6 +302,8 @@ def assign_ik_and_check_collision(
 
         if ik_mean_err > 0.03:  # IK failed to converge within 3cm
             ik_fail += 1
+            if verbose and i < 3:
+                print(f"      [IK] grasp {i}: FAIL (mean_err={ik_mean_err*1000:.1f}mm)")
             continue
 
         # Read solved joint angles
@@ -327,7 +342,7 @@ def assign_ik_and_check_collision(
         grasp.contact_normals = normals_final
         solved.append(grasp)
 
-        if verbose and (i + 1) % 50 == 0:
+        if verbose and (i + 1) % 20 == 0:
             print(f"      [{i+1}/{len(grasps)}] solved={len(solved)} "
                   f"(ik_fail={ik_fail}, collision={collision_fail})")
 
