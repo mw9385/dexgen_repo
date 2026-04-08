@@ -313,6 +313,12 @@ def reset_to_random_grasp(
 
         # 2. Set stored joint angles
         set_robot_joints_direct(env, env_ids, start_joints_list)
+        # Move object far away before FK step to prevent collision ejection
+        _temp_state = obj.data.default_root_state[env_ids].clone()
+        _temp_state[:, :3] = env.scene.env_origins[env_ids] + torch.tensor([[0, 0, -10.0]], device=env.device)
+        _temp_state[:, 7:] = 0.0
+        obj.write_root_state_to_sim(_temp_state, env_ids=env_ids)
+        obj.update(0.0)
         # Force FK computation so body_pos_w reflects new joints
         env.sim.step(render=False)
         env.scene.update(dt=env.physics_dt)
@@ -408,6 +414,12 @@ def reset_to_random_grasp(
     # Use FK fingertip centroid (not stored obj_pos_hand which has frame mismatch).
     # =========================================================================
     ft_ids_resync = get_fingertip_body_ids_from_env(robot, env)
+    # Move object far away before FK step to prevent collision ejection
+    _temp_state2 = obj.data.default_root_state[env_ids].clone()
+    _temp_state2[:, :3] = env.scene.env_origins[env_ids] + torch.tensor([[0, 0, -10.0]], device=env.device)
+    _temp_state2[:, 7:] = 0.0
+    obj.write_root_state_to_sim(_temp_state2, env_ids=env_ids)
+    obj.update(0.0)
     # Need fresh FK after wrist rotation changes
     env.sim.step(render=False)
     env.scene.update(dt=env.physics_dt)
