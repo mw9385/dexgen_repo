@@ -49,12 +49,8 @@ def parse_args():
                    help="Resume from checkpoint path")
     p.add_argument("--log_dir", type=str, default=None,
                    help="Training log / checkpoint directory. "
-                        "If omitted, a fresh timestamped subdir is created "
-                        "under the base path so previous runs are never "
-                        "overwritten.")
-    p.add_argument("--run_name", type=str, default=None,
-                   help="Optional suffix appended to the timestamped run dir "
-                        "(e.g. --run_name dr_on). Ignored when --log_dir is set.")
+                        "If omitted, a timestamped subdir is used so "
+                        "previous runs are not overwritten.")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--config", type=str,
                    default=str(Path(__file__).parent.parent / "configs" / "rl_training.yaml"),
@@ -68,8 +64,6 @@ def parse_args():
     if args.log_dir is None:
         base = cfg.get("logging", {}).get("log_dir", "logs/rl/sharpa_anygrasp_v1")
         stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        if args.run_name:
-            stamp = f"{stamp}_{args.run_name}"
         args.log_dir = str(Path(base) / stamp)
     return args
 
@@ -500,38 +494,7 @@ def main():
         print(f"[WARNING] Config verification failed: {_e}")
         import traceback; traceback.print_exc()
 
-    # Create the log dir up-front and point a `latest` symlink at it so
-    # subsequent runs don't overwrite older checkpoints. Each run lives in
-    # its own timestamped subdir under the base logging path.
-    log_dir_path = Path(args.log_dir)
-    log_dir_path.mkdir(parents=True, exist_ok=True)
-    try:
-        latest = log_dir_path.parent / "latest"
-        if latest.is_symlink() or latest.exists():
-            latest.unlink()
-        latest.symlink_to(log_dir_path.name)
-    except (OSError, NotImplementedError) as _e:
-        print(f"[Stage 1] WARNING: could not update 'latest' symlink: {_e}")
-
-    # Dump the resolved config next to the checkpoints so the run is
-    # self-describing (config + checkpoints + tensorboard in one folder).
-    try:
-        with open(log_dir_path / "run_config.yaml", "w") as _f:
-            yaml.safe_dump(
-                {
-                    "argv": sys.argv,
-                    "args": {
-                        k: str(v) if not isinstance(v, (int, float, bool, list, dict, type(None))) else v
-                        for k, v in vars(args).items()
-                    },
-                    "yaml_config": cfg_file,
-                    "grasp_graph_paths": grasp_graph_paths,
-                    "started_at": datetime.now().isoformat(timespec="seconds"),
-                },
-                _f, sort_keys=False,
-            )
-    except Exception as _e:
-        print(f"[Stage 1] WARNING: could not dump run_config.yaml: {_e}")
+    Path(args.log_dir).mkdir(parents=True, exist_ok=True)
 
     print(f"[Stage 1] Config:   {args.config}")
     print(f"[Stage 1] Task: DexGen-AnyGrasp-Sharpa-v0")
@@ -539,7 +502,6 @@ def main():
     print(f"[Stage 1] Max iterations: {args.max_iterations}")
     print(f"[Stage 1] Grasp graph(s): {', '.join(grasp_graph_paths)}")
     print(f"[Stage 1] Log dir: {args.log_dir}")
-    print(f"[Stage 1] 'latest' → {args.log_dir}")
     print(f"[Stage 1] Action scale: {env_cfg.action_scale}")
     print("-" * 60)
 
