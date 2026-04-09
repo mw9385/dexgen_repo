@@ -1,164 +1,163 @@
-# DexGen
+# DexGen — Sharpa Wave Hand
 
-Reproduction work for **DEXTERITYGEN: Foundation Controller for Unprecedented Dexterity** on the **Sharpa Wave Hand** in Isaac Lab.
+In-hand object reorientation with the **Sharpa Wave Hand** (22 DOF) in Isaac Lab.
 
-This repo is currently centered on the Stage 0 -> Stage 1 pipeline:
+Based on:
+- [DexterityGen](https://arxiv.org/abs/2502.04307) — grasp graph + curriculum RL
+- [sharpa-rl-lab](https://github.com/sharpa-robotics/sharpa-rl-lab) — Sharpa Hand env + tactile
+- [OpenAI In-Hand Manipulation](https://arxiv.org/abs/1808.00177) — reward function
 
-```text
-Stage 0  Grasp generation (.npy, hand-frame pose)  -> data/sharpa_grasp_*.npy
-Stage 1  RL training (PPO, Isaac Lab + rl_games)   -> logs/rl/sharpa_anygrasp_v1/
+## Pipeline
+
+```
+Stage 0   gen_grasp.py    →  data/sharpa_grasp_*.npy
+Stage 1   train_rl.py     →  logs/rl/sharpa_anygrasp_v1/
 ```
 
-Older optimization / `pkl`-based paths are not the active workflow.
-
-## Current Status
-
-- Hand: Sharpa Wave, 22 DOF, 5 fingertips
-- Grasp cache format: `.npy`
-- Stored grasp state: `joint_pos(22) + object_pos_hand(3) + object_quat_hand(4)`
-- RL reset: start grasp sampled from the saved `.npy`
-- RL goal: K-nearest-neighbor goal sampled from the same `.npy`, constrained to stay near the sampled start pose
-- RL logging/checkpoints: `logs/rl/sharpa_anygrasp_v1`
-
-## Setup
+## Quick Start
 
 ```bash
-./setup_isaaclab.sh
-./docker/run.sh up
-./docker/run.sh exec
+# Alias (optional)
+echo 'alias ilab="/workspace/IsaacLab/isaaclab.sh -p"' >> ~/.bashrc && source ~/.bashrc
+
+# Stage 0: Generate grasp cache
+ilab scripts/gen_grasp.py --shapes cube --sizes 0.05 --num_grasps 1000 --num_envs 4096 --headless
+
+# Stage 1: Train RL
+ilab scripts/train_rl.py --grasp_graph data/sharpa_grasp_cube_050.npy --num_envs 512 --headless
 ```
 
-Inside the container:
+## Hand
+
+**Sharpa Wave Hand** — 22 DOF, 5 fingers, no wrist joints.
+
+| Finger | DOF | Joints |
+|--------|-----|--------|
+| Thumb | 5 | CMC_FE, CMC_AA, MCP_FE, MCP_AA, IP |
+| Index | 4 | MCP_FE, MCP_AA, PIP, DIP |
+| Middle | 4 | MCP_FE, MCP_AA, PIP, DIP |
+| Ring | 4 | MCP_FE, MCP_AA, PIP, DIP |
+| Pinky | 5 | CMC, MCP_FE, MCP_AA, PIP, DIP |
+
+Contact sensors: 5 elastomer (one per fingertip).
+
+## Stage 0: Grasp Generation
+
+Based on [sharpa-rl-lab grasp env](https://github.com/sharpa-robotics/sharpa-rl-lab):
+
+1. Default pre-grasp pose + 0.15 random noise
+2. Object placed within hand grasp
+3. Step physics with gravity cycling (6 directions)
+4. Validate: all fingertips < 0.1m + 3+ contacts > 0.5N + rotation < 30°
+5. Episode survives → save state
 
 ```bash
-/isaac-sim/python.sh -m pip install transforms3d transformations lxml
+# Single object
+ilab scripts/gen_grasp.py --shapes cube --sizes 0.05 --num_grasps 1000
+
+# Multiple objects
+ilab scripts/gen_grasp.py --shapes cube sphere cylinder --sizes 0.04 0.05 0.06
+
+# Output: data/sharpa_grasp_{shape}_{size_mm}.npy
+# Format: (N, 29) = [joint_pos(22) | obj_pos_hand(3) | obj_quat_hand(4)]
 ```
 
-Working directory in the container:
+## Stage 1: RL Training
+
+### Observation (199 dims)
+
+Sharpa-rl-lab temporal stacking + DexGen target info:
+
+```
+Per-step block (64 dims, × 3 temporal = 192):
+  joint_pos_normalized    22   (unscale + noise)
+  joint_targets           22   (current position targets)
+  tactile_forces           5   (smoothed elastomer contact)
+  contact_positions       15   (5×3, tactile frame)
+
++ Target info (7 dims, non-temporal):
+  target_obj_pos_hand      3
+  target_obj_quat_hand     4
+```
+
+Tactile processing matches sharpa-rl-lab exactly:
+smoothing → latency simulation → binary/continuous mode.
+
+### Reward (OpenAI)
+
+```
+r_t = (d_t - d_{t+1})           rotation error reduction
+    + 1.0  if rot_dist < 0.4    goal bonus
+    - 2.0  if object dropped    fall penalty
+```
+
+### Reset / Goal
+
+1. Sample start grasp from `.npy` cache
+2. KNN goal: nearby grasp with `min_orn ≥ 0.5 rad` (curriculum: 0.5 → 1.5 rad)
+3. Rolling goal: when `rot_dist < 0.4 rad`, pick new goal via KNN
+
+### Training
 
 ```bash
-/workspace/dexgen
-```
-
-## Stage 0: Generate Grasp Cache
-
-Generate Sharpa grasp data and save it directly to `data/` as `.npy`.
-
-Example:
-
-```bash
-/workspace/IsaacLab/isaaclab.sh -p scripts/gen_grasp.py \
-    --shape cube \
-    --size 0.05 \
-    --num_grasps 1000 \
-    --headless
-```
-
-Output example:
-
-```text
-data/sharpa_grasp_cube_050.npy
-```
-
-The saved format is:
-
-```text
-[joint_pos(22) | object_pos_hand(3) | object_quat_hand(4)]
-```
-
-Notes:
-
-- Default output directory comes from [grasp_generation.yaml](/home/mw/ws/dexgen_repo/configs/grasp_generation.yaml) and is currently `data`.
-- The `.npy` now stores object pose in **hand frame**. This is required for Stage 1 reset and goal generation to work correctly.
-
-## Stage 1: Train RL
-
-Train PPO from the generated `.npy` grasp cache:
-
-```bash
-/workspace/IsaacLab/isaaclab.sh -p scripts/train_rl.py \
+ilab scripts/train_rl.py \
     --grasp_graph data/sharpa_grasp_cube_050.npy \
-    --num_envs 4096 \
+    --num_envs 512 \
     --headless
 ```
 
-Quick sanity check:
+## Files
 
-```bash
-/workspace/IsaacLab/isaaclab.sh -p scripts/train_rl.py \
-    --grasp_graph data/sharpa_grasp_cube_050.npy \
-    --num_envs 1 \
-    --max_iterations 1 \
-    --headless
+```
+scripts/
+  gen_grasp.py          Grasp cache generation
+  train_rl.py           RL training (PPO + rl_games)
+  train_dexgen.py       DexGen controller training
+
+envs/
+  anygrasp_env.py       ManagerBasedRLEnv (Sharpa Hand)
+  mdp/
+    observations.py     Sharpa tactile + temporal stacking
+    rewards.py          OpenAI reward (delta + bonus + penalty)
+    events.py           Reset + rolling goal + curriculum
+    sim_utils.py        FK, IK, palm utilities
+    math_utils.py       Quaternion operations
+    domain_rand.py      Domain randomization
+
+grasp_generation/
+  graph_io.py           .npy/.pkl loader + GraspGraph structures
+
+assets/
+  SharpaWave/           Hand USD
+  cylinder/             Cylinder USD
+
+configs/
+  grasp_generation.yaml
+  rl_training.yaml
+  dexgen.yaml
 ```
 
-Verified current behavior:
+## Config
 
-- The `.npy` file is loaded successfully by `train_rl.py`
-- Start grasp is sampled from the saved cache
-- Goal grasp is selected by KNN from the same cache
-- Goal is kept near the start pose in hand-frame pose space
-- Checkpoints and summaries are written under `logs/rl/sharpa_anygrasp_v1`
+Key settings in `configs/rl_training.yaml`:
 
-## Observation
-
-The policy and critic both use the same 101D observation:
-
-- joint positions: 22
-- joint velocities: 22
-- object position in hand frame: 3
-- object quaternion in hand frame: 4
-- target object position in hand frame: 3
-- target object quaternion in hand frame: 4
-- object linear velocity in hand frame: 3
-- object angular velocity in hand frame: 3
-- fingertip contact forces: 15
-- last action: 22
-
-## Reset / Goal Logic
-
-Current reset flow:
-
-1. Sample a start grasp from the saved `.npy`
-2. Sample a nearby goal grasp from the same file using KNN in pose space
-3. Reset the Sharpa hand to the sampled joint configuration
-4. Reconstruct the object pose in sim
-5. Rebase the target goal pose from the sampled start->goal delta
-
-Rolling goal update:
-
-- When the current goal is reached, a new nearby goal is selected again from the same grasp cache
-
-## Logging
-
-Training outputs are written here:
-
-```text
-logs/rl/sharpa_anygrasp_v1/
+```yaml
+env:
+  task: DexGen-AnyGrasp-Sharpa-v0
+  action_mode: "delta"
+  delta_scale: 0.0625        # 1/16 per control step
+  decimation: 12              # 20 Hz control
+  gravity_curriculum:
+    enabled: true
+    start_gravity: 0.05
+    end_gravity: 9.81
 ```
-
-Typical contents:
-
-```text
-logs/rl/sharpa_anygrasp_v1/nn/
-logs/rl/sharpa_anygrasp_v1/summaries/
-```
-
-## Important Files
-
-- [scripts/gen_grasp.py](/home/mw/ws/dexgen_repo/scripts/gen_grasp.py)
-- [scripts/train_rl.py](/home/mw/ws/dexgen_repo/scripts/train_rl.py)
-- [envs/anygrasp_env.py](/home/mw/ws/dexgen_repo/envs/anygrasp_env.py)
-- [envs/mdp/events.py](/home/mw/ws/dexgen_repo/envs/mdp/events.py)
-- [configs/grasp_generation.yaml](/home/mw/ws/dexgen_repo/configs/grasp_generation.yaml)
-- [configs/rl_training.yaml](/home/mw/ws/dexgen_repo/configs/rl_training.yaml)
 
 ## Troubleshooting
 
-| Problem | Action |
-|---|---|
-| `train_rl.py` goal distance is extremely large | Re-generate the `.npy` so it stores hand-frame pose |
-| Logs appear under `runs/` instead of `logs/rl/...` | Use the updated `train_rl.py`; current config writes to `logs/rl/sharpa_anygrasp_v1` |
-| Grasp generation is slow at startup | Isaac Sim scene creation and simulation start take time, especially at `4096` envs |
-| `ModuleNotFoundError: transformations` | `/isaac-sim/python.sh -m pip install transformations` |
-| No grasps appear early in Stage 0 | Let it run; early progress can stay at `0/1000` before filling rapidly |
+| Problem | Fix |
+|---------|-----|
+| Slow env startup | `replicate_physics=False` + multi-object is slow. Use `--num_envs 128` or single object |
+| No rolling goal updates | Check `rot_threshold` in `update_rolling_goal` matches `goal_bonus` thresh |
+| Reward too high | Reduce `bonus`/`penalty` values in `AnyGraspRewardsCfg` |
+| Grasp gen stuck at 0 | Let it run — early steps fail frequently, fills up later |
