@@ -629,6 +629,19 @@ def main():
                 runner.algo.frame = epoch * args.num_envs * ppo_runtime_cfg["horizon_length"]
                 print(f"[Stage 1] Fallback epoch from filename: {epoch}")
 
+        # Apply the curriculum for the restored epoch BEFORE the first
+        # training step. Otherwise the first resumed epoch runs with the
+        # env's initial physics (gravity=0.05, min_orn=0.50) which breaks
+        # policy behaviour when resuming from a late checkpoint.
+        try:
+            from envs.mdp import events as mdp_events
+            mdp_events.update_curriculum(
+                runner.algo.vec_env.env, epoch, _max_iters,
+            )
+            print(f"[Stage 1] Curriculum pre-applied for resumed epoch {epoch}")
+        except Exception as _e:
+            print(f"[Stage 1] WARNING: could not pre-apply curriculum on resume: {_e}")
+
     runner.run({"train": True})
 
     print(f"\n=== Stage 1 Complete ===")
