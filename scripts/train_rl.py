@@ -411,8 +411,11 @@ def main():
     env_cfg = AnyGraspEnvCfg()
     env_cfg.scene.num_envs = args.num_envs
     env_cfg.grasp_graph_path = grasp_graph_paths
-    if getattr(args, "headless", False):
-        env_cfg.viewer = None
+    # Note: do NOT set env_cfg.viewer = None when headless. Isaac Lab's
+    # ViewportCameraController is constructed unconditionally and reads
+    # cfg.viewer.eye, which crashes if viewer is None. This also breaks
+    # --livestream which needs a real viewport. The default ViewerCfg
+    # works fine for headless runs (just hidden).
 
     # Load object specs from the grasp graph so the environment spawns the
     # same object pool that was used during Stage 0 grasp generation.

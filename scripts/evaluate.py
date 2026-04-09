@@ -210,8 +210,9 @@ def main():
     env_cfg = AnyGraspEnvCfg()
     env_cfg.scene.num_envs = args.num_envs
     env_cfg.grasp_graph_path = grasp_graph_paths
-    if getattr(args, "headless", False):
-        env_cfg.viewer = None
+    # Don't null out env_cfg.viewer when headless — Isaac Lab constructs
+    # ViewportCameraController unconditionally and reads cfg.viewer.eye.
+    # Also required for --livestream to work.
 
     try:
         if isinstance(merged_graph, MultiObjectGraspGraph) and merged_graph.object_specs:
