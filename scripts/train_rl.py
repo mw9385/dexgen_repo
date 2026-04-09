@@ -411,9 +411,16 @@ def main():
             env_cfg.scene.object = env_cfg.scene.object.replace(
                 spawn=_build_object_spawner(_specs)
             )
+            # When the grasp graph has a single rigid asset, enable Isaac Lab
+            # physics replication (clone once, reuse across envs). This must
+            # be set AFTER __post_init__ because __post_init__ sees the full
+            # default object pool and conservatively sets it to False.
+            # Single-asset fast-path → minutes → seconds startup.
+            env_cfg.scene.replicate_physics = (len(_specs) == 1)
             print(f"[Stage 1] Loaded {len(_specs)} object spec(s) from grasp graph:")
             for _s in _specs:
                 print(f"          - {_s.get('name','?')}  shape={_s.get('shape_type','?')}  size={_s.get('size',0):.3f}m")
+            print(f"[Stage 1] replicate_physics={env_cfg.scene.replicate_physics}")
         else:
             print("[Stage 1] Grasp graph has no MultiObjectGraspGraph specs; using default cube.")
 

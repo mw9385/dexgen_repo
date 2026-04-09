@@ -220,7 +220,12 @@ def main():
             env_cfg.scene.object = env_cfg.scene.object.replace(
                 spawn=_build_object_spawner(_specs)
             )
-            print(f"[Evaluate] Loaded {len(_specs)} object spec(s) from grasp graph.")
+            # Fast startup path: single-asset grasp graphs can use physics
+            # replication. __post_init__ had to assume the default 6-item
+            # pool, so we override after loading the graph.
+            env_cfg.scene.replicate_physics = (len(_specs) == 1)
+            print(f"[Evaluate] Loaded {len(_specs)} object spec(s) from grasp graph "
+                  f"(replicate_physics={env_cfg.scene.replicate_physics}).")
 
         graph_num_fingers = getattr(merged_graph, "num_fingers", None)
         if graph_num_fingers is None and isinstance(merged_graph, MultiObjectGraspGraph) and merged_graph.graphs:
