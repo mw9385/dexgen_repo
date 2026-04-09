@@ -147,19 +147,14 @@ def load_npy_as_graph(path: str | Path) -> MultiObjectGraspGraph:
             object_pose_frame="hand_root",
         ))
 
-    # Build edges: quaternion distance
-    quats = data[:, 25:29].astype(np.float64)
-    quats = quats / (np.linalg.norm(quats, axis=-1, keepdims=True) + 1e-8)
-    edges = []
-    for i in range(N):
-        for j in range(i + 1, N):
-            dot = abs(np.dot(quats[i], quats[j]))
-            if 2.0 * np.arccos(min(dot, 1.0)) < 1.0:
-                edges.append((i, j))
-
+    # NOTE: goal sampling (_sample_nearby_goal_index) computes nearest
+    # neighbours on-the-fly from cached quaternion / position arrays — it
+    # does NOT read the `edges` list. Building edges here used to do an
+    # O(N^2) Python loop (~50M iters for N=10000) and blocked env startup
+    # by tens of seconds. Keep edges empty.
     grasp_set = GraspSet(grasps=grasps, object_name=obj_name)
     graph = GraspGraph(
-        grasp_set=grasp_set, edges=edges,
+        grasp_set=grasp_set, edges=[],
         object_name=obj_name, num_fingers=5,
     )
 
@@ -169,7 +164,7 @@ def load_npy_as_graph(path: str | Path) -> MultiObjectGraspGraph:
         "size": size, "num_fingers": 5,
     })
 
-    print(f"[graph_io] Loaded .npy: {N} grasps, {len(edges)} edges → {obj_name}")
+    print(f"[graph_io] Loaded .npy: {N} grasps → {obj_name}")
     return multi
 
 

@@ -435,6 +435,15 @@ if _ISAACLAB_AVAILABLE:
             spawner = _build_object_spawner(specs)
             self.scene.object = self.scene.object.replace(spawn=spawner)
 
+            # Fast-path: when every env spawns the same rigid asset (single
+            # shape/size — the typical single-.npy case), Isaac Lab can clone
+            # physics across envs instead of rebuilding them per-env.
+            # This dramatically speeds up env startup (minutes → seconds).
+            # MultiAssetSpawnerCfg requires replicate_physics=False, so we
+            # only enable it when there is exactly one spec.
+            is_single_asset = (len(specs) == 1) if specs else True
+            self.scene.replicate_physics = bool(is_single_asset)
+
             if self.reset_refinement is None:
                 self.reset_refinement = {
                     "enabled": True,

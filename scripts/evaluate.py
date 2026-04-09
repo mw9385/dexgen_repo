@@ -137,12 +137,14 @@ def build_eval_rl_games_config(args, cfg_file: dict) -> dict:
                 "bounds_loss_coef": 0.005,
                 "use_central_value": False,
                 # Force Player to use the registered vecenv (our _EvalVecEnv).
+                # rl_games reads `use_vecenv` from the top-level config, not
+                # from `config.player`.
+                "use_vecenv": True,
                 "player": {
                     "render": False,
                     "deterministic": bool(args.deterministic),
                     "games_num": int(args.num_episodes),
                     "print_stats": True,
-                    "use_vecenv": True,
                 },
             },
         }
@@ -301,6 +303,11 @@ def main():
     # rl_games "play" path instantiates a Player that loads the checkpoint.
     player = runner.create_player()
     player.restore(args.checkpoint)
+
+    # Our vecenv already emits batched obs (num_envs, obs_dim). Tell the
+    # Player not to add its own batch dim (otherwise a2c_network.forward
+    # calls .flatten(1) on (1, num_envs, obs_dim) → mismatched matmul).
+    player.has_batch_dimension = True
 
     # Run episodes manually so we can collect our own metrics.
     vec_env = player.env
