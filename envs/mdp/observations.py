@@ -121,14 +121,6 @@ def sharpa_observation_temporal(env) -> torch.Tensor:
     hand_dof_upper = hand.data.soft_joint_pos_limits[..., 1]
 
     # ── Contact forces (sharpa verbatim) ──────────────────────
-    # Tactile frame for contact position transform
-    tactile_frame_pose = hand.data.body_link_state_w[:, elastomer_ids, :7]
-    tactile_frame_pos = tactile_frame_pose[..., :3]
-    tactile_frame_quat = tactile_frame_pose[..., 3:7]
-    world_quat = torch.zeros_like(tactile_frame_quat)
-    world_quat[..., 0] = 1.0
-
-    # Collect net forces history from elastomer contact sensors
     _SENSOR_NAMES = [
         "fingertip_contact_sensor_thumb",
         "fingertip_contact_sensor_index",
@@ -136,18 +128,31 @@ def sharpa_observation_temporal(env) -> torch.Tensor:
         "fingertip_contact_sensor_ring",
         "fingertip_contact_sensor_pinky",
     ]
-    sensor_list = [env.scene.sensors.get(_SENSOR_NAMES[i]) for i in contact_body_ids]
-    net_contact_forces_history = torch.cat(
-        [s.data.net_forces_w_history[:, :, 0, :].unsqueeze(2) for s in sensor_list if s is not None],
-        dim=2,
-    )  # (N, H, 5, 3)
+
+    # Collect force history from each sensor
+    force_parts = []
+    for idx in contact_body_ids:
+        s = env.scene.sensors.get(_SENSOR_NAMES[idx])
+        if s is not None:
+            # net_forces_w_history: (N, history_len, num_bodies, 3)
+            force_parts.append(s.data.net_forces_w_history[:, :, 0, :].unsqueeze(2))
+        else:
+            # Fallback: zeros with history_length=3
+            force_parts.append(torch.zeros(N, 3, 1, 3, device=device))
+
+    net_contact_forces_history = torch.cat(force_parts, dim=2)  # (N, H, 5, 3)
     norm_contact_forces_history = torch.norm(net_contact_forces_history, dim=-1)  # (N, H, 5)
 
-    # Smoothing
-    smooth_contact_forces = (
-        norm_contact_forces_history[:, 0, :] * contact_smooth
-        + norm_contact_forces_history[:, 1, :] * (1 - contact_smooth)
-    )
+    # Smoothing: history[0] * smooth + history[1] * (1-smooth)
+    H = norm_contact_forces_history.shape[1]
+    if H >= 2:
+        smooth_contact_forces = (
+            norm_contact_forces_history[:, 0, :] * contact_smooth
+            + norm_contact_forces_history[:, 1, :] * (1 - contact_smooth)
+        )
+    else:
+        smooth_contact_forces = norm_contact_forces_history[:, 0, :]
+
     if len(contact_body_ids_disable) > 0:
         smooth_contact_forces[:, contact_body_ids_disable] = 0.0
 
@@ -172,27 +177,43 @@ def sharpa_observation_temporal(env) -> torch.Tensor:
 
     env.extras["_last_contacts"] = last_contacts
 
-    # ── Contact positions (sharpa verbatim) ───────────────────
-    not_contact_mask = sensed_contacts < 1.0e-6
-    if len(contact_body_ids_disable) > 0:
-        not_contact_mask[:, contact_body_ids_disable] = True
-    contact_mask = ~not_contact_mask
+    # ── Contact positions ─────────────────────────────────────
+    # Only compute if enabled AND sensors have track_contact_points
+    contact_pos = torch.zeros(N, 15, device=device)
 
-    contact_pos = torch.cat(
-        [s.data.contact_pos_w[:, 0, 0, :].unsqueeze(1) for s in sensor_list if s is not None],
-        dim=1,
-    )  # (N, 5, 3)
-    contact_pos = torch.nan_to_num(contact_pos, nan=0.0)
-    contact_pos[contact_mask, :] = _transform_between_frames(
-        contact_pos[contact_mask, :] - tactile_frame_pos[contact_mask, :],
-        world_quat[contact_mask, :],
-        tactile_frame_quat[contact_mask, :],
-    )
-    contact_pos[not_contact_mask, :] = 0.0
-    contact_pos = contact_pos.reshape(N, -1)  # (N, 15)
+    if enable_contact_pos:
+        try:
+            tactile_frame_pose = hand.data.body_link_state_w[:, elastomer_ids, :7]
+            tactile_frame_pos = tactile_frame_pose[..., :3]
+            tactile_frame_quat = tactile_frame_pose[..., 3:7]
+            world_quat = torch.zeros_like(tactile_frame_quat)
+            world_quat[..., 0] = 1.0
 
-    if not enable_contact_pos:
-        contact_pos[:] = 0.0
+            not_contact_mask = sensed_contacts < 1.0e-6
+            if len(contact_body_ids_disable) > 0:
+                not_contact_mask[:, contact_body_ids_disable] = True
+            contact_mask = ~not_contact_mask
+
+            pos_parts = []
+            for idx in contact_body_ids:
+                s = env.scene.sensors.get(_SENSOR_NAMES[idx])
+                if s is not None and hasattr(s.data, "contact_pos_w"):
+                    pos_parts.append(s.data.contact_pos_w[:, 0, 0, :].unsqueeze(1))
+                else:
+                    pos_parts.append(torch.zeros(N, 1, 3, device=device))
+
+            cp = torch.cat(pos_parts, dim=1)  # (N, 5, 3)
+            cp = torch.nan_to_num(cp, nan=0.0)
+            cp[contact_mask, :] = _transform_between_frames(
+                cp[contact_mask, :] - tactile_frame_pos[contact_mask, :],
+                world_quat[contact_mask, :],
+                tactile_frame_quat[contact_mask, :],
+            )
+            cp[not_contact_mask, :] = 0.0
+            contact_pos = cp.reshape(N, -1)
+        except (AttributeError, RuntimeError):
+            contact_pos = torch.zeros(N, 15, device=device)
+
     if not enable_tactile:
         contact_pos[:] = 0.0
         sensed_contacts[:] = 0.0
