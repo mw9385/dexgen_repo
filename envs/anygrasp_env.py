@@ -351,23 +351,23 @@ if _ISAACLAB_AVAILABLE:
 if _ISAACLAB_AVAILABLE:
     @configclass
     class AnyGraspRewardsCfg:
-        # r_t = d_t - d_{t+1} (rotation distance reduction, core signal)
+        # r_t = d_t - d_{t+1}
         orientation_delta = RewTerm(
             func=mdp_rewards.orientation_delta_reward,
             weight=1.0,
             params={},
         )
-        # +5 when goal achieved (rot_dist < 0.4 rad)
+        # +1 when goal achieved (rot_dist < 0.4 rad)
         goal_bonus = RewTerm(
             func=mdp_rewards.goal_bonus,
             weight=1.0,
-            params={"rot_thresh": 0.4, "bonus": 5.0},
+            params={"rot_thresh": 0.4, "bonus": 1.0},
         )
-        # -20 when object dropped
+        # -2 when object dropped
         drop = RewTerm(
             func=mdp_rewards.drop_penalty,
             weight=1.0,
-            params={"penalty": -20.0},
+            params={"penalty": -2.0},
         )
 
 
