@@ -128,8 +128,15 @@ def sharpa_observation_temporal(env) -> torch.Tensor:
     world_quat = torch.zeros_like(tactile_frame_quat)
     world_quat[..., 0] = 1.0
 
-    # Collect net forces history from elastomer contact sensors (indices 0-4)
-    sensor_list = [env.scene.sensors.get(f"contact_{i}") for i in contact_body_ids]
+    # Collect net forces history from elastomer contact sensors
+    _SENSOR_NAMES = [
+        "fingertip_contact_sensor_thumb",
+        "fingertip_contact_sensor_index",
+        "fingertip_contact_sensor_middle",
+        "fingertip_contact_sensor_ring",
+        "fingertip_contact_sensor_pinky",
+    ]
+    sensor_list = [env.scene.sensors.get(_SENSOR_NAMES[i]) for i in contact_body_ids]
     net_contact_forces_history = torch.cat(
         [s.data.net_forces_w_history[:, :, 0, :].unsqueeze(2) for s in sensor_list if s is not None],
         dim=2,
@@ -313,7 +320,14 @@ def object_ang_vel_hand_frame(env) -> torch.Tensor:
 
 def fingertip_contact_forces(env) -> torch.Tensor:
     """3-D contact force per fingertip in hand frame. Returns: (N, 15)"""
-    sensor_list = [env.scene.sensors.get(f"contact_{i}") for i in range(5)]
+    _SENSOR_NAMES = [
+        "fingertip_contact_sensor_thumb",
+        "fingertip_contact_sensor_index",
+        "fingertip_contact_sensor_middle",
+        "fingertip_contact_sensor_ring",
+        "fingertip_contact_sensor_pinky",
+    ]
+    sensor_list = [env.scene.sensors.get(n) for n in _SENSOR_NAMES]
     per_tip = []
     for s in sensor_list:
         if s is None:
