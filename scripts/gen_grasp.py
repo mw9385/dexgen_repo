@@ -45,10 +45,10 @@ _CYLINDER_USD = str(_REPO_ROOT / "assets" / "cylinder" / "cylinder.usd")
 
 def parse_args():
     p = argparse.ArgumentParser(description="Sharpa Hand grasp generation")
-    p.add_argument("--shape", type=str, default="cube",
-                   choices=["cube", "sphere", "cylinder"])
-    p.add_argument("--size", type=float, default=0.05,
-                   help="Object size in metres")
+    p.add_argument("--shapes", nargs="+", default=["cube"],
+                   help="Object shapes to generate grasps for (e.g., --shapes cube sphere cylinder)")
+    p.add_argument("--sizes", nargs="+", type=float, default=[0.05],
+                   help="Object sizes in metres (e.g., --sizes 0.04 0.05 0.06)")
     p.add_argument("--num_grasps", type=int, default=1000)
     p.add_argument("--num_envs", type=int, default=4096)
     p.add_argument("--episode_steps", type=int, default=50,
@@ -293,10 +293,7 @@ def main():
 
     render = not args.headless
 
-    # Build env
-    cfg = build_env_cfg(args.shape, args.size, args.num_envs)
-
-    # We use DirectRLEnv with a minimal wrapper
+    # Minimal DirectRLEnv wrapper for grasp generation
     class GraspGenEnv(DirectRLEnv):
         def __init__(self, cfg, **kwargs):
             super().__init__(cfg, **kwargs)
@@ -305,7 +302,7 @@ def main():
                 self.hand.body_names.index(name) for name in FINGERTIP_BODY_NAMES
             ]
             limits = self.hand.root_physx_view.get_dof_limits().to(self.device)
-            self.dof_lower = limits[..., 0] * 0.9  # safety margin like sharpa
+            self.dof_lower = limits[..., 0] * 0.9
             self.dof_upper = limits[..., 1] * 0.9
 
         def _setup_scene(self):
@@ -321,32 +318,24 @@ def main():
                 sensor = ContactSensor(sensor_cfg)
                 self._contact_sensors.append(sensor)
                 self.scene.sensors[f"contact_{i}"] = sensor
-            from isaaclab.sim import SimulationCfg
             import isaaclab.sim as sim_utils
             light = sim_utils.DomeLightCfg(intensity=2000.0)
             light.func("/World/Light", light)
 
-        def _pre_physics_step(self, actions):
-            pass
-
-        def _apply_action(self):
-            pass
-
+        def _pre_physics_step(self, actions): pass
+        def _apply_action(self): pass
         def _get_observations(self):
             return {"policy": torch.zeros(self.num_envs, 22, device=self.device)}
-
         def _get_rewards(self):
             return torch.zeros(self.num_envs, device=self.device)
-
         def _get_dones(self):
-            return torch.zeros(self.num_envs, dtype=torch.bool, device=self.device), \
-                   torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+            return (torch.zeros(self.num_envs, dtype=torch.bool, device=self.device),
+                    torch.zeros(self.num_envs, dtype=torch.bool, device=self.device))
 
         def _reset_idx(self, env_ids):
             super()._reset_idx(env_ids)
             if len(env_ids) == 0:
                 return
-            # Apply default + 0.15 noise on every reset (including first)
             rand = 2.0 * torch.rand(
                 (len(env_ids), self.hand.num_joints), device=self.device,
             ) - 1.0
@@ -356,127 +345,130 @@ def main():
                 dof_pos, torch.zeros_like(dof_pos), env_ids=env_ids,
             )
             self.hand.set_joint_position_target(dof_pos, env_ids=env_ids)
-            # Reset object to default pose
             obj_state = self.object.data.default_root_state[env_ids].clone()
             obj_state[:, :3] += self.scene.env_origins[env_ids]
             obj_state[:, 7:] = 0.0
             self.object.write_root_pose_to_sim(obj_state[:, :7], env_ids=env_ids)
             self.object.write_root_velocity_to_sim(obj_state[:, 7:], env_ids=env_ids)
 
-    env = GraspGenEnv(cfg)
-    hand = env.hand
-    obj = env.object
-    device = env.device
-    N = env.num_envs
-    all_env_ids = torch.arange(N, device=device, dtype=torch.long)
-
+    # ── Loop over all shape × size combinations ────────────────
     import omni.physics.tensors.impl.api as physx
-    import isaaclab.sim as sim_utils
-    physics_sim_view = sim_utils.SimulationContext.instance().physics_sim_view
-
-    # ── Grasp generation loop ──────────────────────────────────
-    saved = torch.zeros((0, 29), dtype=torch.float32, device=device)
-    gravity_id = 0
-    step_counter = 0
-    reset_angle_diff = 30 / 180 * math.pi
-
-    print(f"\n[GenGrasp] shape={args.shape}, size={args.size}, "
-          f"num_envs={N}, target={args.num_grasps}")
-    print(f"[GenGrasp] episode_steps={args.episode_steps}")
-
-    # Initial reset
-    env.reset()
-
-    while len(saved) < args.num_grasps:
-        step_counter += 1
-
-        # Zero actions — PD controller holds current targets
-        actions = torch.zeros(N, 22, device=device)
-        env.step(actions)
-
-        # Gravity cycling every 40 steps (from sharpa)
-        if step_counter % 40 == 0:
-            grav = GRAVITY_DIRECTIONS[gravity_id]
-            physics_sim_view.set_gravity(carb.Float3(*grav))
-            gravity_id = (gravity_id + 1) % len(GRAVITY_DIRECTIONS)
-
-        # ── Validation EVERY STEP (sharpa style: fail → immediate reset) ──
-        fingertip_pos = hand.data.body_pos_w[:, env.finger_bodies, :]
-        object_pos = obj.data.root_pos_w[:, :3]
-        object_rot = obj.data.root_quat_w
-        hand_root_pos = hand.data.root_pos_w
-        hand_root_quat = hand.data.root_quat_w
-        object_pos_hand = quat_apply_inverse(hand_root_quat, object_pos - hand_root_pos)
-        object_rot_hand = quat_mul(quat_conjugate(hand_root_quat), object_rot)
-        object_rot_hand = object_rot_hand / (torch.norm(object_rot_hand, dim=-1, keepdim=True) + 1e-8)
-        hand_dof_pos = hand.data.joint_pos
-
-        # Condition 1: all fingertips within 0.1m
-        ft_dists = torch.norm(
-            fingertip_pos - object_pos.unsqueeze(1), dim=-1, p=2,
-        )
-        cond1 = (ft_dists < 0.1).all(dim=-1)
-
-        # Condition 2: contact force > 0.5N on >= 3 fingers
-        forces = []
-        for sensor in env._contact_sensors:
-            f = sensor.data.force_matrix_w[:, 0, 0, :]
-            forces.append(torch.norm(f, dim=-1, p=2))
-        contact_forces = torch.stack(forces, dim=1)
-        cond2 = (contact_forces > 0.5).sum(dim=-1) >= 3
-
-        # Condition 3: object rotation < 30°
-        default_rot = obj.data.default_root_state[:, 3:7]
-        delta_rot = quat_mul(object_rot, quat_conjugate(default_rot))
-        delta_rot = delta_rot / (torch.norm(delta_rot, dim=-1, keepdim=True) + 1e-8)
-        angle = 2 * torch.acos(delta_rot[:, 0].clamp(-1, 1))
-        cond3 = angle < reset_angle_diff
-
-        cond_all = cond1 & cond2 & cond3
-
-        # Fail → mark for immediate reset (sharpa: reset_buf[cond < 1] = 1)
-        fail_ids = torch.where(~cond_all)[0]
-
-        # Success at episode end → save
-        at_end = (env.episode_length_buf == env.max_episode_length - 1)
-        success = at_end & cond_all
-        if success.any():
-            states = torch.cat([
-                hand_dof_pos[success],
-                object_pos_hand[success],
-                object_rot_hand[success],
-            ], dim=1)
-            saved = torch.cat([saved, states], dim=0)
-
-        # ── Reset: failed envs + completed envs ──────────────
-        # _reset_idx handles DOF noise + object reset
-        done_ids = torch.unique(torch.cat([
-            fail_ids,
-            torch.where(at_end)[0],
-        ]))
-        if len(done_ids) > 0:
-            env._reset_idx(done_ids)
-            env.episode_length_buf[done_ids] = 0
-
-        # Progress log
-        if step_counter % 100 == 0:
-            n_success = len(saved)
-            print(f"  [{time.strftime('%H:%M:%S')}] step={step_counter}, "
-                  f"grasps={n_success}/{args.num_grasps}")
-
-    # ── Save ───────────────────────────────────────────────────
-    data = saved[:args.num_grasps].cpu().numpy()
+    import isaaclab.sim as _sim_utils
 
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / f"sharpa_grasp_{args.shape}_{int(args.size * 1000):03d}.npy"
-    np.save(out_path, data)
 
-    print(f"\n[GenGrasp] Saved {len(data)} grasps to {out_path}")
-    print(f"  shape: {data.shape}")
-    print(f"  format: [joint_pos(22) | obj_pos_hand(3) | obj_quat_hand(4)]")
+    for shape in args.shapes:
+        for size in args.sizes:
+            size = float(round(size, 4))
+            tag = f"{shape}_{int(size * 1000):03d}"
 
-    env.close()
+            print(f"\n{'='*60}")
+            print(f"  [GenGrasp] {tag} (shape={shape}, size={size}m)")
+            print(f"  num_envs={args.num_envs}, target={args.num_grasps}")
+            print(f"{'='*60}")
+
+            cfg = build_env_cfg(shape, size, args.num_envs)
+            env = GraspGenEnv(cfg)
+            hand = env.hand
+            obj = env.object
+            device = env.device
+            N = env.num_envs
+
+            physics_sim_view = _sim_utils.SimulationContext.instance().physics_sim_view
+
+            saved = torch.zeros((0, 29), dtype=torch.float32, device=device)
+            gravity_id = 0
+            step_counter = 0
+            reset_angle_diff = 30 / 180 * math.pi
+
+            env.reset()
+
+            while len(saved) < args.num_grasps:
+                step_counter += 1
+
+                actions = torch.zeros(N, 22, device=device)
+                env.step(actions)
+
+                # Gravity cycling
+                if step_counter % 40 == 0:
+                    grav = GRAVITY_DIRECTIONS[gravity_id]
+                    physics_sim_view.set_gravity(carb.Float3(*grav))
+                    gravity_id = (gravity_id + 1) % len(GRAVITY_DIRECTIONS)
+
+                # ── Validation ──
+                fingertip_pos = hand.data.body_pos_w[:, env.finger_bodies, :]
+                object_pos = obj.data.root_pos_w[:, :3]
+                object_rot = obj.data.root_quat_w
+                hand_root_pos = hand.data.root_pos_w
+                hand_root_quat = hand.data.root_quat_w
+                object_pos_hand = quat_apply_inverse(hand_root_quat, object_pos - hand_root_pos)
+                object_rot_hand = quat_mul(quat_conjugate(hand_root_quat), object_rot)
+                object_rot_hand = object_rot_hand / (torch.norm(object_rot_hand, dim=-1, keepdim=True) + 1e-8)
+                hand_dof_pos = hand.data.joint_pos
+
+                ft_dists = torch.norm(
+                    fingertip_pos - object_pos.unsqueeze(1), dim=-1, p=2,
+                )
+                cond1 = (ft_dists < 0.1).all(dim=-1)
+
+                forces = []
+                for sensor in env._contact_sensors:
+                    f = sensor.data.force_matrix_w[:, 0, 0, :]
+                    forces.append(torch.norm(f, dim=-1, p=2))
+                contact_forces = torch.stack(forces, dim=1)
+                cond2 = (contact_forces > 0.5).sum(dim=-1) >= 3
+
+                default_rot = obj.data.default_root_state[:, 3:7]
+                delta_rot = quat_mul(object_rot, quat_conjugate(default_rot))
+                delta_rot = delta_rot / (torch.norm(delta_rot, dim=-1, keepdim=True) + 1e-8)
+                angle = 2 * torch.acos(delta_rot[:, 0].clamp(-1, 1))
+                cond3 = angle < reset_angle_diff
+
+                cond_all = cond1 & cond2 & cond3
+                fail_ids = torch.where(~cond_all)[0]
+
+                at_end = (env.episode_length_buf == env.max_episode_length - 1)
+                success = at_end & cond_all
+                if success.any():
+                    states = torch.cat([
+                        hand_dof_pos[success],
+                        object_pos_hand[success],
+                        object_rot_hand[success],
+                    ], dim=1)
+                    saved = torch.cat([saved, states], dim=0)
+
+                done_ids = torch.unique(torch.cat([
+                    fail_ids, torch.where(at_end)[0],
+                ]))
+                if len(done_ids) > 0:
+                    env._reset_idx(done_ids)
+                    env.episode_length_buf[done_ids] = 0
+
+                if step_counter % 100 == 0:
+                    print(f"  [{time.strftime('%H:%M:%S')}] step={step_counter}, "
+                          f"grasps={len(saved)}/{args.num_grasps}")
+
+            # Save this shape/size
+            data = saved[:args.num_grasps].cpu().numpy()
+            out_path = out_dir / f"sharpa_grasp_{tag}.npy"
+            np.save(out_path, data)
+            print(f"\n  Saved {len(data)} grasps → {out_path}")
+
+            env.close()
+
+    # Summary
+    print(f"\n{'='*60}")
+    print("  DONE — Generated grasp caches:")
+    for shape in args.shapes:
+        for size in args.sizes:
+            tag = f"{shape}_{int(size * 1000):03d}"
+            p = out_dir / f"sharpa_grasp_{tag}.npy"
+            if p.exists():
+                d = np.load(str(p))
+                print(f"  {p.name}: {d.shape}")
+    print(f"{'='*60}")
+
     sim_app.close()
 
 
