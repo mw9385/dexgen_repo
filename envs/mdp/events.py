@@ -669,6 +669,14 @@ def update_rolling_goal(
 
         updated += 1
 
+    # Track cumulative goal hits for the per-reset training log.
+    env.extras["_reset_log_goal_hits_window"] = (
+        int(env.extras.get("_reset_log_goal_hits_window", 0)) + updated
+    )
+    env.extras["_reset_log_goal_hits_total"] = (
+        int(env.extras.get("_reset_log_goal_hits_total", 0)) + updated
+    )
+
     return updated
 
 def _resolve_scene_graph_object_name(
@@ -929,7 +937,8 @@ def _load_grasp_graph(env):
 _GOAL_LOG_COUNT = 0
 
 def _log_goal_distances(env, env_ids: torch.Tensor):
-    """Log start→goal pos/orn distances at reset. Prints every reset."""
+    """Log per-reset metrics: start→goal distances + termination reasons +
+    cumulative goal-reach / drop / left-hand counters."""
     global _GOAL_LOG_COUNT
     _GOAL_LOG_COUNT += 1
 
@@ -942,28 +951,68 @@ def _log_goal_distances(env, env_ids: torch.Tensor):
     robot = env.scene["robot"]
     obj = env.scene["object"]
 
-    pos_dists = []
-    orn_dists = []
-    for i, eid in enumerate(env_ids.tolist()):
-        rp = robot.data.root_pos_w[eid]
-        rq = robot.data.root_quat_w[eid]
-        op = obj.data.root_pos_w[eid]
-        oq = obj.data.root_quat_w[eid]
-        cur_pos = quat_apply_inverse(rq.unsqueeze(0), (op - rp).unsqueeze(0))[0]
-        cur_quat = quat_multiply(quat_conjugate(rq.unsqueeze(0)), oq.unsqueeze(0))[0]
+    env_ids_list = env_ids.tolist()
+    eids_t = env_ids.to(dtype=torch.long)
+    cur_rp = robot.data.root_pos_w[eids_t]
+    cur_rq = robot.data.root_quat_w[eids_t]
+    cur_op = obj.data.root_pos_w[eids_t]
+    cur_oq = obj.data.root_quat_w[eids_t]
+    cur_pos = quat_apply_inverse(cur_rq, cur_op - cur_rp)
+    cur_quat = quat_multiply(quat_conjugate(cur_rq), cur_oq)
 
-        pos_d = float(torch.norm(cur_pos - target_pos[eid]).item())
-        pos_dists.append(pos_d)
+    pos_err = torch.norm(cur_pos - target_pos[eids_t], dim=-1)
+    dots = (cur_quat * target_quat[eids_t]).sum(dim=-1).abs().clamp(0.0, 1.0)
+    orn_err = 2.0 * torch.acos(dots)
+    pos_dists = pos_err.cpu().tolist()
+    orn_dists = orn_err.cpu().tolist()
 
-        dot = float(torch.abs(torch.dot(cur_quat, target_quat[eid])).clamp(0.0, 1.0).item())
-        orn_d = 2.0 * float(torch.acos(torch.tensor(dot)).item())
-        orn_dists.append(orn_d)
+    # --- Termination reason breakdown for the envs being reset ---
+    tm = getattr(env, "termination_manager", None)
+    n_drop = n_left = n_nocontact = n_timeout = 0
+    if tm is not None:
+        active = set(getattr(tm, "active_terms", []))
+        try:
+            if "object_drop" in active:
+                n_drop = int(tm.get_term("object_drop")[eids_t].sum().item())
+            if "object_left_hand" in active:
+                n_left = int(tm.get_term("object_left_hand")[eids_t].sum().item())
+            if "no_fingertip_contact" in active:
+                n_nocontact = int(tm.get_term("no_fingertip_contact")[eids_t].sum().item())
+        except Exception:
+            pass
+        # Envs that reset without any failure flag were timeouts / episode-end.
+        n_timeout = max(n - n_drop - n_left - n_nocontact, 0)
 
-    at_goal = sum(1 for o in orn_dists if o < 0.1)
-    print(f"[Goal] Reset #{_GOAL_LOG_COUNT} ({n} envs)  "
-          f"pos: {np.mean(pos_dists):.4f}m [{np.min(pos_dists):.4f}-{np.max(pos_dists):.4f}]  "
-          f"orn: {np.mean(orn_dists):.2f}rad [{np.min(orn_dists):.2f}-{np.max(orn_dists):.2f}]  "
-          f"at_goal: {at_goal}/{n}")
+    # --- Cumulative counters across training ---
+    stats = env.extras.setdefault("_reset_log_stats", {
+        "total_resets": 0,
+        "total_drops": 0,
+        "total_left_hand": 0,
+        "total_no_contact": 0,
+        "total_timeouts": 0,
+    })
+    stats["total_resets"] += n
+    stats["total_drops"] += n_drop
+    stats["total_left_hand"] += n_left
+    stats["total_no_contact"] += n_nocontact
+    stats["total_timeouts"] += n_timeout
+
+    # Rolling-goal (success) hits — accumulated by update_rolling_goal since
+    # the previous reset log line.
+    goal_window = int(env.extras.pop("_reset_log_goal_hits_window", 0))
+    goal_total = int(env.extras.get("_reset_log_goal_hits_total", 0))
+
+    drop_rate = stats["total_drops"] / max(stats["total_resets"], 1)
+    left_rate = stats["total_left_hand"] / max(stats["total_resets"], 1)
+
+    print(
+        f"[Reset #{_GOAL_LOG_COUNT}] ({n} envs) "
+        f"pos={np.mean(pos_dists):.4f}m [{np.min(pos_dists):.4f}-{np.max(pos_dists):.4f}] "
+        f"orn={np.mean(orn_dists):.2f}rad [{np.min(orn_dists):.2f}-{np.max(orn_dists):.2f}]  "
+        f"term: drop={n_drop} left={n_left} noc={n_nocontact} timeout={n_timeout}  "
+        f"goal_hits(win/total)={goal_window}/{goal_total}  "
+        f"cum_drop_rate={drop_rate:.3f}  left_rate={left_rate:.3f}"
+    )
 
 
 _world_to_local_points = world_to_local_points
