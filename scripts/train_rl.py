@@ -111,15 +111,23 @@ def apply_dr_config(env_cfg, dr_cfg: dict):
 
     noise = dr_cfg.get("obs_noise", {})
     if noise:
+        # Our Sharpa obs uses a single `temporal` term that already bakes in
+        # joint noise internally (joint_noise_scale in observations.py), so
+        # there is no separate obs.policy.joint_pos to attach a noise model
+        # to. Skip silently rather than emitting spurious warnings.
         obs = env_cfg.observations
-        if "joint_pos_std" in noise and getattr(obs.policy.joint_pos, "noise", None) is not None:
-            obs.policy.joint_pos.noise.std     = float(noise["joint_pos_std"])
-        if "joint_pos_std" in noise and getattr(obs.critic.joint_pos, "noise", None) is not None:
-            obs.critic.joint_pos.noise.std     = float(noise["joint_pos_std"])
-        if "joint_vel_std" in noise and getattr(obs.policy.joint_vel, "noise", None) is not None:
-            obs.policy.joint_vel.noise.std     = float(noise["joint_vel_std"])
-        if "joint_vel_std" in noise and getattr(obs.critic.joint_vel, "noise", None) is not None:
-            obs.critic.joint_vel.noise.std     = float(noise["joint_vel_std"])
+        for group_name in ("policy", "critic"):
+            group = getattr(obs, group_name, None)
+            if group is None:
+                continue
+            if "joint_pos_std" in noise and hasattr(group, "joint_pos"):
+                jp = getattr(group, "joint_pos")
+                if getattr(jp, "noise", None) is not None:
+                    jp.noise.std = float(noise["joint_pos_std"])
+            if "joint_vel_std" in noise and hasattr(group, "joint_vel"):
+                jv = getattr(group, "joint_vel")
+                if getattr(jv, "noise", None) is not None:
+                    jv.noise.std = float(noise["joint_vel_std"])
 
 
 def apply_env_config(env_cfg, env_cfg_dict: dict):

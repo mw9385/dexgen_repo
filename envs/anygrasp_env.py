@@ -419,8 +419,22 @@ if _ISAACLAB_AVAILABLE:
             self.sim.dt = 1.0 / 240.0
             self.sim.render_interval = self.decimation
             self.sim.gravity = (0.0, 0.0, -0.05)  # reduced gravity (sharpa default)
+
+            # --- PhysX GPU buffer sizing ---
+            # In-hand manip: ~20 rigid bodies/env, ~80 contacts/env at peak.
+            # Scale buffers gently with num_envs, with sane ceilings so we
+            # don't OOM the GPU on larger runs. Previous setting
+            # (4 * n * 1024 patches) asked for 16M patches at n=4096, which
+            # is ~1GB GPU memory just for rigid patches and caused sim
+            # startup to hang/crash on typical GPUs.
             _n = self.scene.num_envs if isinstance(self.scene.num_envs, int) else 4096
-            self.sim.physx.gpu_max_rigid_patch_count = 4 * _n * 1024
+            self.sim.physx.gpu_max_rigid_patch_count = max(163840, 256 * _n)
+            self.sim.physx.gpu_max_rigid_contact_count = max(524288, 256 * _n)
+            self.sim.physx.gpu_found_lost_pairs_capacity = max(65536, 128 * _n)
+            self.sim.physx.gpu_found_lost_aggregate_pairs_capacity = max(262144, 256 * _n)
+            self.sim.physx.gpu_total_aggregate_pairs_capacity = max(65536, 128 * _n)
+            self.sim.physx.gpu_heap_capacity = max(67108864, 16384 * _n)  # 64MB min
+            self.sim.physx.gpu_temp_buffer_capacity = max(16777216, 4096 * _n)  # 16MB min
 
             # Object pool
             _DEFAULT_POOL = [
