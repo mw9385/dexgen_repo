@@ -271,8 +271,23 @@ def main():
     print("=" * 60)
 
     # --- Env registration ---------------------------------------------
+    # We create the wrapped env ONCE and have env_creator return it directly.
+    # That way rl_games' Player reads the wrapper's flat Box(obs_dim,) space
+    # (instead of the raw ManagerBasedRLEnv Dict space) when it builds the
+    # policy network via env_configurations.get_env_info().
+    _action_mode = cfg_file.get("env", {}).get("action_mode", "absolute")
+    _delta_scale = float(cfg_file.get("env", {}).get("delta_scale", 1.0 / 24.0))
+    _actions_ma = float(cfg_file.get("env", {}).get("actions_moving_average", 1.0))
+
+    raw_env = ManagerBasedRLEnv(env_cfg)
+    wrapped_env = _EvalVecEnv(
+        raw_env, args.num_envs,
+        action_mode=_action_mode, delta_scale=_delta_scale,
+        actions_moving_average=_actions_ma,
+    )
+
     def create_env(**kwargs):
-        return ManagerBasedRLEnv(env_cfg)
+        return wrapped_env
 
     env_configurations.register(
         "rlgpu",
@@ -281,16 +296,9 @@ def main():
             "env_creator": create_env,
         },
     )
-    _action_mode = cfg_file.get("env", {}).get("action_mode", "absolute")
-    _delta_scale = float(cfg_file.get("env", {}).get("delta_scale", 1.0 / 24.0))
-    _actions_ma = float(cfg_file.get("env", {}).get("actions_moving_average", 1.0))
     vecenv.register(
         "RLGPU",
-        lambda config_name, num_actors, **kwargs: _EvalVecEnv(
-            create_env(), num_actors,
-            action_mode=_action_mode, delta_scale=_delta_scale,
-            actions_moving_average=_actions_ma,
-        ),
+        lambda config_name, num_actors, **kwargs: wrapped_env,
     )
 
     # --- Runner / play loop -------------------------------------------
@@ -304,13 +312,14 @@ def main():
     player = runner.create_player()
     player.restore(args.checkpoint)
 
-    # Our vecenv already emits batched obs (num_envs, obs_dim). Tell the
-    # Player not to add its own batch dim (otherwise a2c_network.forward
+    # Our wrapper already emits batched obs (num_envs, obs_dim). Tell the
+    # Player not to add an extra batch dim (otherwise a2c_network.forward
     # calls .flatten(1) on (1, num_envs, obs_dim) → mismatched matmul).
     player.has_batch_dimension = True
+    # Ensure Player uses our wrapped env (not a fresh raw ManagerBasedRLEnv).
+    player.env = wrapped_env
 
-    # Run episodes manually so we can collect our own metrics.
-    vec_env = player.env
+    vec_env = wrapped_env
     _run_eval_loop(
         player, vec_env,
         num_episodes=args.num_episodes,
