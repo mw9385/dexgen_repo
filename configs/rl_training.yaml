@@ -11,11 +11,12 @@ env:
   episode_length_s: 10.0
   action_scale: 1.0              # keep full normalized joint range available to the delta wrapper
   action_mode: "delta"           # accumulate normalized joint targets from the current state
-  # Sharpa uses action_scale = 1/24 at 20 Hz in its DirectRLEnv.
-  # In this repo the equivalent should be applied as a delta in normalized target space,
-  # not as the underlying Isaac Lab JointPositionToLimitsAction scale.
-  delta_scale: 0.0625            # 1/16 per control step
-  actions_moving_average: 1.0    # 1.0=no smoothing, 0.3=strong smoothing
+  # Target: OpenAI Dactyl ("Learning Dexterous In-Hand Manipulation", 2018).
+  # Dactyl runs at 12 Hz with ~1.4 rad/s sustained joint velocity, so finger
+  # full-range flex takes roughly 0.8s. At our 20 Hz control (0.05s/step),
+  # 0.8s full range → 16 steps → delta = 2/16 = 0.125 (= 1/8).
+  delta_scale: 0.125             # 1/8 per control step (matches Dactyl paper)
+  actions_moving_average: 0.4    # EMA smoothing to suppress high-frequency jitter
   decimation: 12                 # control at 20 Hz (240 Hz sim / 12), matching Sharpa default
   gravity_curriculum:
     enabled: true

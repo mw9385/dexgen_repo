@@ -414,30 +414,66 @@ class _EvalVecEnv(_IsaacLabVecEnv):
 # Metric-collecting play loop
 # ---------------------------------------------------------------------------
 
+def _compute_orn_error(env) -> torch.Tensor:
+    """Per-env object orientation error (rad) against the current target."""
+    target_quat = env.extras.get("target_object_quat_hand")
+    if target_quat is None:
+        return torch.full((env.num_envs,), float("inf"), device=env.device)
+    robot = env.scene["robot"]
+    obj = env.scene["object"]
+    root_quat = robot.data.root_quat_w
+
+    def _qc(q):
+        return torch.cat([q[..., :1], -q[..., 1:]], dim=-1)
+
+    def _qm(q1, q2):
+        w1, x1, y1, z1 = q1.unbind(-1)
+        w2, x2, y2, z2 = q2.unbind(-1)
+        return torch.stack([
+            w1*w2 - x1*x2 - y1*y2 - z1*z2,
+            w1*x2 + x1*w2 + y1*z2 - z1*y2,
+            w1*y2 - x1*z2 + y1*w2 + z1*x2,
+            w1*z2 + x1*y2 - y1*x2 + z1*w2,
+        ], dim=-1)
+
+    cur_quat = _qm(_qc(root_quat), obj.data.root_quat_w)
+    dot = (cur_quat * target_quat).sum(dim=-1).abs().clamp(0.0, 1.0)
+    return 2.0 * torch.acos(dot)
+
+
 def _run_eval_loop(player, vec_env, num_episodes: int, device: str, results_json: str | None,
-                   checkpoint_path: str = ""):
+                   checkpoint_path: str = "", goal_threshold: float = 0.4):
     """Manually drive the rl_games Player so we can collect per-episode metrics."""
     num_envs = vec_env.num_envs
+    raw_env = vec_env.env  # inner ManagerBasedRLEnv
 
     # Episode accumulators (one entry per env slot, reset on done)
     ep_reward = torch.zeros(num_envs, device=device)
     ep_length = torch.zeros(num_envs, device=device, dtype=torch.long)
-    ep_goal_updates = torch.zeros(num_envs, device=device, dtype=torch.long)
+    ep_goal_hits = torch.zeros(num_envs, device=device, dtype=torch.long)
+    ep_reached_goal = torch.zeros(num_envs, device=device, dtype=torch.bool)
+    # Track per-env goal state across steps so a sustained "at goal" segment
+    # only counts as one success (rising-edge detection).
+    was_at_goal = torch.zeros(num_envs, device=device, dtype=torch.bool)
 
     finished_rewards: list[float] = []
     finished_lengths: list[int] = []
-    finished_goal_updates: list[int] = []
+    finished_goal_hits: list[int] = []
+    finished_reached: list[bool] = []
     drop_events = 0
     left_hand_events = 0
     no_contact_events = 0
     total_steps = 0
 
     obs_dict = vec_env.reset()
-    # rl_games Player expects the raw obs tensor via its own preprocessing;
-    # we emulate get_action the same way the Player does during play.
     is_rnn = getattr(player, "is_rnn", False)
     if is_rnn and hasattr(player, "init_rnn"):
         player.init_rnn()
+
+    print("\n" + "=" * 60)
+    print(f"[Evaluate] Rolling goal threshold: {goal_threshold:.2f} rad "
+          f"(~{goal_threshold * 180 / 3.14159:.1f}°)")
+    print("=" * 60)
 
     while len(finished_rewards) < num_episodes:
         obs_tensor = obs_dict["obs"] if isinstance(obs_dict, dict) else obs_dict
@@ -448,11 +484,23 @@ def _run_eval_loop(player, vec_env, num_episodes: int, device: str, results_json
 
         ep_reward += rewards.to(device)
         ep_length += 1
-        ep_goal_updates += int(info.get("rolling_goal_updates", 0))
         total_steps += 1
 
-        # Termination ratios (fraction of envs terminating THIS step) — sum
-        # across the eval run for an aggregate event count.
+        # --- Goal success detection (rising edge of rot_dist < threshold) ---
+        orn_err = _compute_orn_error(raw_env)
+        at_goal = orn_err < goal_threshold
+        new_goal_hits = at_goal & ~was_at_goal   # rising edge this step
+        was_at_goal = at_goal
+
+        if new_goal_hits.any():
+            hit_ids = new_goal_hits.nonzero(as_tuple=False).squeeze(-1).tolist()
+            for eid in hit_ids:
+                err_deg = float(orn_err[eid].item()) * 180 / 3.14159
+                print(f"  [✓ GOAL REACHED] step={total_steps}  env={eid}  "
+                      f"err={err_deg:.1f}°  ep_len={int(ep_length[eid].item())}")
+            ep_goal_hits[new_goal_hits] += 1
+            ep_reached_goal[new_goal_hits] = True
+
         drop_events += float(info.get("drop_ratio", 0.0)) * num_envs
         left_hand_events += float(info.get("left_hand_ratio", 0.0)) * num_envs
         no_contact_events += float(info.get("no_contact_ratio", 0.0)) * num_envs
@@ -462,34 +510,53 @@ def _run_eval_loop(player, vec_env, num_episodes: int, device: str, results_json
             for i in done_ids:
                 finished_rewards.append(float(ep_reward[i].item()))
                 finished_lengths.append(int(ep_length[i].item()))
-                finished_goal_updates.append(int(ep_goal_updates[i].item()))
+                finished_goal_hits.append(int(ep_goal_hits[i].item()))
+                finished_reached.append(bool(ep_reached_goal[i].item()))
+
+                ep_idx = len(finished_rewards)
+                marker = "SUCCESS" if ep_reached_goal[i].item() else "fail   "
+                print(f"  [EP {ep_idx:4d}/{num_episodes}] env={i}  {marker}  "
+                      f"reward={ep_reward[i].item():7.2f}  "
+                      f"len={int(ep_length[i].item()):4d}  "
+                      f"goal_hits={int(ep_goal_hits[i].item())}")
+
                 ep_reward[i] = 0.0
                 ep_length[i] = 0
-                ep_goal_updates[i] = 0
+                ep_goal_hits[i] = 0
+                ep_reached_goal[i] = False
+                was_at_goal[i] = False
 
                 if len(finished_rewards) >= num_episodes:
                     break
 
             if is_rnn and hasattr(player, "reset"):
-                # rl_games Player resets RNN hidden state on episode boundaries.
                 player.reset()
 
     # Trim to exactly num_episodes (last batch may overshoot).
     finished_rewards = finished_rewards[:num_episodes]
     finished_lengths = finished_lengths[:num_episodes]
-    finished_goal_updates = finished_goal_updates[:num_episodes]
+    finished_goal_hits = finished_goal_hits[:num_episodes]
+    finished_reached = finished_reached[:num_episodes]
 
     rewards_np = np.array(finished_rewards, dtype=np.float64)
     lengths_np = np.array(finished_lengths, dtype=np.float64)
-    goals_np = np.array(finished_goal_updates, dtype=np.float64)
+    hits_np = np.array(finished_goal_hits, dtype=np.float64)
+    reached_np = np.array(finished_reached, dtype=bool)
+
+    n_success = int(reached_np.sum())
+    n_total = int(len(reached_np))
 
     summary = {
         "checkpoint": checkpoint_path,
-        "num_episodes": int(len(rewards_np)),
+        "goal_threshold_rad": float(goal_threshold),
+        "num_episodes": n_total,
+        "num_success": n_success,
+        "success_rate": float(n_success / max(n_total, 1)),
+        "mean_goal_hits_per_episode": float(hits_np.mean()) if len(hits_np) else 0.0,
+        "total_goal_hits": int(hits_np.sum()),
         "mean_reward": float(rewards_np.mean()) if len(rewards_np) else 0.0,
         "std_reward": float(rewards_np.std()) if len(rewards_np) else 0.0,
         "mean_length": float(lengths_np.mean()) if len(lengths_np) else 0.0,
-        "mean_rolling_goal_updates": float(goals_np.mean()) if len(goals_np) else 0.0,
         "drop_events": float(drop_events),
         "left_hand_events": float(left_hand_events),
         "no_contact_events": float(no_contact_events),
@@ -502,7 +569,11 @@ def _run_eval_loop(player, vec_env, num_episodes: int, device: str, results_json
     print("\n" + "=" * 60)
     print("[Evaluate] Results")
     print("=" * 60)
+    print(f"  SUCCESS RATE:  {n_success}/{n_total}  ({summary['success_rate'] * 100:.1f}%)")
+    print("-" * 60)
     for k, v in summary.items():
+        if k in ("success_rate", "num_success", "num_episodes"):
+            continue  # already printed above
         if isinstance(v, float):
             print(f"  {k:30s} {v:.4f}")
         else:
