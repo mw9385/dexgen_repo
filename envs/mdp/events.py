@@ -38,17 +38,10 @@ from .sim_utils import (
     pad_fingertip_positions,
     set_robot_joints_direct,
     expand_grasp_joint_vector,
-    sample_wrist_pose_world,
     set_robot_root_pose,
-    align_wrist_palm_down,
-    align_wrist_palm_up,
-    get_local_palm_normal,
     get_palm_body_id_from_env,
-    place_object_fixed,
-    compute_wrist_from_fingertips,
     set_adaptive_joint_pose,
     apply_palm_up_transform,
-    place_object_in_hand,
     refine_hand_to_start_grasp,
     joint_positions_to_normalized_action,
     get_fingertip_body_ids_from_env,
@@ -371,91 +364,8 @@ def reset_to_random_grasp(
         env.extras["_prev_pos_error"][env_ids] = _get_pos_error(env)[env_ids]
 
 # ---------------------------------------------------------------------------
-# Start grasp sampling + nearest-neighbor goal selection
+# Nearest-neighbor goal selection
 # ---------------------------------------------------------------------------
-
-def _sample_start_and_nn_goal(
-    graph,
-    rng: np.random.Generator,
-    object_name: Optional[str] = None,
-    env_num_fingers: int = 4,
-):
-    """
-    Sample a start grasp directly from the Stage 0 grasp_set and choose the
-    nearest-neighbor grasp in fingertip-position space as the goal.
-
-    env_num_fingers: the env's fixed finger count. Grasp fingertip_positions
-    are padded / truncated to match so all tensors have uniform shape.
-    """
-    from grasp_generation.graph_io import MultiObjectGraspGraph
-
-    if isinstance(graph, MultiObjectGraspGraph):
-        obj_name = object_name or graph.sample_object(rng)
-        g = graph.graphs[obj_name]
-    else:
-        obj_name = graph.object_name
-        g = graph
-
-    N = len(g)
-    if N == 0:
-        raise RuntimeError(
-            f"Grasp graph for '{obj_name}' has 0 grasps. "
-            f"Run scripts/run_grasp_generation.py to generate grasps first."
-        )
-    if N < 2:
-        grasp = g.grasp_set[0]
-        _pos = getattr(grasp, "object_pos_hand", None)
-        _quat = getattr(grasp, "object_quat_hand", None)
-        _ja = getattr(grasp, "joint_angles", None)
-        _fps = pad_fingertip_positions(grasp.fingertip_positions.copy(), env_num_fingers)
-        return (
-            obj_name, _fps, _fps,
-            _ja,
-            _pos.copy() if _pos is not None else None,
-            _quat.copy() if _quat is not None else None,
-            getattr(grasp, "object_pose_frame", None),
-            _ja,
-            _pos.copy() if _pos is not None else None,
-            _quat.copy() if _quat is not None else None,
-            getattr(grasp, "object_pose_frame", None),
-            0, 0,
-        )
-
-    start_idx = int(rng.integers(0, N))
-    start_grasp = g.grasp_set[start_idx]
-    cur_min_orn = getattr(graph, "_curriculum_min_orn", 0.15)
-    goal_idx = _sample_nearby_goal_index(
-        g, start_idx, rng, min_orn=cur_min_orn, num_fingers=env_num_fingers,
-    )
-    goal_grasp = g.grasp_set[goal_idx]
-
-    start_fps = pad_fingertip_positions(start_grasp.fingertip_positions.copy(), env_num_fingers)
-    goal_fps = pad_fingertip_positions(goal_grasp.fingertip_positions.copy(), env_num_fingers)
-
-    start_joints = getattr(start_grasp, "joint_angles", None)
-    start_object_pos_hand = getattr(start_grasp, "object_pos_hand", None)
-    start_object_quat_hand = getattr(start_grasp, "object_quat_hand", None)
-    start_object_pose_frame = getattr(start_grasp, "object_pose_frame", None)
-    goal_joints = getattr(goal_grasp, "joint_angles", None)
-    goal_object_pos_hand = getattr(goal_grasp, "object_pos_hand", None)
-    goal_object_quat_hand = getattr(goal_grasp, "object_quat_hand", None)
-    goal_object_pose_frame = getattr(goal_grasp, "object_pose_frame", None)
-
-    return (
-        obj_name,
-        start_fps,
-        goal_fps,
-        start_joints,
-        start_object_pos_hand.copy() if start_object_pos_hand is not None else None,
-        start_object_quat_hand.copy() if start_object_quat_hand is not None else None,
-        start_object_pose_frame,
-        goal_joints,
-        goal_object_pos_hand.copy() if goal_object_pos_hand is not None else None,
-        goal_object_quat_hand.copy() if goal_object_quat_hand is not None else None,
-        goal_object_pose_frame,
-        int(start_idx),
-        int(goal_idx),
-    )
 
 def _sample_nearby_goal_index(
     graph, start_idx: int, rng: np.random.Generator,
@@ -1056,27 +966,4 @@ def _log_goal_distances(env, env_ids: torch.Tensor):
           f"at_goal: {at_goal}/{n}")
 
 
-# ---------------------------------------------------------------------------
-# Backwards-compatibility re-exports (for scripts that import from events.py)
-# ---------------------------------------------------------------------------
-_pad_fingertip_positions = pad_fingertip_positions
-_set_robot_joints_direct = set_robot_joints_direct
-_expand_grasp_joint_vector = expand_grasp_joint_vector
-_sample_wrist_pose_world = sample_wrist_pose_world
-_set_robot_root_pose = set_robot_root_pose
-_align_wrist_palm_up = align_wrist_palm_up
-_align_wrist_palm_down = align_wrist_palm_down
-_get_local_palm_normal = get_local_palm_normal
-_get_palm_body_id_from_env = get_palm_body_id_from_env
-_place_object_fixed = place_object_fixed
-_compute_wrist_from_fingertips = compute_wrist_from_fingertips
-_set_adaptive_joint_pose = set_adaptive_joint_pose
-_apply_palm_up_transform = apply_palm_up_transform
-_place_object_in_hand = place_object_in_hand
-_refine_hand_to_start_grasp = refine_hand_to_start_grasp
-_joint_positions_to_normalized_action = joint_positions_to_normalized_action
-_get_fingertip_body_ids_from_env = get_fingertip_body_ids_from_env
-_quat_multiply = quat_multiply
-_quat_conjugate = quat_conjugate
-_local_to_world_points = local_to_world_points
 _world_to_local_points = world_to_local_points

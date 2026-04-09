@@ -286,7 +286,9 @@ if _ISAACLAB_AVAILABLE:
 
 
 # ---------------------------------------------------------------------------
-# Observation groups — 101 dims (symmetric actor-critic)
+# Observation groups — 199 dims (sharpa temporal + target info)
+# 192 = 64×3 temporal (joint_pos + targets + tactile + contact_pos)
+# + 7 = target_obj_pos(3) + target_obj_quat(4)
 # ---------------------------------------------------------------------------
 
 if _ISAACLAB_AVAILABLE:
@@ -294,16 +296,11 @@ if _ISAACLAB_AVAILABLE:
     class AnyGraspObservationsCfg:
         @configclass
         class PolicyObs(ObsGroup):
-            joint_pos = ObsTerm(func=mdp_obs.joint_positions_normalized, noise=Gnoise(std=0.0))
-            joint_vel = ObsTerm(func=mdp_obs.joint_velocities_normalized, noise=Gnoise(std=0.0))
-            object_pos = ObsTerm(func=mdp_obs.object_pos_in_hand_frame)
-            object_quat = ObsTerm(func=mdp_obs.object_quat_in_hand_frame)
+            # 192-dim: sharpa 3-step temporal (joint_pos + targets + tactile)
+            temporal = ObsTerm(func=mdp_obs.sharpa_observation_temporal)
+            # 7-dim: DexGen target info (non-temporal)
             target_obj_pos = ObsTerm(func=mdp_obs.target_object_pos_in_hand_frame)
             target_obj_quat = ObsTerm(func=mdp_obs.target_object_quat_in_hand_frame)
-            object_linvel = ObsTerm(func=mdp_obs.object_lin_vel_hand_frame)
-            object_angvel = ObsTerm(func=mdp_obs.object_ang_vel_hand_frame)
-            contact_forces = ObsTerm(func=mdp_obs.fingertip_contact_forces)
-            last_action = ObsTerm(func=mdp_obs.last_action)
 
             def __post_init__(self):
                 self.enable_corruption = True
@@ -311,16 +308,9 @@ if _ISAACLAB_AVAILABLE:
 
         @configclass
         class CriticObs(ObsGroup):
-            joint_pos = ObsTerm(func=mdp_obs.joint_positions_normalized, noise=Gnoise(std=0.0))
-            joint_vel = ObsTerm(func=mdp_obs.joint_velocities_normalized, noise=Gnoise(std=0.0))
-            object_pos = ObsTerm(func=mdp_obs.object_pos_in_hand_frame)
-            object_quat = ObsTerm(func=mdp_obs.object_quat_in_hand_frame)
+            temporal = ObsTerm(func=mdp_obs.sharpa_observation_temporal)
             target_obj_pos = ObsTerm(func=mdp_obs.target_object_pos_in_hand_frame)
             target_obj_quat = ObsTerm(func=mdp_obs.target_object_quat_in_hand_frame)
-            object_linvel = ObsTerm(func=mdp_obs.object_lin_vel_hand_frame)
-            object_angvel = ObsTerm(func=mdp_obs.object_ang_vel_hand_frame)
-            contact_forces = ObsTerm(func=mdp_obs.fingertip_contact_forces)
-            last_action = ObsTerm(func=mdp_obs.last_action)
 
             def __post_init__(self):
                 self.enable_corruption = True
