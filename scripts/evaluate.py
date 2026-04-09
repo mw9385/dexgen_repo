@@ -1,0 +1,505 @@
+"""
+Policy Evaluation
+=================
+Evaluates a trained AnyGrasp-to-AnyGrasp checkpoint (from `train_rl.py`)
+on the Isaac Lab environment using rl_games' play loop.
+
+Reports per-episode success metrics:
+    - mean episode reward
+    - mean episode length
+    - drop / left-hand / no-contact termination ratios
+    - rolling-goal updates per step (success rate)
+
+Usage:
+    python scripts/evaluate.py \
+        --grasp_graph data/sharpa_grasp_cube_050.npy \
+        --checkpoint  logs/rl/sharpa_anygrasp_v1/nn/DexGen-AnyGrasp-Sharpa.pth \
+        --num_envs    16 \
+        --num_episodes 50
+
+    # Headless
+    python scripts/evaluate.py \
+        --grasp_graph data/sharpa_grasp_cube_050.npy \
+        --checkpoint  logs/rl/sharpa_anygrasp_v1/nn/last.pth \
+        --headless
+"""
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+import numpy as np
+import torch
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent))  # for `import train_rl`
+
+from isaaclab.app import AppLauncher
+from grasp_generation.graph_io import MultiObjectGraspGraph, load_merged_graph, parse_graph_paths
+
+# Reuse helpers from train_rl.py so behaviour matches 1:1.
+from train_rl import (  # noqa: E402
+    _IsaacLabVecEnv,
+    _build_network_config,
+    _to_rl_obs,
+    apply_dr_config,
+    apply_env_config,
+    load_config,
+)
+
+
+def parse_args():
+    p = argparse.ArgumentParser(description="DexGen Stage 1: Policy Evaluation")
+    p.add_argument(
+        "--grasp_graph",
+        action="append",
+        default=None,
+        help="Grasp graph path(s). Repeat flag or use comma-separated values.",
+    )
+    p.add_argument("--checkpoint", type=str, required=True,
+                   help="Checkpoint file (.pth) produced by train_rl.py")
+    p.add_argument("--num_envs", type=int, default=16,
+                   help="Parallel environments to run during evaluation")
+    p.add_argument("--num_episodes", type=int, default=50,
+                   help="Total number of episodes to evaluate")
+    p.add_argument("--deterministic", action="store_true", default=True,
+                   help="Use deterministic actions (mean of policy distribution)")
+    p.add_argument("--stochastic", dest="deterministic", action="store_false",
+                   help="Sample stochastic actions from the policy")
+    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--config", type=str,
+                   default=str(Path(__file__).parent.parent / "configs" / "rl_training.yaml"),
+                   help="Path to YAML config (env / ppo settings)")
+    p.add_argument("--results_json", type=str, default=None,
+                   help="Optional JSON output path for the evaluation summary")
+
+    AppLauncher.add_app_launcher_args(p)
+    args = p.parse_args()
+    if args.grasp_graph is None:
+        args.grasp_graph = ["data/sharpa_grasp_cube_050.npy"]
+    return args
+
+
+def _resolve_grasp_graph_arg(args) -> list[str]:
+    graph_paths = parse_graph_paths(args.grasp_graph)
+    if not graph_paths:
+        raise ValueError("At least one --grasp_graph path is required.")
+    return graph_paths
+
+
+def build_eval_rl_games_config(args, cfg_file: dict) -> dict:
+    """Minimal rl_games config for play mode (no training bells & whistles)."""
+    ppo_cfg = cfg_file.get("ppo", {})
+
+    return {
+        "params": {
+            "seed": args.seed,
+            "algo": {"name": "a2c_continuous"},
+            "model": {"name": "continuous_a2c_logstd"},
+            "network": _build_network_config(ppo_cfg),
+            "load_checkpoint": True,
+            "load_path": args.checkpoint,
+            "config": {
+                "name": "DexGen-AnyGrasp-Sharpa-Eval",
+                "env_name": "rlgpu",
+                "device": args.device,
+                "device_name": args.device,
+                "multi_gpu": False,
+                "ppo": True,
+                "mixed_precision": False,
+                "normalize_input": True,
+                "normalize_value": True,
+                "num_actors": args.num_envs,
+                "reward_shaper": {
+                    "scale_value": float(ppo_cfg.get("reward_shaper_scale", 0.1)),
+                },
+                "normalize_advantage": True,
+                "gamma": 0.99,
+                "tau": 0.95,
+                "learning_rate": float(ppo_cfg.get("learning_rate", 5e-4)),
+                "score_to_win": 20000,
+                "max_epochs": 1,
+                "save_best_after": 1_000_000,
+                "save_frequency": 1_000_000,
+                "print_stats": False,
+                "grad_norm": 1.0,
+                "entropy_coef": 0.0,
+                "truncate_grads": True,
+                "e_clip": 0.2,
+                "horizon_length": int(ppo_cfg.get("horizon_length", 16)),
+                "num_steps_per_env": int(ppo_cfg.get("horizon_length", 16)),
+                "mini_epochs": 1,
+                "minibatch_size": max(args.num_envs, 1),
+                "critic_coef": 4,
+                "clip_value": True,
+                "seq_length": int(ppo_cfg.get("seq_length", 4)),
+                "bounds_loss_coef": 0.005,
+                "use_central_value": False,
+                # Force Player to use the registered vecenv (our _EvalVecEnv).
+                "player": {
+                    "render": False,
+                    "deterministic": bool(args.deterministic),
+                    "games_num": int(args.num_episodes),
+                    "print_stats": True,
+                    "use_vecenv": True,
+                },
+            },
+        }
+    }
+
+
+def main():
+    args = parse_args()
+
+    if not Path(args.checkpoint).exists():
+        print(f"ERROR: checkpoint not found: {args.checkpoint}")
+        sys.exit(1)
+
+    app_launcher = AppLauncher(args)
+    sim_app = app_launcher.app
+
+    try:
+        import carb as _carb
+        _cs = _carb.settings.get_settings()
+        if not _cs.get("/persistent/isaac/asset_root/cloud"):
+            _cs.set(
+                "/persistent/isaac/asset_root/cloud",
+                "https://omniverse-content-production.s3-us-west-2.amazonaws.com"
+                "/Assets/Isaac/5.0",
+            )
+    except Exception as _e:
+        print(f"[evaluate] WARNING: could not set carb asset root: {_e}")
+
+    try:
+        import isaaclab  # noqa: F401
+    except ImportError:
+        print("ERROR: Isaac Lab not found.")
+        sim_app.close()
+        sys.exit(1)
+
+    try:
+        import rl_games  # noqa: F401
+    except ImportError:
+        print("ERROR: rl_games not found. Run: pip install rl_games")
+        sim_app.close()
+        sys.exit(1)
+
+    from isaaclab.envs import ManagerBasedRLEnv
+    from rl_games.common import env_configurations, vecenv
+    from rl_games.torch_runner import Runner
+
+    from envs import AnyGraspEnvCfg, register_anygrasp_env
+
+    register_anygrasp_env()
+
+    # --- Grasp graph ---------------------------------------------------
+    grasp_graph_paths = _resolve_grasp_graph_arg(args)
+    missing = [p for p in grasp_graph_paths if not Path(p).exists()]
+    if missing:
+        print(f"ERROR: GraspGraph not found at {missing}")
+        sim_app.close()
+        sys.exit(1)
+
+    cfg_file = load_config(args.config)
+    merged_graph = load_merged_graph(grasp_graph_paths)
+
+    # --- Env config ----------------------------------------------------
+    env_cfg = AnyGraspEnvCfg()
+    env_cfg.scene.num_envs = args.num_envs
+    env_cfg.grasp_graph_path = grasp_graph_paths
+    if getattr(args, "headless", False):
+        env_cfg.viewer = None
+
+    try:
+        if isinstance(merged_graph, MultiObjectGraspGraph) and merged_graph.object_specs:
+            _specs = list(merged_graph.object_specs.values())
+            from envs.anygrasp_env import _build_object_spawner
+            env_cfg.scene.object = env_cfg.scene.object.replace(
+                spawn=_build_object_spawner(_specs)
+            )
+            print(f"[Evaluate] Loaded {len(_specs)} object spec(s) from grasp graph.")
+
+        graph_num_fingers = getattr(merged_graph, "num_fingers", None)
+        if graph_num_fingers is None and isinstance(merged_graph, MultiObjectGraspGraph) and merged_graph.graphs:
+            first_graph = next(iter(merged_graph.graphs.values()))
+            graph_num_fingers = getattr(first_graph, "num_fingers", None)
+        if graph_num_fingers is not None:
+            graph_num_fingers = int(graph_num_fingers)
+            tip_subsets = {
+                2: ["right_thumb_fingertip", "right_index_fingertip"],
+                3: ["right_thumb_fingertip", "right_index_fingertip", "right_middle_fingertip"],
+                4: ["right_thumb_fingertip", "right_index_fingertip", "right_middle_fingertip", "right_ring_fingertip"],
+                5: ["right_thumb_fingertip", "right_index_fingertip", "right_middle_fingertip", "right_ring_fingertip", "right_pinky_fingertip"],
+            }
+            env_cfg.hand = dict(getattr(env_cfg, "hand", {}) or {})
+            env_cfg.hand["num_fingers"] = graph_num_fingers
+            env_cfg.hand["fingertip_links"] = tip_subsets.get(
+                graph_num_fingers,
+                tip_subsets[5][:graph_num_fingers],
+            )
+    except Exception as _e:
+        print(f"[Evaluate] WARNING: could not load object specs from graph: {_e}")
+
+    try:
+        apply_env_config(env_cfg, cfg_file.get("env", {}))
+    except Exception as _e:
+        print(f"[WARNING] apply_env_config failed: {_e}")
+    try:
+        apply_dr_config(env_cfg, cfg_file.get("domain_randomization", {}))
+    except Exception as _e:
+        print(f"[WARNING] apply_dr_config failed: {_e}")
+
+    # Freeze curriculum for evaluation: use the final-curriculum values.
+    # We set min_orn and gravity to the end-of-curriculum targets so that
+    # the policy is graded at the hardest setting the curriculum reaches.
+    gc = dict(getattr(env_cfg, "gravity_curriculum", {}) or {})
+    if gc.get("enabled"):
+        env_cfg.gravity_curriculum = {**gc, "enabled": False}
+        final_g = float(gc.get("end_gravity", 9.81))
+        env_cfg.sim.gravity = (0.0, 0.0, -final_g)
+
+    print("=" * 60)
+    print(f"[Evaluate] Task: DexGen-AnyGrasp-Sharpa-v0")
+    print(f"[Evaluate] Checkpoint:   {args.checkpoint}")
+    print(f"[Evaluate] Grasp graph:  {', '.join(grasp_graph_paths)}")
+    print(f"[Evaluate] Num envs:     {args.num_envs}")
+    print(f"[Evaluate] Num episodes: {args.num_episodes}")
+    print(f"[Evaluate] Deterministic:{args.deterministic}")
+    print("=" * 60)
+
+    # --- Env registration ---------------------------------------------
+    def create_env(**kwargs):
+        return ManagerBasedRLEnv(env_cfg)
+
+    env_configurations.register(
+        "rlgpu",
+        {
+            "vecenv_type": "RLGPU",
+            "env_creator": create_env,
+        },
+    )
+    _action_mode = cfg_file.get("env", {}).get("action_mode", "absolute")
+    _delta_scale = float(cfg_file.get("env", {}).get("delta_scale", 1.0 / 24.0))
+    _actions_ma = float(cfg_file.get("env", {}).get("actions_moving_average", 1.0))
+    vecenv.register(
+        "RLGPU",
+        lambda config_name, num_actors, **kwargs: _EvalVecEnv(
+            create_env(), num_actors,
+            action_mode=_action_mode, delta_scale=_delta_scale,
+            actions_moving_average=_actions_ma,
+        ),
+    )
+
+    # --- Runner / play loop -------------------------------------------
+    cfg = build_eval_rl_games_config(args, cfg_file)
+
+    runner = Runner()
+    runner.load(cfg)
+    runner.reset()
+
+    # rl_games "play" path instantiates a Player that loads the checkpoint.
+    player = runner.create_player()
+    player.restore(args.checkpoint)
+
+    # Run episodes manually so we can collect our own metrics.
+    vec_env = player.env
+    _run_eval_loop(
+        player, vec_env,
+        num_episodes=args.num_episodes,
+        device=args.device,
+        results_json=args.results_json,
+        checkpoint_path=str(Path(args.checkpoint).resolve()),
+    )
+
+    sim_app.close()
+
+
+# ---------------------------------------------------------------------------
+# Evaluation-only vector env wrapper
+# ---------------------------------------------------------------------------
+
+class _EvalVecEnv(_IsaacLabVecEnv):
+    """Same wrapper used in train_rl.py, but without curriculum updates."""
+
+    def step(self, actions):
+        # Identical to _IsaacLabVecEnv.step, but without touching curriculum.
+        extras = self.env.extras
+        if "current_action" in extras:
+            extras["last_action"] = extras["current_action"].clone()
+        else:
+            extras["last_action"] = actions.clone()
+        extras["current_action"] = actions.clone()
+
+        if self._action_mode == "delta":
+            if self._joint_target is None:
+                self._joint_target = torch.zeros_like(actions)
+            if self._prev_actions is None:
+                self._prev_actions = torch.zeros_like(actions)
+            alpha = self._actions_moving_average
+            smoothed = alpha * actions + (1.0 - alpha) * self._prev_actions
+            self._prev_actions = smoothed.clone()
+            self._joint_target = (self._joint_target + self._delta_scale * smoothed).clamp(-1.0, 1.0)
+            env_actions = self._joint_target
+        else:
+            env_actions = actions
+
+        from envs.mdp.domain_rand import apply_action_delay
+        delayed_actions = apply_action_delay(self.env, env_actions)
+
+        obs, rew, terminated, truncated, info = self.env.step(delayed_actions)
+        done = terminated | truncated
+
+        if self._action_mode == "delta" and done.any():
+            done_ids = done.nonzero(as_tuple=False).squeeze(-1)
+            robot = self.env.scene["robot"]
+            cur_q = robot.data.joint_pos[done_ids]
+            soft_lower = robot.data.soft_joint_pos_limits[done_ids, :, 0]
+            soft_upper = robot.data.soft_joint_pos_limits[done_ids, :, 1]
+            mid = (soft_upper + soft_lower) * 0.5
+            rng = (soft_upper - soft_lower) * 0.5
+            rng = rng.clamp(min=1e-6)
+            norm_q = ((cur_q - mid) / rng).clamp(-1.0, 1.0)
+            num_dof = self._joint_target.shape[-1]
+            if norm_q.shape[-1] > num_dof:
+                norm_q = norm_q[:, -num_dof:]
+            self._joint_target[done_ids] = norm_q
+            self._prev_actions[done_ids] = 0.0
+
+        from envs.mdp import events as mdp_events
+
+        n_updated = mdp_events.update_rolling_goal(self.env)
+        self.env._last_rolling_goal_updates = n_updated
+
+        info = dict(info) if isinstance(info, dict) else {}
+        info["rolling_goal_updates"] = n_updated
+
+        term_manager = getattr(self.env, "termination_manager", None)
+        drop_ratio = 0.0
+        left_hand_ratio = 0.0
+        no_contact_ratio = 0.0
+        if term_manager is not None:
+            active = set(getattr(term_manager, "active_terms", []))
+            if "object_drop" in active:
+                drop_ratio = float(term_manager.get_term("object_drop").float().mean().item())
+            if "object_left_hand" in active:
+                left_hand_ratio = float(term_manager.get_term("object_left_hand").float().mean().item())
+            if "no_fingertip_contact" in active:
+                no_contact_ratio = float(term_manager.get_term("no_fingertip_contact").float().mean().item())
+
+        info["drop_ratio"] = drop_ratio
+        info["left_hand_ratio"] = left_hand_ratio
+        info["no_contact_ratio"] = no_contact_ratio
+
+        return _to_rl_obs(obs), rew, done, info
+
+
+# ---------------------------------------------------------------------------
+# Metric-collecting play loop
+# ---------------------------------------------------------------------------
+
+def _run_eval_loop(player, vec_env, num_episodes: int, device: str, results_json: str | None,
+                   checkpoint_path: str = ""):
+    """Manually drive the rl_games Player so we can collect per-episode metrics."""
+    num_envs = vec_env.num_envs
+
+    # Episode accumulators (one entry per env slot, reset on done)
+    ep_reward = torch.zeros(num_envs, device=device)
+    ep_length = torch.zeros(num_envs, device=device, dtype=torch.long)
+    ep_goal_updates = torch.zeros(num_envs, device=device, dtype=torch.long)
+
+    finished_rewards: list[float] = []
+    finished_lengths: list[int] = []
+    finished_goal_updates: list[int] = []
+    drop_events = 0
+    left_hand_events = 0
+    no_contact_events = 0
+    total_steps = 0
+
+    obs_dict = vec_env.reset()
+    # rl_games Player expects the raw obs tensor via its own preprocessing;
+    # we emulate get_action the same way the Player does during play.
+    is_rnn = getattr(player, "is_rnn", False)
+    if is_rnn and hasattr(player, "init_rnn"):
+        player.init_rnn()
+
+    while len(finished_rewards) < num_episodes:
+        obs_tensor = obs_dict["obs"] if isinstance(obs_dict, dict) else obs_dict
+        with torch.no_grad():
+            action = player.get_action(obs_tensor, is_deterministic=player.is_deterministic)
+
+        obs_dict, rewards, dones, info = vec_env.step(action)
+
+        ep_reward += rewards.to(device)
+        ep_length += 1
+        ep_goal_updates += int(info.get("rolling_goal_updates", 0))
+        total_steps += 1
+
+        # Termination ratios (fraction of envs terminating THIS step) — sum
+        # across the eval run for an aggregate event count.
+        drop_events += float(info.get("drop_ratio", 0.0)) * num_envs
+        left_hand_events += float(info.get("left_hand_ratio", 0.0)) * num_envs
+        no_contact_events += float(info.get("no_contact_ratio", 0.0)) * num_envs
+
+        if dones.any():
+            done_ids = dones.nonzero(as_tuple=False).squeeze(-1).tolist()
+            for i in done_ids:
+                finished_rewards.append(float(ep_reward[i].item()))
+                finished_lengths.append(int(ep_length[i].item()))
+                finished_goal_updates.append(int(ep_goal_updates[i].item()))
+                ep_reward[i] = 0.0
+                ep_length[i] = 0
+                ep_goal_updates[i] = 0
+
+                if len(finished_rewards) >= num_episodes:
+                    break
+
+            if is_rnn and hasattr(player, "reset"):
+                # rl_games Player resets RNN hidden state on episode boundaries.
+                player.reset()
+
+    # Trim to exactly num_episodes (last batch may overshoot).
+    finished_rewards = finished_rewards[:num_episodes]
+    finished_lengths = finished_lengths[:num_episodes]
+    finished_goal_updates = finished_goal_updates[:num_episodes]
+
+    rewards_np = np.array(finished_rewards, dtype=np.float64)
+    lengths_np = np.array(finished_lengths, dtype=np.float64)
+    goals_np = np.array(finished_goal_updates, dtype=np.float64)
+
+    summary = {
+        "checkpoint": checkpoint_path,
+        "num_episodes": int(len(rewards_np)),
+        "mean_reward": float(rewards_np.mean()) if len(rewards_np) else 0.0,
+        "std_reward": float(rewards_np.std()) if len(rewards_np) else 0.0,
+        "mean_length": float(lengths_np.mean()) if len(lengths_np) else 0.0,
+        "mean_rolling_goal_updates": float(goals_np.mean()) if len(goals_np) else 0.0,
+        "drop_events": float(drop_events),
+        "left_hand_events": float(left_hand_events),
+        "no_contact_events": float(no_contact_events),
+        "total_steps": int(total_steps),
+        "drop_rate_per_step": float(drop_events / max(total_steps * num_envs, 1)),
+        "left_hand_rate_per_step": float(left_hand_events / max(total_steps * num_envs, 1)),
+        "no_contact_rate_per_step": float(no_contact_events / max(total_steps * num_envs, 1)),
+    }
+
+    print("\n" + "=" * 60)
+    print("[Evaluate] Results")
+    print("=" * 60)
+    for k, v in summary.items():
+        if isinstance(v, float):
+            print(f"  {k:30s} {v:.4f}")
+        else:
+            print(f"  {k:30s} {v}")
+    print("=" * 60)
+
+    if results_json:
+        out_path = Path(results_json)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(out_path, "w") as f:
+            json.dump(summary, f, indent=2)
+        print(f"[Evaluate] Saved results to {out_path}")
+
+
+if __name__ == "__main__":
+    main()
