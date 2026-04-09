@@ -339,26 +339,47 @@ if _ISAACLAB_AVAILABLE:
 
 
 # ---------------------------------------------------------------------------
-# Reward configuration (DexGen reward — unchanged)
+# Reward configuration (OpenAI in-hand manipulation style)
 # ---------------------------------------------------------------------------
 
 if _ISAACLAB_AVAILABLE:
     @configclass
     class AnyGraspRewardsCfg:
-        object_orientation = RewTerm(
+        # r_t = d_t - d_{t+1} (rotation distance reduction)
+        orientation_delta = RewTerm(
             func=mdp_rewards.orientation_delta_reward,
-            weight=100.0,
+            weight=1.0,
             params={},
         )
+        # 1/(|rot_dist| + eps) (inverse rotation distance, IsaacGymEnvs style)
+        rotation_distance = RewTerm(
+            func=mdp_rewards.rotation_distance_reward,
+            weight=1.0,
+            params={"rot_eps": 0.1, "scale": 1.0},
+        )
+        # -pos_dist (keep object near target position)
+        position_distance = RewTerm(
+            func=mdp_rewards.position_distance_reward,
+            weight=0.5,
+            params={"scale": 1.0},
+        )
+        # +5 when goal achieved (rot_dist < 0.4 rad, OpenAI)
         goal_bonus = RewTerm(
             func=mdp_rewards.goal_bonus,
-            weight=5.0,
-            params={"rot_thresh": 0.1},
+            weight=1.0,
+            params={"rot_thresh": 0.4, "bonus": 5.0},
         )
+        # -20 when object dropped (OpenAI)
         drop = RewTerm(
             func=mdp_rewards.drop_penalty,
-            weight=20.0,
-            params={},
+            weight=1.0,
+            params={"penalty": -20.0},
+        )
+        # -sum(a²) action regularization
+        action = RewTerm(
+            func=mdp_rewards.action_penalty,
+            weight=0.01,
+            params={"scale": 1.0},
         )
 
 
