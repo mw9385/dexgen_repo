@@ -16,7 +16,7 @@ env:
   # full-range flex takes roughly 0.8s. At our 20 Hz control (0.05s/step),
   # 0.8s full range → 16 steps → delta = 2/16 = 0.125 (= 1/8).
   delta_scale: 0.125             # 1/8 per control step (matches Dactyl paper)
-  actions_moving_average: 0.4    # EMA smoothing to suppress high-frequency jitter
+  actions_moving_average: 1.0    # no smoothing — delta mode already accumulates gradually
   decimation: 12                 # control at 20 Hz (240 Hz sim / 12), matching Sharpa default
   gravity_curriculum:
     enabled: true

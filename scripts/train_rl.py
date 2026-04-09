@@ -62,9 +62,17 @@ def parse_args():
         args.grasp_graph = ["data/sharpa_grasp_cube_050.npy"]
     cfg = load_config(args.config)
     if args.log_dir is None:
-        base = cfg.get("logging", {}).get("log_dir", "logs/rl/sharpa_anygrasp_v1")
-        stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        args.log_dir = str(Path(base) / stamp)
+        if args.resume:
+            # Reuse the run directory the checkpoint was saved in so that
+            # tensorboard continues in the same experiment instead of
+            # spawning a parallel one. Checkpoint layout is
+            #   <run_dir>/nn/<file>.pth
+            resume_path = Path(args.resume).resolve()
+            args.log_dir = str(resume_path.parent.parent)
+        else:
+            base = cfg.get("logging", {}).get("log_dir", "logs/rl/sharpa_anygrasp_v1")
+            stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            args.log_dir = str(Path(base) / stamp)
     return args
 
 
@@ -551,6 +559,25 @@ def main():
     class _CompactIsaacAlgoObserver(IsaacAlgoObserver):
         _writer_wrapped = False
 
+        def after_init(self, algo):
+            # rl_games calls this AFTER the algo is built and AFTER the
+            # checkpoint (if any) has been restored. This is the only
+            # reliable place to read the restored epoch_num and seed the
+            # curriculum before the first rollout runs.
+            super().after_init(algo)
+            epoch = int(getattr(algo, "epoch_num", 0) or 0)
+            frame = int(getattr(algo, "frame", 0) or 0)
+            if epoch > 0 or frame > 0:
+                print(f"[Stage 1] Resumed: epoch_num={epoch}  frame={frame}")
+            try:
+                from envs.mdp import events as mdp_events
+                mdp_events.update_curriculum(
+                    algo.vec_env.env, epoch, _max_iters,
+                )
+                print(f"[Stage 1] Curriculum applied for epoch {epoch}")
+            except Exception as _e:
+                print(f"[Stage 1] WARNING: could not apply curriculum in after_init: {_e}")
+
         def after_print_stats(self, frame, epoch_num, total_time):
             # Wrap the writer once on first callback to filter redundant metrics
             if not self._writer_wrapped and hasattr(self, "writer"):
@@ -615,37 +642,18 @@ def main():
     runner.load(cfg)
     runner.reset()
 
-    # When resuming, ensure epoch_num is restored from checkpoint.
-    # rl_games normally restores this in A2CBase.restore(), but verify
-    # and log it so we can confirm tensorboard step continuity.
-    if args.resume and hasattr(runner, "algo"):
-        epoch = getattr(runner.algo, "epoch_num", 0)
-        frame = getattr(runner.algo, "frame", 0)
-        print(f"[Stage 1] Resumed: epoch_num={epoch}, frame={frame}")
-        if epoch == 0:
-            # Fallback: try to extract from checkpoint filename (e.g. model_5000.pth)
-            import re
-            m = re.search(r'(\d+)', Path(args.resume).stem)
-            if m:
-                epoch = int(m.group(1))
-                runner.algo.epoch_num = epoch
-                runner.algo.frame = epoch * args.num_envs * ppo_runtime_cfg["horizon_length"]
-                print(f"[Stage 1] Fallback epoch from filename: {epoch}")
+    # rl_games Runner.run_train() restores a checkpoint by reading
+    #   _restore(agent, args): if args.get('checkpoint'): agent.restore(...)
+    # so we MUST pass the checkpoint path through runner.run(args), not
+    # just via load_path / load_checkpoint in the yaml-style config (those
+    # are ignored by current rl_games). Without this, --resume silently
+    # started training from random weights.
+    run_args = {"train": True}
+    if args.resume:
+        run_args["checkpoint"] = args.resume
+        print(f"[Stage 1] Will restore checkpoint: {args.resume}")
 
-        # Apply the curriculum for the restored epoch BEFORE the first
-        # training step. Otherwise the first resumed epoch runs with the
-        # env's initial physics (gravity=0.05, min_orn=0.50) which breaks
-        # policy behaviour when resuming from a late checkpoint.
-        try:
-            from envs.mdp import events as mdp_events
-            mdp_events.update_curriculum(
-                runner.algo.vec_env.env, epoch, _max_iters,
-            )
-            print(f"[Stage 1] Curriculum pre-applied for resumed epoch {epoch}")
-        except Exception as _e:
-            print(f"[Stage 1] WARNING: could not pre-apply curriculum on resume: {_e}")
-
-    runner.run({"train": True})
+    runner.run(run_args)
 
     print(f"\n=== Stage 1 Complete ===")
     print(f"Checkpoints saved to: {args.log_dir}")
