@@ -157,7 +157,7 @@ def reset_to_random_grasp(
         batch_size = len(env_indices)
         # Batch random start indices
         starts = rng.integers(0, N_grasps, size=batch_size)
-        cur_min_orn = getattr(graph, "_curriculum_min_orn", 0.15)
+        cur_min_orn = getattr(graph, "_curriculum_min_orn", 0.50)
         # Batch goal selection
         for j, local_i in enumerate(env_indices):
             start_idx_list[local_i] = int(starts[j])
@@ -369,7 +369,7 @@ def reset_to_random_grasp(
 
 def _sample_nearby_goal_index(
     graph, start_idx: int, rng: np.random.Generator,
-    top_k: int = 5, min_orn: float = 0.15,
+    top_k: int = 5, min_orn: float = 0.50,
     max_pos: float = 0.05,
     num_fingers: int = 5,
 ) -> int:
@@ -511,8 +511,8 @@ def update_curriculum(env, epoch: int, total_epochs: int = 10000):
         return
     warmup_epochs = int(total_epochs * 0.3)
     t = min(epoch / max(warmup_epochs, 1), 1.0)
-    min_orn_start = 0.15
-    min_orn_end = 0.50
+    min_orn_start = 0.50
+    min_orn_end = 1.50
     graph._curriculum_min_orn = min_orn_start + t * (min_orn_end - min_orn_start)
 
     gravity_cfg = dict((getattr(env.cfg, "gravity_curriculum", None) or {}))
@@ -542,13 +542,13 @@ def update_curriculum(env, epoch: int, total_epochs: int = 10000):
 
 def update_rolling_goal(
     env,
-    rot_threshold: float = 0.1,
+    rot_threshold: float = 0.4,
 ) -> int:
     """
     Called every step. For each env where the orientation is within
     threshold of the target, select a new nearby goal via kNN.
 
-    Success = object orientation error < rot_threshold (0.1 rad ~5.7°).
+    Success = object orientation error < rot_threshold (0.4 rad ~23°).
 
     Returns:
         Number of envs whose goal was updated this step.
