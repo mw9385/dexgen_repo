@@ -257,26 +257,31 @@ if _ISAACLAB_AVAILABLE:
         fingertip_contact_sensor_thumb: ContactSensorCfg = ContactSensorCfg(
             prim_path="{ENV_REGEX_NS}/SharpaHand/right_thumb_elastomer",
             update_period=0.0, history_length=3, debug_vis=False,
+            track_contact_points=True,
             filter_prim_paths_expr=["{ENV_REGEX_NS}/Object"],
         )
         fingertip_contact_sensor_index: ContactSensorCfg = ContactSensorCfg(
             prim_path="{ENV_REGEX_NS}/SharpaHand/right_index_elastomer",
             update_period=0.0, history_length=3, debug_vis=False,
+            track_contact_points=True,
             filter_prim_paths_expr=["{ENV_REGEX_NS}/Object"],
         )
         fingertip_contact_sensor_middle: ContactSensorCfg = ContactSensorCfg(
             prim_path="{ENV_REGEX_NS}/SharpaHand/right_middle_elastomer",
             update_period=0.0, history_length=3, debug_vis=False,
+            track_contact_points=True,
             filter_prim_paths_expr=["{ENV_REGEX_NS}/Object"],
         )
         fingertip_contact_sensor_ring: ContactSensorCfg = ContactSensorCfg(
             prim_path="{ENV_REGEX_NS}/SharpaHand/right_ring_elastomer",
             update_period=0.0, history_length=3, debug_vis=False,
+            track_contact_points=True,
             filter_prim_paths_expr=["{ENV_REGEX_NS}/Object"],
         )
         fingertip_contact_sensor_pinky: ContactSensorCfg = ContactSensorCfg(
             prim_path="{ENV_REGEX_NS}/SharpaHand/right_pinky_elastomer",
             update_period=0.0, history_length=3, debug_vis=False,
+            track_contact_points=True,
             filter_prim_paths_expr=["{ENV_REGEX_NS}/Object"],
         )
 
