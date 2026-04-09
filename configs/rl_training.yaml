@@ -108,7 +108,7 @@ ppo:
   minibatch_size: 8192
 
   # Training length
-  max_iterations: 30000
+  max_iterations: 10000
 
 # ==============================================================================
 # Central Value Function (symmetric: same 101-dim obs as actor)

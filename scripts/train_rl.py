@@ -43,7 +43,7 @@ def parse_args():
     )
     p.add_argument("--num_envs", type=int, default=512,
                    help="Number of parallel environments")
-    p.add_argument("--max_iterations", type=int, default=30000,
+    p.add_argument("--max_iterations", type=int, default=10000,
                    help="Maximum PPO training iterations")
     p.add_argument("--resume", type=str, default=None,
                    help="Resume from checkpoint path")
