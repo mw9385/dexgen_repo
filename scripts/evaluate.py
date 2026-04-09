@@ -259,13 +259,33 @@ def main():
         print(f"[WARNING] apply_dr_config failed: {_e}")
 
     # Freeze curriculum for evaluation: use the final-curriculum values.
-    # We set min_orn and gravity to the end-of-curriculum targets so that
-    # the policy is graded at the hardest setting the curriculum reaches.
+    # We set gravity and min_orn to the end-of-curriculum targets so the
+    # policy is graded at the hardest setting the curriculum reaches.
     gc = dict(getattr(env_cfg, "gravity_curriculum", {}) or {})
     if gc.get("enabled"):
         env_cfg.gravity_curriculum = {**gc, "enabled": False}
         final_g = float(gc.get("end_gravity", 9.81))
         env_cfg.sim.gravity = (0.0, 0.0, -final_g)
+    else:
+        final_g = float(env_cfg.sim.gravity[2]) * -1.0
+
+    # min_orn curriculum end value lives in events.update_curriculum
+    # (start=0.50 → end=1.50 rad). Inject the end value onto the loaded
+    # grasp graph so _sample_nearby_goal_index picks the hardest goals
+    # during evaluation instead of falling back to the easy default.
+    final_min_orn = 1.50
+    try:
+        from grasp_generation.graph_io import MultiObjectGraspGraph
+        if isinstance(merged_graph, MultiObjectGraspGraph):
+            merged_graph._curriculum_min_orn = final_min_orn
+            for _g in merged_graph.graphs.values():
+                _g._curriculum_min_orn = final_min_orn
+        else:
+            merged_graph._curriculum_min_orn = final_min_orn
+    except Exception as _e:
+        print(f"[Evaluate] WARNING: could not set min_orn on graph: {_e}")
+
+    print(f"[Evaluate] Curriculum frozen: gravity={final_g:.2f}  min_orn={final_min_orn:.2f}rad")
 
     print("=" * 60)
     print(f"[Evaluate] Task: DexGen-AnyGrasp-Sharpa-v0")
