@@ -86,8 +86,7 @@ ppo:
   # entropy_coef=0.0: standard for dexterous manipulation (IsaacGymEnvs ShadowHand).
   # Nonzero values can cause entropy to rise continuously when reward signal is weak.
   entropy_coef: 0.0
-  # bounds_loss_coef=0.005: raised from 0.0001 to prevent action saturation.
-  bounds_loss_coef: 0.005
+  bounds_loss_coef: 0.0001
   critic_coef: 4.0
   grad_norm: 1.0
   # [FIX] normalize_input/value: true — critical for stable learning

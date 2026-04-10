@@ -143,7 +143,7 @@ def build_eval_rl_games_config(args, cfg_file: dict) -> dict:
                 "critic_coef": 4,
                 "clip_value": True,
                 "seq_length": int(ppo_cfg.get("seq_length", 4)),
-                "bounds_loss_coef": 0.005,
+                "bounds_loss_coef": 0.0001,
                 "use_central_value": False,
                 # Force Player to use the registered vecenv (our _EvalVecEnv).
                 # rl_games reads `use_vecenv` from the top-level config, not
