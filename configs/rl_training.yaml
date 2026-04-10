@@ -20,7 +20,7 @@ env:
     start_gravity: 4.5
     end_gravity: 9.81
     # Goal difficulty: min orientation distance for kNN goal selection
-    min_orn_start: 0.10           # rad (~5.7°) — easy goals at epoch 0
+    min_orn_start: 0.50           # rad (~28.6°) — must be > goal rot_thresh (0.4)
     min_orn_end: 3.14             # rad (~180°) — full rotation at end of warmup
 
   rewards:
