@@ -17,7 +17,7 @@ env:
     enabled: true
     warmup_ratio: 0.10            # fraction of total epochs for ramp-up
     # Gravity: start near-zero, ramp to full
-    start_gravity: 0.05
+    start_gravity: 4.5
     end_gravity: 9.81
     # Goal difficulty: min orientation distance for kNN goal selection
     min_orn_start: 0.10           # rad (~5.7°) — easy goals at epoch 0
