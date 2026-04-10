@@ -373,10 +373,7 @@ def _batch_sample_nearby_goals(
     max_pos: float = 0.05,
     num_fingers: int = 5,
 ) -> np.ndarray:
-    """Vectorised goal sampling for a batch of start indices.
-
-    Instead of calling _sample_nearby_goal_index per env, compute all
-    distances in one matrix operation: (B, N) dot products + norms.
+    """Fully vectorised goal sampling — no Python per-env loop.
 
     Returns: np.ndarray of shape (B,) with goal indices.
     """
@@ -385,65 +382,59 @@ def _batch_sample_nearby_goals(
     if N <= 1:
         return start_indices.copy()
 
-    all_quats = _get_cached_quats(graph)  # (N, 4) or None
+    all_quats = _get_cached_quats(graph)   # (N, 4) or None
     all_pos = _get_cached_positions(graph)  # (N, 3) or None
 
     if all_quats is None and all_pos is None:
         return rng.integers(0, N, size=B)
 
-    # --- Orientation distances: (B, N) ---
+    # Score matrix (B, N) — lower = closer. Invalid entries get inf.
+    score = np.zeros((B, N), dtype=np.float32)
+
     if all_quats is not None:
-        start_q = all_quats[start_indices]  # (B, 4)
-        dots = np.abs(start_q @ all_quats.T)  # (B, N)
+        start_q = all_quats[start_indices]           # (B, 4)
+        dots = np.abs(start_q @ all_quats.T)         # (B, N)
         np.clip(dots, 0.0, 1.0, out=dots)
-        orn_dists = 2.0 * np.arccos(dots)  # (B, N)
-    else:
-        orn_dists = None
+        orn_dists = 2.0 * np.arccos(dots)            # (B, N)
+        # Filter: must be >= min_orn
+        score += (orn_dists / max(min_orn, 1e-6)).astype(np.float32)
+        too_close = orn_dists < min_orn
+        score[too_close] = np.inf
 
-    # --- Position distances: (B, N) ---
     if all_pos is not None:
-        start_p = all_pos[start_indices]  # (B, 3)
-        diff = all_pos[np.newaxis, :, :] - start_p[:, np.newaxis, :]  # (B, N, 3)
-        pos_dists = np.linalg.norm(diff, axis=-1)  # (B, N)
-    else:
-        pos_dists = None
+        start_p = all_pos[start_indices]              # (B, 3)
+        # Chunked position distance to avoid (B, N, 3) memory blow-up
+        pos_dists = np.empty((B, N), dtype=np.float32)
+        chunk = 512
+        for i in range(0, B, chunk):
+            end = min(i + chunk, B)
+            diff = all_pos[np.newaxis, :, :] - start_p[i:end, np.newaxis, :]
+            pos_dists[i:end] = np.linalg.norm(diff, axis=-1)
+        # Filter: must be <= max_pos
+        score += (pos_dists / max(max_pos, 1e-6)).astype(np.float32)
+        too_far = pos_dists > max_pos
+        score[too_far] = np.inf
 
-    goals = np.empty(B, dtype=np.int64)
+    # Mask self
+    score[np.arange(B), start_indices] = np.inf
 
-    for b in range(B):
-        si = int(start_indices[b])
-        valid = np.ones(N, dtype=bool)
-        valid[si] = False
+    # Fallback: if entire row is inf, allow any non-self index
+    all_inf = np.all(np.isinf(score), axis=1)
+    if all_inf.any():
+        # For these rows, set all non-self to 0 (equal chance)
+        fallback_score = np.zeros((int(all_inf.sum()), N), dtype=np.float32)
+        fb_starts = start_indices[all_inf]
+        fallback_score[np.arange(len(fb_starts)), fb_starts] = np.inf
+        score[all_inf] = fallback_score
 
-        if orn_dists is not None:
-            valid &= np.isfinite(orn_dists[b])
-            valid &= orn_dists[b] >= min_orn
-        if pos_dists is not None:
-            valid &= np.isfinite(pos_dists[b])
-            valid &= pos_dists[b] <= max_pos
+    # Batch top-k via argpartition
+    k = min(top_k, N - 1)
+    # argpartition along axis=1: first k elements are the k smallest
+    partitioned = np.argpartition(score, k - 1, axis=1)[:, :k]  # (B, k)
 
-        valid_idx = np.where(valid)[0]
-
-        # Fallbacks (same as scalar version but reusing precomputed dists)
-        if len(valid_idx) == 0 and orn_dists is not None:
-            valid_idx = np.where(
-                (np.arange(N) != si) & np.isfinite(orn_dists[b]) & (orn_dists[b] >= min_orn)
-            )[0]
-        if len(valid_idx) == 0:
-            valid_idx = np.where(np.arange(N) != si)[0]
-        if len(valid_idx) == 0:
-            goals[b] = si
-            continue
-
-        score = np.zeros(len(valid_idx), dtype=np.float64)
-        if pos_dists is not None:
-            score += pos_dists[b, valid_idx] / max(max_pos, 1e-6)
-        if orn_dists is not None:
-            score += orn_dists[b, valid_idx] / max(min_orn, 1e-6)
-
-        k = min(top_k, len(valid_idx))
-        top_k_local = np.argpartition(score, k - 1)[:k]
-        goals[b] = valid_idx[rng.choice(top_k_local)]
+    # Random select one from top-k per row
+    choices = rng.integers(0, k, size=B)
+    goals = partitioned[np.arange(B), choices]
 
     return goals
 
