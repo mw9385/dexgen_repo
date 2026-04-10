@@ -155,15 +155,15 @@ def reset_to_random_grasp(
             continue
 
         batch_size = len(env_indices)
-        # Batch random start indices
         starts = rng.integers(0, N_grasps, size=batch_size)
         cur_min_orn = getattr(graph, "_curriculum_min_orn", 0.10)
-        # Batch goal selection
+        # Batch goal selection — single matrix op instead of per-env loop
+        goals = _batch_sample_nearby_goals(
+            g, starts, rng, min_orn=cur_min_orn, num_fingers=env_num_fingers,
+        )
         for j, local_i in enumerate(env_indices):
             start_idx_list[local_i] = int(starts[j])
-            goal_idx_list[local_i] = _sample_nearby_goal_index(
-                g, int(starts[j]), rng, min_orn=cur_min_orn, num_fingers=env_num_fingers,
-            )
+            goal_idx_list[local_i] = int(goals[j])
 
     # Extract grasp data in batch (one pass per object name group)
     start_fps_list = [None] * n
@@ -366,6 +366,87 @@ def reset_to_random_grasp(
 # ---------------------------------------------------------------------------
 # Nearest-neighbor goal selection
 # ---------------------------------------------------------------------------
+
+def _batch_sample_nearby_goals(
+    graph, start_indices: np.ndarray, rng: np.random.Generator,
+    top_k: int = 5, min_orn: float = 0.50,
+    max_pos: float = 0.05,
+    num_fingers: int = 5,
+) -> np.ndarray:
+    """Vectorised goal sampling for a batch of start indices.
+
+    Instead of calling _sample_nearby_goal_index per env, compute all
+    distances in one matrix operation: (B, N) dot products + norms.
+
+    Returns: np.ndarray of shape (B,) with goal indices.
+    """
+    N = len(graph.grasp_set.grasps)
+    B = len(start_indices)
+    if N <= 1:
+        return start_indices.copy()
+
+    all_quats = _get_cached_quats(graph)  # (N, 4) or None
+    all_pos = _get_cached_positions(graph)  # (N, 3) or None
+
+    if all_quats is None and all_pos is None:
+        return rng.integers(0, N, size=B)
+
+    # --- Orientation distances: (B, N) ---
+    if all_quats is not None:
+        start_q = all_quats[start_indices]  # (B, 4)
+        dots = np.abs(start_q @ all_quats.T)  # (B, N)
+        np.clip(dots, 0.0, 1.0, out=dots)
+        orn_dists = 2.0 * np.arccos(dots)  # (B, N)
+    else:
+        orn_dists = None
+
+    # --- Position distances: (B, N) ---
+    if all_pos is not None:
+        start_p = all_pos[start_indices]  # (B, 3)
+        diff = all_pos[np.newaxis, :, :] - start_p[:, np.newaxis, :]  # (B, N, 3)
+        pos_dists = np.linalg.norm(diff, axis=-1)  # (B, N)
+    else:
+        pos_dists = None
+
+    goals = np.empty(B, dtype=np.int64)
+
+    for b in range(B):
+        si = int(start_indices[b])
+        valid = np.ones(N, dtype=bool)
+        valid[si] = False
+
+        if orn_dists is not None:
+            valid &= np.isfinite(orn_dists[b])
+            valid &= orn_dists[b] >= min_orn
+        if pos_dists is not None:
+            valid &= np.isfinite(pos_dists[b])
+            valid &= pos_dists[b] <= max_pos
+
+        valid_idx = np.where(valid)[0]
+
+        # Fallbacks (same as scalar version but reusing precomputed dists)
+        if len(valid_idx) == 0 and orn_dists is not None:
+            valid_idx = np.where(
+                (np.arange(N) != si) & np.isfinite(orn_dists[b]) & (orn_dists[b] >= min_orn)
+            )[0]
+        if len(valid_idx) == 0:
+            valid_idx = np.where(np.arange(N) != si)[0]
+        if len(valid_idx) == 0:
+            goals[b] = si
+            continue
+
+        score = np.zeros(len(valid_idx), dtype=np.float64)
+        if pos_dists is not None:
+            score += pos_dists[b, valid_idx] / max(max_pos, 1e-6)
+        if orn_dists is not None:
+            score += orn_dists[b, valid_idx] / max(min_orn, 1e-6)
+
+        k = min(top_k, len(valid_idx))
+        top_k_local = np.argpartition(score, k - 1)[:k]
+        goals[b] = valid_idx[rng.choice(top_k_local)]
+
+    return goals
+
 
 def _sample_nearby_goal_index(
     graph, start_idx: int, rng: np.random.Generator,
