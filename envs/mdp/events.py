@@ -501,15 +501,18 @@ def _get_cached_positions(graph) -> Optional[np.ndarray]:
 
 def update_curriculum(env, epoch: int, total_epochs: int = 10000):
     """
-    Linearly increase min_orn from 0.05 to 0.5 rad over the first 30%
-    of training. Stored on the graph object so reset picks it up.
+    Linearly increase min_orn from 0.50 to 1.50 rad over the curriculum
+    warmup period. Stored on the graph object so reset picks it up.
 
     Call once per epoch from the training loop.
     """
     graph = _load_grasp_graph(env)
     if graph is None:
         return
-    warmup_epochs = int(total_epochs * 0.3)
+    warmup_ratio = float(
+        (getattr(env.cfg, "gravity_curriculum", None) or {}).get("warmup_ratio", 0.10)
+    )
+    warmup_epochs = int(total_epochs * warmup_ratio)
     t = min(epoch / max(warmup_epochs, 1), 1.0)
     min_orn_start = 0.50
     min_orn_end = 1.50
@@ -517,7 +520,7 @@ def update_curriculum(env, epoch: int, total_epochs: int = 10000):
 
     gravity_cfg = dict((getattr(env.cfg, "gravity_curriculum", None) or {}))
     if gravity_cfg.get("enabled", False):
-        warmup_ratio = float(gravity_cfg.get("warmup_ratio", 0.30))
+        warmup_ratio = float(gravity_cfg.get("warmup_ratio", 0.10))
         gravity_start = float(gravity_cfg.get("start_gravity", 0.05))
         gravity_end = float(gravity_cfg.get("end_gravity", 9.81))
         gravity_warmup_epochs = int(total_epochs * warmup_ratio)

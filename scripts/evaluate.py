@@ -73,6 +73,15 @@ def parse_args():
                    help="Path to YAML config (env / ppo settings)")
     p.add_argument("--results_json", type=str, default=None,
                    help="Optional JSON output path for the evaluation summary")
+    p.add_argument("--max_iterations", type=int, default=10000,
+                   help="Total training iterations used at training time. "
+                        "Required to reproduce curriculum interpolation "
+                        "(gravity / min_orn are a function of epoch / "
+                        "(warmup_ratio * max_iterations)). Must match the "
+                        "value passed to train_rl.py.")
+    p.add_argument("--curriculum_epoch", type=int, default=None,
+                   help="Override curriculum epoch. Default: auto-detect "
+                        "from the checkpoint's 'epoch' field.")
 
     AppLauncher.add_app_launcher_args(p)
     args = p.parse_args()
@@ -134,7 +143,7 @@ def build_eval_rl_games_config(args, cfg_file: dict) -> dict:
                 "critic_coef": 4,
                 "clip_value": True,
                 "seq_length": int(ppo_cfg.get("seq_length", 4)),
-                "bounds_loss_coef": 0.005,
+                "bounds_loss_coef": 0.0001,
                 "use_central_value": False,
                 # Force Player to use the registered vecenv (our _EvalVecEnv).
                 # rl_games reads `use_vecenv` from the top-level config, not
@@ -258,34 +267,28 @@ def main():
     except Exception as _e:
         print(f"[WARNING] apply_dr_config failed: {_e}")
 
-    # Freeze curriculum for evaluation: use the final-curriculum values.
-    # We set gravity and min_orn to the end-of-curriculum targets so the
-    # policy is graded at the hardest setting the curriculum reaches.
-    gc = dict(getattr(env_cfg, "gravity_curriculum", {}) or {})
-    if gc.get("enabled"):
-        env_cfg.gravity_curriculum = {**gc, "enabled": False}
-        final_g = float(gc.get("end_gravity", 9.81))
-        env_cfg.sim.gravity = (0.0, 0.0, -final_g)
+    # Determine the curriculum epoch we want to evaluate at.
+    #   1. --curriculum_epoch CLI override, if provided
+    #   2. auto-detect from the checkpoint's 'epoch' key
+    #   3. fall back to 0 (start of curriculum)
+    # We intentionally do NOT disable env_cfg.gravity_curriculum — it stays
+    # enabled so mdp_events.update_curriculum() can apply the matching
+    # gravity later, once the sim is running. _EvalVecEnv.step() never
+    # re-calls update_curriculum, so whatever state we apply stays fixed
+    # for the whole eval run.
+    ckpt_epoch = args.curriculum_epoch
+    if ckpt_epoch is None:
+        try:
+            _ckpt = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
+            ckpt_epoch = int(_ckpt.get("epoch", 0) or 0)
+            del _ckpt
+            print(f"[Evaluate] Auto-detected checkpoint epoch: {ckpt_epoch}")
+        except Exception as _e:
+            print(f"[Evaluate] WARNING: could not read epoch from checkpoint "
+                  f"({_e}); defaulting to 0")
+            ckpt_epoch = 0
     else:
-        final_g = float(env_cfg.sim.gravity[2]) * -1.0
-
-    # min_orn curriculum end value lives in events.update_curriculum
-    # (start=0.50 → end=1.50 rad). Inject the end value onto the loaded
-    # grasp graph so _sample_nearby_goal_index picks the hardest goals
-    # during evaluation instead of falling back to the easy default.
-    final_min_orn = 1.50
-    try:
-        from grasp_generation.graph_io import MultiObjectGraspGraph
-        if isinstance(merged_graph, MultiObjectGraspGraph):
-            merged_graph._curriculum_min_orn = final_min_orn
-            for _g in merged_graph.graphs.values():
-                _g._curriculum_min_orn = final_min_orn
-        else:
-            merged_graph._curriculum_min_orn = final_min_orn
-    except Exception as _e:
-        print(f"[Evaluate] WARNING: could not set min_orn on graph: {_e}")
-
-    print(f"[Evaluate] Curriculum frozen: gravity={final_g:.2f}  min_orn={final_min_orn:.2f}rad")
+        print(f"[Evaluate] Using override curriculum epoch: {ckpt_epoch}")
 
     print("=" * 60)
     print(f"[Evaluate] Task: DexGen-AnyGrasp-Sharpa-v0")
@@ -344,6 +347,28 @@ def main():
     player.has_batch_dimension = True
     # Ensure Player uses our wrapped env (not a fresh raw ManagerBasedRLEnv).
     player.env = wrapped_env
+
+    # Apply the curriculum state that matches the checkpoint's epoch.
+    # Mirrors what _CompactIsaacAlgoObserver.after_init() does during
+    # training, so the policy is evaluated in the exact same env it was
+    # learning in at that checkpoint.
+    from envs.mdp import events as mdp_events
+    try:
+        mdp_events.update_curriculum(raw_env, ckpt_epoch, args.max_iterations)
+        applied_min_orn = getattr(merged_graph, "_curriculum_min_orn", None)
+        applied_g = None
+        try:
+            import isaaclab.sim as sim_utils
+            g_vec = sim_utils.SimulationContext.instance().physics_sim_view.get_gravity()
+            applied_g = float((g_vec[0] ** 2 + g_vec[1] ** 2 + g_vec[2] ** 2) ** 0.5)
+        except Exception:
+            pass
+        print(f"[Evaluate] Curriculum applied for epoch "
+              f"{ckpt_epoch}/{args.max_iterations}"
+              + (f"  gravity≈{applied_g:.3f}" if applied_g is not None else "")
+              + (f"  min_orn={applied_min_orn:.3f}rad" if applied_min_orn is not None else ""))
+    except Exception as _e:
+        print(f"[Evaluate] WARNING: curriculum update failed: {_e}")
 
     vec_env = wrapped_env
     _run_eval_loop(

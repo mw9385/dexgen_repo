@@ -9,39 +9,25 @@ env:
   task: DexGen-AnyGrasp-Sharpa-v0
   num_envs: 512
   episode_length_s: 10.0
-  action_scale: 1.0              # keep full normalized joint range available to the delta wrapper
-  action_mode: "delta"           # accumulate normalized joint targets from the current state
-  # Target: OpenAI Dactyl ("Learning Dexterous In-Hand Manipulation", 2018).
-  # Dactyl runs at 12 Hz with ~1.4 rad/s sustained joint velocity, so finger
-  # full-range flex takes roughly 0.8s. At our 20 Hz control (0.05s/step),
-  # 0.8s full range → 16 steps → delta = 2/16 = 0.125 (= 1/8).
-  delta_scale: 0.125             # 1/8 per control step (matches Dactyl paper)
-  actions_moving_average: 1.0    # no smoothing — delta mode already accumulates gradually
+  action_scale: 1.0              # [-1,1] maps to full joint range
+  action_mode: "absolute"        # policy outputs target joint positions directly (OpenAI Dactyl style)
   decimation: 12                 # control at 20 Hz (240 Hz sim / 12), matching Sharpa default
   gravity_curriculum:
     enabled: true
     start_gravity: 0.05
     end_gravity: 9.81
-    warmup_ratio: 0.30
+    warmup_ratio: 0.10
 
   terminations:
     no_contact_patience: 30          # steps with 0 fingertip contact → reset (30 steps = 1s at 30Hz)
 
   rewards:
-    # DexterityGen reward (arXiv:2502.04307 Eq. 4-9)
-    # All terms normalized to [-1, 1]. Weights control importance.
-    #
-    # r_goal (Eq. 5-7)
-    object_orientation:  10.0    # exp(-α * rot_err)           [0, 1]  ★ PRIMARY
-    object_position:     0.5     # exp(-α * ||pos_err||)       [0, 1]  (near 1.0 after rebase)
-    goal_bonus:          10.0    # 1(goal achieved)            {0, 1}
-    # r_style (Eq. 9) — disabled for Stage 1
-    # fingertip_velocity: 0.05
-    # r_reg (Eq. 8)
-    work:                0.01
-    action:              0.01
-    torque:              0.01
-    # No termination penalty — drop/escape handled by DoneTerm only
+    # OpenAI "Learning Dexterous In-Hand Manipulation" (2018)
+    # r_t = (d_t - d_{t+1}) + goal_bonus + drop_penalty
+    orientation_delta_weight: 1.0      # weight on r_t = d_t - d_{t+1}
+    goal_bonus: 5.0                    # +5 when rot_dist < goal_thresh
+    goal_thresh: 0.4                   # rad (~23°)
+    drop_penalty: -20.0                # when object falls or leaves hand
 
 # ==============================================================================
 # Symmetric Actor-Critic PPO (rl_games)
@@ -86,8 +72,7 @@ ppo:
   # entropy_coef=0.0: standard for dexterous manipulation (IsaacGymEnvs ShadowHand).
   # Nonzero values can cause entropy to rise continuously when reward signal is weak.
   entropy_coef: 0.0
-  # bounds_loss_coef=0.005: raised from 0.0001 to prevent action saturation.
-  bounds_loss_coef: 0.005
+  bounds_loss_coef: 0.0001
   critic_coef: 4.0
   grad_norm: 1.0
   # [FIX] normalize_input/value: true — critical for stable learning
@@ -103,9 +88,8 @@ ppo:
   horizon_length: 16
   seq_length: 8              # BPTT length for LSTM (ignored for MLP)
   num_steps_per_env: 16
-  mini_epochs: 5
-  # minibatch_size scales with num_envs: 16384 × 16 / 16 = 16384
-  minibatch_size: 8192
+  mini_epochs: 8
+  minibatch_size: 4096
 
   # Training length
   max_iterations: 10000

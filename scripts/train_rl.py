@@ -160,17 +160,15 @@ def apply_env_config(env_cfg, env_cfg_dict: dict):
 
     rewards_cfg = env_cfg_dict.get("rewards", {})
     if rewards_cfg:
-        reward_terms = {
-            "object_position": "object_position",
-            "object_orientation": "object_orientation",
-            "goal_bonus": "goal_bonus",
-            "work": "work",
-            "action": "action",
-            "torque": "torque",
-        }
-        for cfg_name, term_name in reward_terms.items():
-            if cfg_name in rewards_cfg and hasattr(env_cfg.rewards, term_name):
-                getattr(env_cfg.rewards, term_name).weight = float(rewards_cfg[cfg_name])
+        if "orientation_delta_weight" in rewards_cfg and hasattr(env_cfg.rewards, "orientation_delta"):
+            env_cfg.rewards.orientation_delta.weight = float(rewards_cfg["orientation_delta_weight"])
+        if hasattr(env_cfg.rewards, "goal_bonus"):
+            if "goal_bonus" in rewards_cfg:
+                env_cfg.rewards.goal_bonus.params["bonus"] = float(rewards_cfg["goal_bonus"])
+            if "goal_thresh" in rewards_cfg:
+                env_cfg.rewards.goal_bonus.params["rot_thresh"] = float(rewards_cfg["goal_thresh"])
+        if "drop_penalty" in rewards_cfg and hasattr(env_cfg.rewards, "drop"):
+            env_cfg.rewards.drop.params["penalty"] = float(rewards_cfg["drop_penalty"])
 
     # Termination overrides from YAML
     term_cfg = env_cfg_dict.get("terminations", {})
@@ -325,9 +323,7 @@ def build_rl_games_config(args, cfg_file: dict) -> dict:
                 "critic_coef": float(ppo_cfg.get("critic_coef", 4)),
                 "clip_value": True,
                 "seq_length": seq_length,
-                # bounds_loss was exploding (0→70) causing policy to saturate actions.
-                # 0.0001 was too small to prevent action clamping. 0.005 adds real penalty.
-                "bounds_loss_coef": float(ppo_cfg.get("bounds_loss_coef", 0.005)),
+                "bounds_loss_coef": float(ppo_cfg.get("bounds_loss_coef", 0.0001)),
                 # rl_games writes to train_dir/full_experiment_name, not log_dir.
                 "train_dir": str(log_dir.parent),
                 "full_experiment_name": log_dir.name,
