@@ -12,7 +12,7 @@ env:
   action_scale: 1.0              # [-1,1] maps to full joint range
   action_mode: "absolute"        # policy outputs target joint positions directly (OpenAI Dactyl style)
   decimation: 12                 # control at 20 Hz (240 Hz sim / 12), matching Sharpa default
-  curriculum:
+  training_curriculum:
     enabled: true
     warmup_ratio: 0.10            # fraction of total epochs for ramp-up
     # Gravity: start near-zero, ramp to full

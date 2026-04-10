@@ -512,7 +512,7 @@ def update_curriculum(env, epoch: int, total_epochs: int = 10000):
     graph = _load_grasp_graph(env)
     if graph is None:
         return
-    cur_cfg = dict((getattr(env.cfg, "curriculum", None) or {})
+    cur_cfg = dict((getattr(env.cfg, "training_curriculum", None) or {})
                    or (getattr(env.cfg, "gravity_curriculum", None) or {}))
     warmup_ratio = float(cur_cfg.get("warmup_ratio", 0.10))
     warmup_epochs = int(total_epochs * warmup_ratio)
