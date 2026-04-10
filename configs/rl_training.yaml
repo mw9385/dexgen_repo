@@ -11,7 +11,7 @@ env:
   episode_length_s: 10.0
   action_scale: 1.0              # [-1,1] maps to full joint range
   action_mode: "absolute"        # policy outputs target joint positions directly (OpenAI Dactyl style)
-  actions_moving_average: 0.2    # EMA smoothing (OpenAI Dactyl: 0.3 at 80ms, adjusted to 0.2 for 50ms)
+  actions_moving_average: 0.3    # EMA smoothing (OpenAI Dactyl: 0.3 at 80ms)
   decimation: 12                 # control at 20 Hz (240 Hz sim / 12), matching Sharpa default
   training_curriculum:
     enabled: true
