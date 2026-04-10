@@ -22,20 +22,12 @@ env:
     no_contact_patience: 30          # steps with 0 fingertip contact → reset (30 steps = 1s at 30Hz)
 
   rewards:
-    # DexterityGen reward (arXiv:2502.04307 Eq. 4-9)
-    # All terms normalized to [-1, 1]. Weights control importance.
-    #
-    # r_goal (Eq. 5-7)
-    object_orientation:  10.0    # exp(-α * rot_err)           [0, 1]  ★ PRIMARY
-    object_position:     0.5     # exp(-α * ||pos_err||)       [0, 1]  (near 1.0 after rebase)
-    goal_bonus:          10.0    # 1(goal achieved)            {0, 1}
-    # r_style (Eq. 9) — disabled for Stage 1
-    # fingertip_velocity: 0.05
-    # r_reg (Eq. 8)
-    work:                0.01
-    action:              0.01
-    torque:              0.01
-    # No termination penalty — drop/escape handled by DoneTerm only
+    # OpenAI "Learning Dexterous In-Hand Manipulation" (2018)
+    # r_t = (d_t - d_{t+1}) + goal_bonus + drop_penalty
+    orientation_delta_weight: 1.0      # weight on r_t = d_t - d_{t+1}
+    goal_bonus: 5.0                    # +5 when rot_dist < goal_thresh
+    goal_thresh: 0.4                   # rad (~23°)
+    drop_penalty: -20.0                # when object falls or leaves hand
 
 # ==============================================================================
 # Symmetric Actor-Critic PPO (rl_games)
