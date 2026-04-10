@@ -46,20 +46,28 @@ def pairwise_orn_dists(quats: np.ndarray) -> np.ndarray:
     return dists
 
 
-def analyze_orientation(quats: np.ndarray):
+def analyze_orientation(quats: np.ndarray, max_sample: int = 5000):
     """Print orientation distribution statistics."""
     N = len(quats)
     print(f"\n{'='*60}")
     print(f"ORIENTATION ANALYSIS ({N} grasps)")
     print(f"{'='*60}")
 
-    dists = pairwise_orn_dists(quats)
+    if N > max_sample:
+        idx = np.random.default_rng(0).choice(N, max_sample, replace=False)
+        quats_sub = quats[idx]
+        print(f"  (subsampled to {max_sample} for pairwise computation)")
+    else:
+        quats_sub = quats
+
+    dists = pairwise_orn_dists(quats_sub)
 
     # Per-grasp nearest neighbor distance
     nn_dists = np.min(dists, axis=1)
 
     # All pairwise (upper triangle, excluding diagonal)
-    triu = dists[np.triu_indices(N, k=1)]
+    M = len(quats_sub)
+    triu = dists[np.triu_indices(M, k=1)]
 
     print(f"\n--- All pairwise distances ({len(triu)} pairs) ---")
     print(f"  Min:    {np.min(triu):.4f} rad  ({np.degrees(np.min(triu)):.2f}°)")
@@ -91,7 +99,7 @@ def analyze_orientation(quats: np.ndarray):
               f"mean={mean_ct:.0f}  min={min_ct}  grasps_with_0_neighbors={zero_ct}")
 
 
-def analyze_position(pos: np.ndarray):
+def analyze_position(pos: np.ndarray, max_sample: int = 5000):
     """Print position distribution statistics."""
     N = len(pos)
     print(f"\n{'='*60}")
@@ -103,13 +111,21 @@ def analyze_position(pos: np.ndarray):
         print(f"  {axis}: min={pos[:, i].min():.4f}  max={pos[:, i].max():.4f}  "
               f"mean={pos[:, i].mean():.4f}  std={pos[:, i].std():.4f}")
 
+    if N > max_sample:
+        idx = np.random.default_rng(0).choice(N, max_sample, replace=False)
+        pos_sub = pos[idx]
+        print(f"  (subsampled to {max_sample} for pairwise computation)")
+    else:
+        pos_sub = pos
+    M = len(pos_sub)
+
     # Pairwise position distances
-    diffs = pos[:, None, :] - pos[None, :, :]
+    diffs = pos_sub[:, None, :] - pos_sub[None, :, :]
     pdists = np.linalg.norm(diffs, axis=-1)
     np.fill_diagonal(pdists, np.inf)
 
     nn_pdists = np.min(pdists, axis=1)
-    triu = pdists[np.triu_indices(N, k=1)]
+    triu = pdists[np.triu_indices(M, k=1)]
 
     print(f"\n--- Pairwise position distances ---")
     print(f"  Min:    {np.min(triu):.5f} m")
@@ -133,12 +149,18 @@ def analyze_position(pos: np.ndarray):
               f"mean={mean_ct:.0f}  min={min_ct}  grasps_with_0_neighbors={zero_ct}")
 
 
-def analyze_combined(pos: np.ndarray, quats: np.ndarray):
+def analyze_combined(pos: np.ndarray, quats: np.ndarray, max_sample: int = 5000):
     """Analyze how many grasps pass BOTH min_orn AND max_pos filters."""
     N = len(pos)
     print(f"\n{'='*60}")
     print(f"COMBINED FILTER ANALYSIS (min_orn AND max_pos)")
     print(f"{'='*60}")
+
+    if N > max_sample:
+        idx = np.random.default_rng(0).choice(N, max_sample, replace=False)
+        quats = quats[idx]
+        pos = pos[idx]
+        print(f"  (subsampled to {max_sample} for pairwise computation)")
 
     orn_dists = pairwise_orn_dists(quats)
 
