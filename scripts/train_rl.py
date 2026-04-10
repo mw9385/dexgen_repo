@@ -768,11 +768,6 @@ class _IsaacLabVecEnv:
         obs, rew, terminated, truncated, info = self.env.step(delayed_actions)
         done = terminated | truncated
 
-        # Contact reward masking: zero out reward when no fingertip touches the object.
-        from envs.mdp.observations import fingertip_contact_binary
-        contact_mask = (fingertip_contact_binary(self.env).sum(dim=-1) > 0).float()
-        rew = rew * contact_mask
-
         # Re-initialise action buffers for reset envs
         if done.any() and self._action_mode != "delta" and self._prev_actions is not None:
             done_ids = done.nonzero(as_tuple=False).squeeze(-1)
