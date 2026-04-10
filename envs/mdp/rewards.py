@@ -54,9 +54,12 @@ def orientation_delta_reward(env) -> torch.Tensor:
 # ── +5 goal bonus ──
 
 def goal_bonus(env, rot_thresh: float = 0.4, bonus: float = 5.0) -> torch.Tensor:
-    """Sparse bonus when orientation error is below threshold."""
+    """Sparse bonus when orientation error is below threshold AND object is in hand."""
+    from . import events as mdp_events
     rot_dist = _get_orn_error(env)
-    return torch.where(rot_dist < rot_thresh, bonus, torch.zeros_like(rot_dist))
+    in_hand = ~mdp_events.object_dropped(env)
+    reached = (rot_dist < rot_thresh) & in_hand
+    return torch.where(reached, bonus, torch.zeros_like(rot_dist))
 
 
 # ── -20 drop penalty ──
