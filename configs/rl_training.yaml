@@ -12,7 +12,6 @@ env:
   action_scale: 1.0              # [-1,1] maps to full joint range
   action_mode: "absolute"        # policy outputs target joint positions directly (OpenAI Dactyl style)
   decimation: 12                 # control at 20 Hz (240 Hz sim / 12), matching Sharpa default
-  obj_orn_noise_deg: 15.0        # random orientation noise on spawned object (degrees, σ)
   gravity_curriculum:
     enabled: true
     start_gravity: 0.05
