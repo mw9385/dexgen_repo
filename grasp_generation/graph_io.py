@@ -5,8 +5,9 @@ Supports:
   - .npy (sharpa-style): (N, 29) = 22 joints + 3 obj_pos + 4 obj_quat
   - .pkl (legacy GraspGraph): pickle format
 
-Cube .npy files are automatically augmented with 24 symmetry rotations
-at load time, expanding orientation coverage from ~60° to full SO(3).
+Orientation diversity should come from the data generation process
+(random object poses during grasp sampling), not from load-time
+augmentation, so that kNN neighbor structure is preserved.
 """
 from __future__ import annotations
 
@@ -105,49 +106,6 @@ class MultiObjectGraspGraph:
 
 
 # ---------------------------------------------------------------------------
-# Orientation augmentation (uniform random rotation)
-# ---------------------------------------------------------------------------
-
-def _qmul(q1: np.ndarray, q2: np.ndarray) -> np.ndarray:
-    """Hamilton product of two quaternions (w,x,y,z)."""
-    w1, x1, y1, z1 = q1[..., 0], q1[..., 1], q1[..., 2], q1[..., 3]
-    w2, x2, y2, z2 = q2[..., 0], q2[..., 1], q2[..., 2], q2[..., 3]
-    return np.stack([
-        w1*w2 - x1*x2 - y1*y2 - z1*z2,
-        w1*x2 + x1*w2 + y1*z2 - z1*y2,
-        w1*y2 - x1*z2 + y1*w2 + z1*x2,
-        w1*z2 + x1*y2 - y1*x2 + z1*w2,
-    ], axis=-1)
-
-
-def _uniform_random_quats(n: int, rng: np.random.Generator) -> np.ndarray:
-    """Sample n uniform random unit quaternions (w,x,y,z). Returns (n, 4)."""
-    q = rng.standard_normal((n, 4))
-    q = q / (np.linalg.norm(q, axis=-1, keepdims=True) + 1e-8)
-    return q
-
-
-def _augment_orientation(data: np.ndarray, seed: int = 42) -> np.ndarray:
-    """Apply a uniform random rotation to each grasp's object quaternion.
-
-    Input: (N, 29). Returns (N, 29) — same count, full SO(3) coverage.
-    Each grasp gets a random rotation applied to object_quat_hand.
-    Joint angles and object position are unchanged.
-    """
-    N = data.shape[0]
-    rng = np.random.default_rng(seed)
-
-    out = data.copy()
-    rand_q = _uniform_random_quats(N, rng)  # (N, 4)
-
-    obj_q = out[:, 25:29].astype(np.float64)
-    new_q = _qmul(obj_q, rand_q)
-    new_q = new_q / (np.linalg.norm(new_q, axis=-1, keepdims=True) + 1e-8)
-    out[:, 25:29] = new_q.astype(np.float32)
-    return out
-
-
-# ---------------------------------------------------------------------------
 # .npy loader
 # ---------------------------------------------------------------------------
 
@@ -157,13 +115,10 @@ def load_npy_as_graph(path: str | Path) -> MultiObjectGraspGraph:
 
     Input: (N, 29) = [22 joint_pos | 3 obj_pos | 4 obj_quat]
     Filename convention: sharpa_grasp_{shape}_{size_mm}.npy
-
-    Cube files are automatically augmented with 24 symmetry rotations
-    (N → N*24) to expand orientation coverage to the full rotation space.
     """
     path = Path(path)
     data = np.load(str(path))
-    N_orig = data.shape[0]
+    N = data.shape[0]
 
     # Parse shape/size from filename
     stem = path.stem
@@ -178,14 +133,6 @@ def load_npy_as_graph(path: str | Path) -> MultiObjectGraspGraph:
                     size = int(parts[i + 1]) / 1000.0
                 except ValueError:
                     pass
-
-    # Apply uniform random rotation to each grasp's object orientation
-    # so the policy learns to handle all orientations, not just the
-    # narrow band (~60°) from the original data generation.
-    data = _augment_orientation(data)
-    print(f"[graph_io] Orientation augmentation applied to {N_orig} grasps")
-
-    N = data.shape[0]
     obj_name = f"{shape_type}_{int(size * 1000):03d}_f5"
 
     grasps = []

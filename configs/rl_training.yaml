@@ -17,6 +17,11 @@ env:
     start_gravity: 0.05
     end_gravity: 9.81
     warmup_ratio: 0.10
+    min_orn_start: 0.10          # min goal orientation distance at epoch 0 (rad)
+    min_orn_end: 0.50            # min goal orientation distance at end of warmup (rad)
+    # NOTE: min_orn_end must not exceed the dataset's max pairwise distance.
+    # Current dataset (sharpa_grasp_cube_050.npy): max ~1.04 rad.
+    # Regenerate data with more orientation diversity to raise this.
 
   terminations:
     no_contact_patience: 30          # steps with 0 fingertip contact → reset (30 steps = 1s at 30Hz)

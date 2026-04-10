@@ -514,8 +514,9 @@ def update_curriculum(env, epoch: int, total_epochs: int = 10000):
     )
     warmup_epochs = int(total_epochs * warmup_ratio)
     t = min(epoch / max(warmup_epochs, 1), 1.0)
-    min_orn_start = 0.10
-    min_orn_end = 1.50
+    orn_cfg = (getattr(env.cfg, "gravity_curriculum", None) or {})
+    min_orn_start = float(orn_cfg.get("min_orn_start", 0.10))
+    min_orn_end = float(orn_cfg.get("min_orn_end", 0.50))
     graph._curriculum_min_orn = min_orn_start + t * (min_orn_end - min_orn_start)
 
     gravity_cfg = dict((getattr(env.cfg, "gravity_curriculum", None) or {}))
@@ -630,8 +631,11 @@ def update_rolling_goal(
         else:
             g = graph
 
-        # kNN from current goal → new goal
-        new_goal_idx = _sample_nearby_goal_index(g, cur_goal_idx, rng, num_fingers=env_num_fingers)
+        # kNN from current goal → new goal (use curriculum min_orn)
+        cur_min_orn = getattr(graph, "_curriculum_min_orn", 0.10)
+        new_goal_idx = _sample_nearby_goal_index(
+            g, cur_goal_idx, rng, min_orn=cur_min_orn, num_fingers=env_num_fingers,
+        )
         new_goal_grasp = g.grasp_set[new_goal_idx]
 
         # Update goal fingertip positions
