@@ -4,6 +4,10 @@ Grasp data structures + IO for .npy grasp caches.
 Supports:
   - .npy (sharpa-style): (N, 29) = 22 joints + 3 obj_pos + 4 obj_quat
   - .pkl (legacy GraspGraph): pickle format
+
+Orientation diversity should come from the data generation process
+(random object poses during grasp sampling), not from load-time
+augmentation, so that kNN neighbor structure is preserved.
 """
 from __future__ import annotations
 
@@ -129,7 +133,6 @@ def load_npy_as_graph(path: str | Path) -> MultiObjectGraspGraph:
                     size = int(parts[i + 1]) / 1000.0
                 except ValueError:
                     pass
-
     obj_name = f"{shape_type}_{int(size * 1000):03d}_f5"
 
     grasps = []
@@ -149,9 +152,7 @@ def load_npy_as_graph(path: str | Path) -> MultiObjectGraspGraph:
 
     # NOTE: goal sampling (_sample_nearby_goal_index) computes nearest
     # neighbours on-the-fly from cached quaternion / position arrays — it
-    # does NOT read the `edges` list. Building edges here used to do an
-    # O(N^2) Python loop (~50M iters for N=10000) and blocked env startup
-    # by tens of seconds. Keep edges empty.
+    # does NOT read the `edges` list. Keep edges empty.
     grasp_set = GraspSet(grasps=grasps, object_name=obj_name)
     graph = GraspGraph(
         grasp_set=grasp_set, edges=[],

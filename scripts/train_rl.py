@@ -155,8 +155,12 @@ def apply_env_config(env_cfg, env_cfg_dict: dict):
     if "decimation" in env_cfg_dict:
         env_cfg.decimation = int(env_cfg_dict["decimation"])
         env_cfg.sim.render_interval = env_cfg.decimation
-    if "gravity_curriculum" in env_cfg_dict:
-        env_cfg.gravity_curriculum = dict(env_cfg_dict["gravity_curriculum"])
+    if "training_curriculum" in env_cfg_dict:
+        env_cfg.training_curriculum = dict(env_cfg_dict["training_curriculum"])
+    elif "curriculum" in env_cfg_dict:
+        env_cfg.training_curriculum = dict(env_cfg_dict["curriculum"])
+    elif "gravity_curriculum" in env_cfg_dict:
+        env_cfg.training_curriculum = dict(env_cfg_dict["gravity_curriculum"])
 
     rewards_cfg = env_cfg_dict.get("rewards", {})
     if rewards_cfg:
@@ -170,11 +174,6 @@ def apply_env_config(env_cfg, env_cfg_dict: dict):
         if "drop_penalty" in rewards_cfg and hasattr(env_cfg.rewards, "drop"):
             env_cfg.rewards.drop.params["penalty"] = float(rewards_cfg["drop_penalty"])
 
-    # Termination overrides from YAML
-    term_cfg = env_cfg_dict.get("terminations", {})
-    if term_cfg:
-        if "no_contact_patience" in term_cfg and hasattr(env_cfg.terminations, "no_fingertip_contact"):
-            env_cfg.terminations.no_fingertip_contact.params["patience"] = int(term_cfg["no_contact_patience"])
 
 
 def _resolve_valid_minibatch_size(batch_size: int, requested_minibatch: int, seq_length: int) -> int:
@@ -561,6 +560,13 @@ def main():
             # reliable place to read the restored epoch_num and seed the
             # curriculum before the first rollout runs.
             super().after_init(algo)
+            # Wrap writer immediately so rl_games' own lowercase
+            # "performance/" metrics are filtered from the first epoch.
+            if not self._writer_wrapped and hasattr(self, "writer"):
+                self.writer = _FilteredWriter(self.writer)
+                if hasattr(algo, "writer"):
+                    algo.writer = _FilteredWriter(algo.writer)
+                self._writer_wrapped = True
             epoch = int(getattr(algo, "epoch_num", 0) or 0)
             frame = int(getattr(algo, "frame", 0) or 0)
             if epoch > 0 or frame > 0:
@@ -575,13 +581,6 @@ def main():
                 print(f"[Stage 1] WARNING: could not apply curriculum in after_init: {_e}")
 
         def after_print_stats(self, frame, epoch_num, total_time):
-            # Wrap the writer once on first callback to filter redundant metrics
-            if not self._writer_wrapped and hasattr(self, "writer"):
-                self.writer = _FilteredWriter(self.writer)
-                if hasattr(self.algo, "writer"):
-                    self.algo.writer = _FilteredWriter(self.algo.writer)
-                self._writer_wrapped = True
-
             from envs.mdp import events as mdp_events
             # Update curriculum (min_dist: 3cm → 8cm over first 30%)
             mdp_events.update_curriculum(
@@ -600,25 +599,19 @@ def main():
                     self.writer.add_scalar("Episode/" + key, value, epoch_num)
                 self.ep_infos.clear()
 
-            # Override direct_info — prevent rl_games from injecting its own
-            # success metrics. Use accumulated per-step counts from the wrapper
-            # so that drop_ratio reflects actual termination events, not
-            # the post-reset sim state.
+            # Use the same cumulative reset-reason counters that the print
+            # statement in events.py uses (_reset_log_stats), so Performance/
+            # metrics and console output show identical values.
             env = self.algo.vec_env.env
             _rg = getattr(env, "_last_rolling_goal_updates", 0)
-            _accum_steps = getattr(env, "_accum_step_count", 1)
-            _accum_drops = getattr(env, "_accum_drop_count", 0.0)
-            _accum_left = getattr(env, "_accum_left_hand_count", 0.0)
+            stats = env.extras.get("_reset_log_stats", {})
+            total_resets = max(stats.get("total_resets", 0), 1)
             self.direct_info = {
                 "success_ratio": _rg / max(env.num_envs, 1),
                 "rolling_goal_updates": _rg,
-                "drop_ratio": _accum_drops / max(_accum_steps, 1),
-                "left_hand_ratio": _accum_left / max(_accum_steps, 1),
+                "drop_ratio": stats.get("total_drops", 0) / total_resets,
+                "timeout_ratio": stats.get("total_timeouts", 0) / total_resets,
             }
-            # Reset accumulators for next epoch
-            env._accum_drop_count = 0.0
-            env._accum_left_hand_count = 0.0
-            env._accum_step_count = 0
 
             for k, v in self.direct_info.items():
                 self.writer.add_scalar(f"Performance/{k}", v, epoch_num)
@@ -752,7 +745,12 @@ class _IsaacLabVecEnv:
             self._joint_target = (self._joint_target + self._delta_scale * smoothed).clamp(-1.0, 1.0)
             env_actions = self._joint_target
         else:
-            env_actions = actions
+            # Absolute mode: apply EMA for smooth actions (OpenAI Dactyl style)
+            if self._prev_actions is None:
+                self._prev_actions = actions.clone()
+            alpha = self._actions_moving_average
+            env_actions = alpha * actions + (1.0 - alpha) * self._prev_actions
+            self._prev_actions = env_actions.clone()
 
         # Apply action delay DR (0-2 step lag set by randomize_action_delay).
         # Must be called here — the randomize event only sets the delay length;
@@ -763,12 +761,11 @@ class _IsaacLabVecEnv:
         obs, rew, terminated, truncated, info = self.env.step(delayed_actions)
         done = terminated | truncated
 
-        # Contact reward masking: zero out reward when no fingertip touches the object.
-        from envs.mdp.observations import fingertip_contact_binary
-        contact_mask = (fingertip_contact_binary(self.env).sum(dim=-1) > 0).float()
-        rew = rew * contact_mask
+        # Re-initialise action buffers for reset envs
+        if done.any() and self._action_mode != "delta" and self._prev_actions is not None:
+            done_ids = done.nonzero(as_tuple=False).squeeze(-1)
+            self._prev_actions[done_ids] = 0.0
 
-        # Delta mode: re-initialise joint target for reset envs
         if self._action_mode == "delta" and done.any():
             done_ids = done.nonzero(as_tuple=False).squeeze(-1)
             robot = self.env.scene["robot"]
@@ -797,36 +794,7 @@ class _IsaacLabVecEnv:
         info = dict(info) if isinstance(info, dict) else {}
         info["success_ratio"] = n_updated / self.env.num_envs
 
-        # Compute drop/left_hand from the done mask returned by env.step().
-        # Isaac Lab resets terminated envs inside step(), so querying the sim
-        # state afterwards would always show the post-reset (healthy) state.
-        # Instead, use the `done` mask (terminated | truncated) together with
-        # a fresh check to distinguish drop vs left_hand vs timeout.
-        # However, `done` already reflects reset envs too.
-        #
-        # The reliable source is the termination_manager's get_term() method
-        # which reads from the cached _term_dones tensor (computed BEFORE reset).
-        # _term_dones is a (num_envs, num_terms) bool Tensor, NOT a dict.
-        term_manager = getattr(self.env, "termination_manager", None)
-        drop_ratio = 0.0
-        left_hand_ratio = 0.0
-        if term_manager is not None:
-            active = set(getattr(term_manager, "active_terms", []))
-            if "object_drop" in active:
-                drop_ratio = float(term_manager.get_term("object_drop").float().mean().item())
-            if "object_left_hand" in active:
-                left_hand_ratio = float(term_manager.get_term("object_left_hand").float().mean().item())
-            if "no_fingertip_contact" in active:
-                info["no_contact_ratio"] = float(term_manager.get_term("no_fingertip_contact").float().mean().item())
-
-        info["drop_ratio"] = drop_ratio
-        info["left_hand_ratio"] = left_hand_ratio
         info["rolling_goal_updates"] = n_updated
-
-        # Accumulate for epoch-level Performance/ logging
-        self.env._accum_drop_count = getattr(self.env, "_accum_drop_count", 0) + drop_ratio
-        self.env._accum_left_hand_count = getattr(self.env, "_accum_left_hand_count", 0) + left_hand_ratio
-        self.env._accum_step_count = getattr(self.env, "_accum_step_count", 0) + 1
 
         return _to_rl_obs(obs), rew, done, info
 

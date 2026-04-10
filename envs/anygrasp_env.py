@@ -21,20 +21,23 @@ Sharpa Wave Hand: 5 fingers, 22 actuated DOF
   OBSERVATION SPLIT  (see mdp/observations.py for full details)
 =======================================================================
 
-  ACTOR = CRITIC — 101 dims (symmetric, no privileged info)
+  ACTOR = CRITIC — 199 dims (symmetric, no privileged info)
+
+  Temporal (3 frames × 64-dim per step = 192):
   ─────────────────────────────────────────────────────────────────
-  joint_pos_normalized       22   (all joints)
-  joint_vel_normalized       22   (all joints)
-  object_pos_hand             3   (current object position)
-  object_quat_hand            4   (current object quaternion)
+  joint_pos_normalized       22   (all joints, [-1,1] + noise)
+  joint_targets              22   (current action targets)
+  sensed_contacts             5   (smoothed force magnitude per tip)
+  contact_positions           15  (5 fingers × 3D position)
+  ─────────────────────────────────────────────────────────────────
+  Per-step: 22+22+5+15 = 64  ×  3 frames = 192
+
+  Non-temporal (appended once):
+  ─────────────────────────────────────────────────────────────────
   target_object_pos_hand      3   (goal object position)
   target_object_quat_hand     4   (goal object quaternion)
-  object_lin_vel_hand         3   (object linear velocity)
-  object_ang_vel_hand         3   (object angular velocity)
-  fingertip_contact_forces   15   (full 3-D forces per tip, 5×3)
-  last_action                22   (previous joint targets)
   ─────────────────────────────────────────────────────────────────
-  Total: 22+22+3+4+3+4+3+3+15+22 = 101
+  Total: 192 + 3 + 4 = 199
 
 =======================================================================
 """
@@ -379,9 +382,7 @@ if _ISAACLAB_AVAILABLE:
     @configclass
     class AnyGraspTerminationsCfg:
         time_out = DoneTerm(func=mdp_events.time_out, time_out=True)
-        object_drop = DoneTerm(func=mdp_events.object_dropped, params={"min_height": 0.2})
-        object_left_hand = DoneTerm(func=mdp_events.object_left_hand, params={"max_dist": 0.20})
-        no_fingertip_contact = DoneTerm(func=mdp_events.no_fingertip_contact, params={"patience": 30})
+        object_drop = DoneTerm(func=mdp_events.object_dropped, params={"min_height": 0.35})
 
     @configclass
     class AnyGraspEventsCfg:
@@ -407,7 +408,7 @@ if _ISAACLAB_AVAILABLE:
         grasp_graph_path: str = "data/grasp_graph.pkl"
         object_pool_specs: list = None   # type: ignore
         reset_refinement: dict = None    # type: ignore
-        gravity_curriculum: dict = None  # type: ignore
+        training_curriculum: dict = None  # type: ignore
         hand: dict = None                # type: ignore
 
         episode_length_s: float = 20.0
@@ -477,15 +478,17 @@ if _ISAACLAB_AVAILABLE:
             else:
                 self.hand = dict(self.hand)
 
-            if self.gravity_curriculum is None:
-                self.gravity_curriculum = {
+            if self.training_curriculum is None:
+                self.training_curriculum = {
                     "enabled": False,
                     "start_gravity": 0.05,
                     "end_gravity": 9.81,
-                    "warmup_ratio": 0.30,
+                    "warmup_ratio": 0.10,
+                    "min_orn_start": 0.10,
+                    "min_orn_end": 3.14,
                 }
             else:
-                self.gravity_curriculum = dict(self.gravity_curriculum)
+                self.training_curriculum = dict(self.training_curriculum)
 
             # Sensor link mapping for Sharpa Hand
             sensor_attr_by_link = {

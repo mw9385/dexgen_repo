@@ -54,41 +54,12 @@ from .sim_utils import (
 def time_out(env) -> torch.Tensor:
     return env.episode_length_buf >= env.max_episode_length
 
-def object_dropped(env, min_height: float = 0.2) -> torch.Tensor:
+def object_dropped(env, min_height: float = 0.35) -> torch.Tensor:
+    """Object dropped = fell below min_height.
+    Hand is at z=0.5, so 0.35 means object fell ~15cm below hand.
+    """
     obj = env.scene["object"]
     return obj.data.root_pos_w[:, 2] < min_height
-
-def object_left_hand(env, max_dist: float = 0.20) -> torch.Tensor:
-    """Terminate when object is too far from palm center."""
-    robot = env.scene["robot"]
-    obj = env.scene["object"]
-    palm_body_id = get_palm_body_id_from_env(robot, env)
-    palm_pos_w = robot.data.body_pos_w[:, palm_body_id, :]
-    dist = torch.norm(obj.data.root_pos_w - palm_pos_w, dim=-1)
-    return dist > max_dist
-
-def no_fingertip_contact(env, patience: int = 30) -> torch.Tensor:
-    """Terminate when no fingertip touches the object for `patience` consecutive steps.
-
-    Uses a per-env counter stored in env.extras["_no_contact_steps"].
-    patience=30 at 30Hz control = 1 second grace period.
-    """
-    from .observations import fingertip_contact_binary
-
-    contact = fingertip_contact_binary(env)          # (N, num_fingers)
-    any_contact = contact.sum(dim=-1) > 0             # (N,)
-
-    # Lazily initialise counter
-    buf = env.extras.get("_no_contact_steps")
-    if buf is None:
-        buf = torch.zeros(env.num_envs, device=env.device, dtype=torch.long)
-        env.extras["_no_contact_steps"] = buf
-
-    # Reset counter where contact exists, increment where it doesn't
-    buf[any_contact] = 0
-    buf[~any_contact] += 1
-
-    return buf >= patience
 
 # ---------------------------------------------------------------------------
 # Main reset event
@@ -155,24 +126,23 @@ def reset_to_random_grasp(
             continue
 
         batch_size = len(env_indices)
-        # Batch random start indices
         starts = rng.integers(0, N_grasps, size=batch_size)
-        cur_min_orn = getattr(graph, "_curriculum_min_orn", 0.50)
-        # Batch goal selection
+        cur_min_orn = getattr(graph, "_curriculum_min_orn", 0.10)
+        # Batch goal selection — single matrix op instead of per-env loop
+        goals = _batch_sample_nearby_goals(
+            g, starts, rng, min_orn=cur_min_orn, num_fingers=env_num_fingers,
+        )
         for j, local_i in enumerate(env_indices):
             start_idx_list[local_i] = int(starts[j])
-            goal_idx_list[local_i] = _sample_nearby_goal_index(
-                g, int(starts[j]), rng, min_orn=cur_min_orn, num_fingers=env_num_fingers,
-            )
+            goal_idx_list[local_i] = int(goals[j])
 
     # Extract grasp data in batch (one pass per object name group)
-    start_fps_list = [None] * n
-    goal_fps_list = [None] * n
+    start_fps_list = [np.zeros((env_num_fingers, 3), dtype=np.float32)] * n
+    goal_fps_list = [np.zeros((env_num_fingers, 3), dtype=np.float32)] * n
     start_joints_list = [None] * n
     start_object_pos_hand_list = [None] * n
     start_object_quat_hand_list = [None] * n
     start_object_pose_frame_list = [None] * n
-    goal_joints_list = [None] * n
     goal_object_pos_hand_list = [None] * n
     goal_object_quat_hand_list = [None] * n
     goal_object_pose_frame_list = [None] * n
@@ -185,31 +155,39 @@ def reset_to_random_grasp(
         else:
             g = graph
 
-        # Cache padded fingertip positions for this sub-graph
-        if not hasattr(g, "_cached_padded_fps"):
-            g._cached_padded_fps = np.stack([
-                pad_fingertip_positions(grasp.fingertip_positions.copy(), env_num_fingers)
-                for grasp in g.grasp_set.grasps
-            ])  # (N, F, 3)
+        # Build cached arrays once per sub-graph (numpy, fast indexing)
+        if not hasattr(g, "_cached_joints"):
+            grasps = g.grasp_set.grasps
+            g._cached_joints = np.stack([
+                gr.joint_angles if gr.joint_angles is not None
+                else np.zeros(22, dtype=np.float32) for gr in grasps
+            ])
+            g._cached_obj_pos = np.stack([
+                gr.object_pos_hand if gr.object_pos_hand is not None
+                else np.zeros(3, dtype=np.float32) for gr in grasps
+            ])
+            g._cached_obj_quat = np.stack([
+                gr.object_quat_hand if gr.object_quat_hand is not None
+                else np.array([1, 0, 0, 0], dtype=np.float32) for gr in grasps
+            ])
 
-        cached_fps = g._cached_padded_fps
-        grasps = g.grasp_set.grasps
+        si_arr = np.array([start_idx_list[i] for i in env_indices])
+        gi_arr = np.array([goal_idx_list[i] for i in env_indices])
 
-        for local_i in env_indices:
-            si = start_idx_list[local_i]
-            gi = goal_idx_list[local_i]
-            start_fps_list[local_i] = cached_fps[si]
-            goal_fps_list[local_i] = cached_fps[gi]
-            sg = grasps[si]
-            gg = grasps[gi]
-            start_joints_list[local_i] = getattr(sg, "joint_angles", None)
-            start_object_pos_hand_list[local_i] = getattr(sg, "object_pos_hand", None)
-            start_object_quat_hand_list[local_i] = getattr(sg, "object_quat_hand", None)
-            start_object_pose_frame_list[local_i] = getattr(sg, "object_pose_frame", None)
-            goal_joints_list[local_i] = getattr(gg, "joint_angles", None)
-            goal_object_pos_hand_list[local_i] = getattr(gg, "object_pos_hand", None)
-            goal_object_quat_hand_list[local_i] = getattr(gg, "object_quat_hand", None)
-            goal_object_pose_frame_list[local_i] = getattr(gg, "object_pose_frame", None)
+        s_joints = g._cached_joints[si_arr]     # (B, 22)
+        s_pos    = g._cached_obj_pos[si_arr]     # (B, 3)
+        s_quat   = g._cached_obj_quat[si_arr]    # (B, 4)
+        g_pos    = g._cached_obj_pos[gi_arr]     # (B, 3)
+        g_quat   = g._cached_obj_quat[gi_arr]    # (B, 4)
+
+        for j, local_i in enumerate(env_indices):
+            start_joints_list[local_i] = s_joints[j]
+            start_object_pos_hand_list[local_i] = s_pos[j]
+            start_object_quat_hand_list[local_i] = s_quat[j]
+            start_object_pose_frame_list[local_i] = "hand_root"
+            goal_object_pos_hand_list[local_i] = g_pos[j]
+            goal_object_quat_hand_list[local_i] = g_quat[j]
+            goal_object_pose_frame_list[local_i] = "hand_root"
 
     start_fps = torch.tensor(
         np.stack(start_fps_list), device=env.device, dtype=torch.float32
@@ -351,10 +329,6 @@ def reset_to_random_grasp(
     env.extras["last_action"][env_ids] = current_action
     env.extras["current_action"][env_ids] = current_action
 
-    # Reset no-contact termination counter
-    if "_no_contact_steps" in env.extras:
-        env.extras["_no_contact_steps"][env_ids] = 0
-
     # Reset delta reward prev-error buffers
     if "_prev_orn_error" in env.extras:
         from .rewards import _get_orn_error
@@ -366,6 +340,78 @@ def reset_to_random_grasp(
 # ---------------------------------------------------------------------------
 # Nearest-neighbor goal selection
 # ---------------------------------------------------------------------------
+
+def _batch_sample_nearby_goals(
+    graph, start_indices: np.ndarray, rng: np.random.Generator,
+    top_k: int = 5, min_orn: float = 0.50,
+    max_pos: float = 0.05,
+    num_fingers: int = 5,
+) -> np.ndarray:
+    """Fully vectorised goal sampling — no Python per-env loop.
+
+    Returns: np.ndarray of shape (B,) with goal indices.
+    """
+    N = len(graph.grasp_set.grasps)
+    B = len(start_indices)
+    if N <= 1:
+        return start_indices.copy()
+
+    all_quats = _get_cached_quats(graph)   # (N, 4) or None
+    all_pos = _get_cached_positions(graph)  # (N, 3) or None
+
+    if all_quats is None and all_pos is None:
+        return rng.integers(0, N, size=B)
+
+    # Score matrix (B, N) — lower = closer. Invalid entries get inf.
+    score = np.zeros((B, N), dtype=np.float32)
+
+    if all_quats is not None:
+        start_q = all_quats[start_indices]           # (B, 4)
+        dots = np.abs(start_q @ all_quats.T)         # (B, N)
+        np.clip(dots, 0.0, 1.0, out=dots)
+        orn_dists = 2.0 * np.arccos(dots)            # (B, N)
+        # Filter: must be >= min_orn
+        score += (orn_dists / max(min_orn, 1e-6)).astype(np.float32)
+        too_close = orn_dists < min_orn
+        score[too_close] = np.inf
+
+    if all_pos is not None:
+        start_p = all_pos[start_indices]              # (B, 3)
+        # Chunked position distance to avoid (B, N, 3) memory blow-up
+        pos_dists = np.empty((B, N), dtype=np.float32)
+        chunk = 512
+        for i in range(0, B, chunk):
+            end = min(i + chunk, B)
+            diff = all_pos[np.newaxis, :, :] - start_p[i:end, np.newaxis, :]
+            pos_dists[i:end] = np.linalg.norm(diff, axis=-1)
+        # Filter: must be <= max_pos
+        score += (pos_dists / max(max_pos, 1e-6)).astype(np.float32)
+        too_far = pos_dists > max_pos
+        score[too_far] = np.inf
+
+    # Mask self
+    score[np.arange(B), start_indices] = np.inf
+
+    # Fallback: if entire row is inf, allow any non-self index
+    all_inf = np.all(np.isinf(score), axis=1)
+    if all_inf.any():
+        # For these rows, set all non-self to 0 (equal chance)
+        fallback_score = np.zeros((int(all_inf.sum()), N), dtype=np.float32)
+        fb_starts = start_indices[all_inf]
+        fallback_score[np.arange(len(fb_starts)), fb_starts] = np.inf
+        score[all_inf] = fallback_score
+
+    # Batch top-k via argpartition
+    k = min(top_k, N - 1)
+    # argpartition along axis=1: first k elements are the k smallest
+    partitioned = np.argpartition(score, k - 1, axis=1)[:, :k]  # (B, k)
+
+    # Random select one from top-k per row
+    choices = rng.integers(0, k, size=B)
+    goals = partitioned[np.arange(B), choices]
+
+    return goals
+
 
 def _sample_nearby_goal_index(
     graph, start_idx: int, rng: np.random.Generator,
@@ -501,28 +547,32 @@ def _get_cached_positions(graph) -> Optional[np.ndarray]:
 
 def update_curriculum(env, epoch: int, total_epochs: int = 10000):
     """
-    Linearly increase min_orn from 0.50 to 1.50 rad over the curriculum
-    warmup period. Stored on the graph object so reset picks it up.
+    Update gravity and goal difficulty over training.
 
+    - Gravity: ramp from start_gravity to end_gravity
+    - Goal difficulty (min_orn): ramp from min_orn_start to min_orn_end
+
+    Both ramp linearly over warmup_ratio fraction of total_epochs.
     Call once per epoch from the training loop.
     """
     graph = _load_grasp_graph(env)
     if graph is None:
         return
-    warmup_ratio = float(
-        (getattr(env.cfg, "gravity_curriculum", None) or {}).get("warmup_ratio", 0.10)
-    )
+    cur_cfg = dict((getattr(env.cfg, "training_curriculum", None) or {})
+                   or (getattr(env.cfg, "gravity_curriculum", None) or {}))
+    warmup_ratio = float(cur_cfg.get("warmup_ratio", 0.10))
     warmup_epochs = int(total_epochs * warmup_ratio)
     t = min(epoch / max(warmup_epochs, 1), 1.0)
-    min_orn_start = 0.50
-    min_orn_end = 1.50
+
+    # Orientation curriculum: increase min goal distance over warmup
+    min_orn_start = float(cur_cfg.get("min_orn_start", 0.10))
+    min_orn_end = float(cur_cfg.get("min_orn_end", 0.50))
     graph._curriculum_min_orn = min_orn_start + t * (min_orn_end - min_orn_start)
 
-    gravity_cfg = dict((getattr(env.cfg, "gravity_curriculum", None) or {}))
-    if gravity_cfg.get("enabled", False):
-        warmup_ratio = float(gravity_cfg.get("warmup_ratio", 0.10))
-        gravity_start = float(gravity_cfg.get("start_gravity", 0.05))
-        gravity_end = float(gravity_cfg.get("end_gravity", 9.81))
+    # Gravity curriculum: ramp from near-zero to full gravity
+    if cur_cfg.get("enabled", False):
+        gravity_start = float(cur_cfg.get("start_gravity", 0.05))
+        gravity_end = float(cur_cfg.get("end_gravity", 9.81))
         gravity_warmup_epochs = int(total_epochs * warmup_ratio)
         gravity_t = min(epoch / max(gravity_warmup_epochs, 1), 1.0)
         gravity_mag = gravity_start + gravity_t * (gravity_end - gravity_start)
@@ -558,8 +608,11 @@ def update_rolling_goal(
     """
     from isaaclab.utils.math import quat_apply_inverse
 
+    _zero_mask = torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
+
     graph = _load_grasp_graph(env)
     if graph is None:
+        env.extras["_rolling_goal_success_mask"] = _zero_mask
         return 0
 
     goal_idx_buf  = env.extras.get("goal_grasp_idx")
@@ -567,6 +620,7 @@ def update_rolling_goal(
     target_pos    = env.extras.get("target_object_pos_hand")
     target_quat   = env.extras.get("target_object_quat_hand")
     if goal_idx_buf is None or target_pos is None or target_quat is None:
+        env.extras["_rolling_goal_success_mask"] = _zero_mask
         return 0
 
     # Object pose in hand frame
@@ -594,7 +648,11 @@ def update_rolling_goal(
     success_mask = (orn_err < rot_threshold)
 
     success_mask = success_mask & ~object_dropped(env)
-    success_mask = success_mask & ~object_left_hand(env)
+    success_mask = success_mask & ~object_dropped(env)
+
+    # Store per-env success mask so evaluate.py can read it after step().
+    # Must be stored BEFORE the target is updated below.
+    env.extras["_rolling_goal_success_mask"] = success_mask.clone()
 
     success_ids = success_mask.nonzero(as_tuple=False).squeeze(-1)
     if success_ids.numel() == 0:
@@ -622,8 +680,11 @@ def update_rolling_goal(
         else:
             g = graph
 
-        # kNN from current goal → new goal
-        new_goal_idx = _sample_nearby_goal_index(g, cur_goal_idx, rng, num_fingers=env_num_fingers)
+        # kNN from current goal → new goal (use curriculum min_orn)
+        cur_min_orn = getattr(graph, "_curriculum_min_orn", 0.10)
+        new_goal_idx = _sample_nearby_goal_index(
+            g, cur_goal_idx, rng, min_orn=cur_min_orn, num_fingers=env_num_fingers,
+        )
         new_goal_grasp = g.grasp_set[new_goal_idx]
 
         # Update goal fingertip positions
@@ -971,50 +1032,38 @@ def _log_goal_distances(env, env_ids: torch.Tensor):
 
     # --- Termination reason breakdown for the envs being reset ---
     tm = getattr(env, "termination_manager", None)
-    n_drop = n_left = n_nocontact = n_timeout = 0
+    n_drop = n_timeout = 0
     if tm is not None:
         active = set(getattr(tm, "active_terms", []))
         try:
             if "object_drop" in active:
                 n_drop = int(tm.get_term("object_drop")[eids_t].sum().item())
-            if "object_left_hand" in active:
-                n_left = int(tm.get_term("object_left_hand")[eids_t].sum().item())
-            if "no_fingertip_contact" in active:
-                n_nocontact = int(tm.get_term("no_fingertip_contact")[eids_t].sum().item())
         except Exception:
             pass
-        # Envs that reset without any failure flag were timeouts / episode-end.
-        n_timeout = max(n - n_drop - n_left - n_nocontact, 0)
+        n_timeout = max(n - n_drop, 0)
 
     # --- Cumulative counters across training ---
     stats = env.extras.setdefault("_reset_log_stats", {
         "total_resets": 0,
         "total_drops": 0,
-        "total_left_hand": 0,
-        "total_no_contact": 0,
         "total_timeouts": 0,
     })
     stats["total_resets"] += n
     stats["total_drops"] += n_drop
-    stats["total_left_hand"] += n_left
-    stats["total_no_contact"] += n_nocontact
     stats["total_timeouts"] += n_timeout
 
-    # Rolling-goal (success) hits — accumulated by update_rolling_goal since
-    # the previous reset log line.
     goal_window = int(env.extras.pop("_reset_log_goal_hits_window", 0))
     goal_total = int(env.extras.get("_reset_log_goal_hits_total", 0))
 
     drop_rate = stats["total_drops"] / max(stats["total_resets"], 1)
-    left_rate = stats["total_left_hand"] / max(stats["total_resets"], 1)
 
     print(
         f"[Reset #{_GOAL_LOG_COUNT}] ({n} envs) "
         f"pos={np.mean(pos_dists):.4f}m [{np.min(pos_dists):.4f}-{np.max(pos_dists):.4f}] "
         f"orn={np.mean(orn_dists):.2f}rad [{np.min(orn_dists):.2f}-{np.max(orn_dists):.2f}]  "
-        f"term: drop={n_drop} left={n_left} noc={n_nocontact} timeout={n_timeout}  "
+        f"term: drop={n_drop} timeout={n_timeout}  "
         f"goal_hits(win/total)={goal_window}/{goal_total}  "
-        f"cum_drop_rate={drop_rate:.3f}  left_rate={left_rate:.3f}"
+        f"cum_drop_rate={drop_rate:.3f}"
     )
 
 

@@ -11,15 +11,17 @@ env:
   episode_length_s: 10.0
   action_scale: 1.0              # [-1,1] maps to full joint range
   action_mode: "absolute"        # policy outputs target joint positions directly (OpenAI Dactyl style)
+  actions_moving_average: 1.0    # 1.0 = no smoothing (add EMA later for sim-to-real)
   decimation: 12                 # control at 20 Hz (240 Hz sim / 12), matching Sharpa default
-  gravity_curriculum:
+  training_curriculum:
     enabled: true
+    warmup_ratio: 0.10            # fraction of total epochs for ramp-up
+    # Gravity: start near-zero, ramp to full
     start_gravity: 0.05
     end_gravity: 9.81
-    warmup_ratio: 0.10
-
-  terminations:
-    no_contact_patience: 30          # steps with 0 fingertip contact → reset (30 steps = 1s at 30Hz)
+    # Goal difficulty: min orientation distance for kNN goal selection
+    min_orn_start: 0.10           # rad (~5.7°) — easy goals at epoch 0
+    min_orn_end: 3.14             # rad (~180°) — full rotation at end of warmup
 
   rewards:
     # OpenAI "Learning Dexterous In-Hand Manipulation" (2018)
@@ -33,85 +35,61 @@ env:
 # Symmetric Actor-Critic PPO (rl_games)
 # ==============================================================================
 #
-#   Shadow Hand (22 finger DOF, 5 fingers; wrist excluded from policy):
-#   Actor = Critic: MLP [1024, 512, 512, 256, 256]  input: 101-dim obs (symmetric)
-#     joint_pos(22) + joint_vel(22) + obj_pose(7) + target_obj_pose(7)
-#     + obj_vel(6) + contact_forces(15) + last_action(22)
+#   Sharpa Hand (22 DOF, 5 fingers; no wrist):
+#   Actor = Critic: MLP [1024, 512, 512, 256, 256]  input: 199-dim obs (symmetric)
+#     temporal(192) = 3 frames × [joint_pos(22) + joint_targets(22)
+#                                 + contacts(5) + contact_pos(15)]
+#     + target_obj_pos(3) + target_obj_quat(4)
 #
 #   rl_games reads env observations["policy"] for actor and
-#   env observations["critic"] for critic (both 101-dim, symmetric).
+#   env observations["critic"] for critic (both 199-dim, symmetric).
 # ==============================================================================
 
 ppo:
-  # Actor network — matches paper (arXiv:2502.04307) architecture.
-  # Paper uses [1024, 512, 512, 256, 256] for both actor and critic.
-  # Shadow Hand (24 DOF, 5 fingers) benefits from the larger capacity.
   units: [1024, 512, 512, 256, 256]
   activation: elu
   fixed_sigma: true
   sigma_init: -1.0
 
-  # RNN (LSTM) — set use_rnn: true to enable.
-  # MLP acts as feature extractor, then LSTM processes the sequence.
-  # seq_length controls BPTT length; horizon_length must be divisible by it.
   use_rnn: false
   rnn:
     name: lstm
     units: 256
     layers: 1
-    before_mlp: false       # MLP → LSTM → mu
-    concat_input: true      # concat raw input with MLP output for LSTM input
+    before_mlp: false
+    concat_input: true
 
-  # Core PPO hyperparameters
   learning_rate: 5.0e-4
   lr_schedule: adaptive
   lr_threshold: 0.008
   gamma: 0.99
-  tau: 0.95                      # GAE lambda
+  tau: 0.95
   e_clip: 0.2
-  # entropy_coef=0.0: standard for dexterous manipulation (IsaacGymEnvs ShadowHand).
-  # Nonzero values can cause entropy to rise continuously when reward signal is weak.
   entropy_coef: 0.0
   bounds_loss_coef: 0.0001
   critic_coef: 4.0
   grad_norm: 1.0
-  # [FIX] normalize_input/value: true — critical for stable learning
   normalize_input: true
   normalize_value: true
   normalize_advantage: true
 
-  # Slightly stronger reward scale so dense goal rewards are not drowned out early.
   reward_shaper_scale: 1.0
 
-  # Rollout
-  # Paper (arXiv:2502.04307) batch_size=8192: num_envs(512) × horizon(16) = 8192.
   horizon_length: 16
-  seq_length: 8              # BPTT length for LSTM (ignored for MLP)
+  seq_length: 8
   num_steps_per_env: 16
   mini_epochs: 8
   minibatch_size: 4096
 
-  # Training length
   max_iterations: 10000
 
-# ==============================================================================
-# Central Value Function (symmetric: same 101-dim obs as actor)
-# ==============================================================================
-# Reads env observations["critic"] which mirrors observations["policy"].
-# Same architecture as actor (symmetric AC, no privileged info).
-# ==============================================================================
-
 central_value:
-  # Critic network — same size as actor per paper.
   units: [1024, 512, 512, 256, 256]
   activation: elu
-
-  # Critic-specific PPO params
   learning_rate: 5.0e-4
   lr_schedule: adaptive
   lr_threshold: 0.008
   clip_value: true
-  # [FIX] normalize_input: true for critic as well
   normalize_input: true
   grad_norm: 1.0
   mini_epochs: 4
@@ -122,43 +100,16 @@ logging:
   save_frequency: 1000
   print_stats: true
 
-# ==============================================================================
-# Domain Randomization
-# ==============================================================================
-# Values are injected into AnyGraspEventsCfg at training startup.
-# Edit these ranges to change what gets randomised each episode reset.
-#
-#  object_physics:
-#    mass_range        [kg]   object inertia (heavier → harder to fling)
-#    friction_range    [-]    lateral contact friction
-#    restitution_range [-]    bounciness (0 = no bounce)
-#
-#  robot_physics:
-#    damping_range     [N·m·s/rad]  per-joint velocity damping
-#    armature_range    [kg·m²]      per-joint effective inertia
-#
-#  action_delay:
-#    max_delay         [steps]  max sim-step lag injected into action stream
-#
-#  obs_noise:
-#    joint_pos_std     [rad]    Gaussian noise on joint position encoder
-#    joint_vel_std     [rad/s]  Gaussian noise on joint velocity (pre-normalise)
-# ==============================================================================
-
 domain_randomization:
-
   object_physics:
-    mass_range:        [0.05, 0.10]   # kg  50-100g (tennis ball ~58g)
-    friction_range:    [0.80, 1.20]   # -   high grip for stable manipulation
-    restitution_range: [0.00, 0.20]   # -   (narrowed from [0.00, 0.40])
-
+    mass_range:        [0.05, 0.10]
+    friction_range:    [0.80, 1.20]
+    restitution_range: [0.00, 0.20]
   robot_physics:
-    damping_range:     [0.01, 0.10]   # N·m·s/rad  (narrowed from [0.01, 0.30])
-    armature_range:    [0.001, 0.01]  # kg·m²      (narrowed from [0.001, 0.03])
-
+    damping_range:     [0.01, 0.10]
+    armature_range:    [0.001, 0.01]
   action_delay:
-    max_delay: 1                       # steps  (reduced from 2; 0 = no delay)
-
+    max_delay: 1
   obs_noise:
-    joint_pos_std:     0.005           # rad
-    joint_vel_std:     0.04            # in normalised space (≈ 0.2 rad/s)
+    joint_pos_std:     0.005
+    joint_vel_std:     0.04
