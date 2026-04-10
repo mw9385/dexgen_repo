@@ -752,7 +752,12 @@ class _IsaacLabVecEnv:
             self._joint_target = (self._joint_target + self._delta_scale * smoothed).clamp(-1.0, 1.0)
             env_actions = self._joint_target
         else:
-            env_actions = actions
+            # Absolute mode: apply EMA for smooth actions (OpenAI Dactyl style)
+            if self._prev_actions is None:
+                self._prev_actions = actions.clone()
+            alpha = self._actions_moving_average
+            env_actions = alpha * actions + (1.0 - alpha) * self._prev_actions
+            self._prev_actions = env_actions.clone()
 
         # Apply action delay DR (0-2 step lag set by randomize_action_delay).
         # Must be called here — the randomize event only sets the delay length;
@@ -768,7 +773,11 @@ class _IsaacLabVecEnv:
         contact_mask = (fingertip_contact_binary(self.env).sum(dim=-1) > 0).float()
         rew = rew * contact_mask
 
-        # Delta mode: re-initialise joint target for reset envs
+        # Re-initialise action buffers for reset envs
+        if done.any() and self._action_mode != "delta" and self._prev_actions is not None:
+            done_ids = done.nonzero(as_tuple=False).squeeze(-1)
+            self._prev_actions[done_ids] = 0.0
+
         if self._action_mode == "delta" and done.any():
             done_ids = done.nonzero(as_tuple=False).squeeze(-1)
             robot = self.env.scene["robot"]
