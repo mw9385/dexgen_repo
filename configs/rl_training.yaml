@@ -20,7 +20,7 @@ env:
     end_gravity: 9.81
     # Goal difficulty: min orientation distance for kNN goal selection
     min_orn_start: 0.10           # rad (~5.7°) — easy goals at epoch 0
-    min_orn_end: 0.50             # rad (~28.6°) — harder goals at end of warmup
+    min_orn_end: 3.14             # rad (~180°) — full rotation at end of warmup
     # NOTE: min_orn_end must not exceed the dataset's max pairwise distance.
     # Current dataset (sharpa_grasp_cube_050.npy): max ~1.04 rad.
 

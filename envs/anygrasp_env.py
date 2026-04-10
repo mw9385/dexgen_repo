@@ -484,7 +484,7 @@ if _ISAACLAB_AVAILABLE:
                     "end_gravity": 9.81,
                     "warmup_ratio": 0.10,
                     "min_orn_start": 0.10,
-                    "min_orn_end": 0.50,
+                    "min_orn_end": 3.14,
                 }
             else:
                 self.curriculum = dict(self.curriculum)
