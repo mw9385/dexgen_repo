@@ -22,7 +22,7 @@ env:
     enabled: true
     start_gravity: 0.05
     end_gravity: 9.81
-    warmup_ratio: 0.30
+    warmup_ratio: 0.10
 
   terminations:
     no_contact_patience: 30          # steps with 0 fingertip contact → reset (30 steps = 1s at 30Hz)
