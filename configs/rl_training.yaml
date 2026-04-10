@@ -41,7 +41,7 @@ env:
 # ==============================================================================
 #
 #   Sharpa Hand (22 DOF, 5 fingers; no wrist):
-#   Actor = Critic: MLP [1024, 512, 512, 256, 256]  input: 199-dim obs (symmetric)
+#   Actor = Critic: MLP [512, 256, 128]  input: 199-dim obs (symmetric)
 #     temporal(192) = 3 frames × [joint_pos(22) + joint_targets(22)
 #                                 + contacts(5) + contact_pos(15)]
 #     + target_obj_pos(3) + target_obj_quat(4)
@@ -51,7 +51,7 @@ env:
 # ==============================================================================
 
 ppo:
-  units: [1024, 512, 512, 256, 256]
+  units: [512, 256, 128]
   activation: elu
   fixed_sigma: true
   sigma_init: -1.0
@@ -89,7 +89,7 @@ ppo:
   max_iterations: 10000
 
 central_value:
-  units: [1024, 512, 512, 256, 256]
+  units: [512, 256, 128]
   activation: elu
   learning_rate: 5.0e-4
   lr_schedule: adaptive
