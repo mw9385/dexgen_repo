@@ -21,20 +21,23 @@ Sharpa Wave Hand: 5 fingers, 22 actuated DOF
   OBSERVATION SPLIT  (see mdp/observations.py for full details)
 =======================================================================
 
-  ACTOR = CRITIC — 101 dims (symmetric, no privileged info)
+  ACTOR = CRITIC — 199 dims (symmetric, no privileged info)
+
+  Temporal (3 frames × 64-dim per step = 192):
   ─────────────────────────────────────────────────────────────────
-  joint_pos_normalized       22   (all joints)
-  joint_vel_normalized       22   (all joints)
-  object_pos_hand             3   (current object position)
-  object_quat_hand            4   (current object quaternion)
+  joint_pos_normalized       22   (all joints, [-1,1] + noise)
+  joint_targets              22   (current action targets)
+  sensed_contacts             5   (smoothed force magnitude per tip)
+  contact_positions           15  (5 fingers × 3D position)
+  ─────────────────────────────────────────────────────────────────
+  Per-step: 22+22+5+15 = 64  ×  3 frames = 192
+
+  Non-temporal (appended once):
+  ─────────────────────────────────────────────────────────────────
   target_object_pos_hand      3   (goal object position)
   target_object_quat_hand     4   (goal object quaternion)
-  object_lin_vel_hand         3   (object linear velocity)
-  object_ang_vel_hand         3   (object angular velocity)
-  fingertip_contact_forces   15   (full 3-D forces per tip, 5×3)
-  last_action                22   (previous joint targets)
   ─────────────────────────────────────────────────────────────────
-  Total: 22+22+3+4+3+4+3+3+15+22 = 101
+  Total: 192 + 3 + 4 = 199
 
 =======================================================================
 """

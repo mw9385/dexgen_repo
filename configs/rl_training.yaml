@@ -38,13 +38,14 @@ env:
 # Symmetric Actor-Critic PPO (rl_games)
 # ==============================================================================
 #
-#   Shadow Hand (22 finger DOF, 5 fingers; wrist excluded from policy):
-#   Actor = Critic: MLP [1024, 512, 512, 256, 256]  input: 101-dim obs (symmetric)
-#     joint_pos(22) + joint_vel(22) + obj_pose(7) + target_obj_pose(7)
-#     + obj_vel(6) + contact_forces(15) + last_action(22)
+#   Sharpa Hand (22 DOF, 5 fingers; no wrist):
+#   Actor = Critic: MLP [1024, 512, 512, 256, 256]  input: 199-dim obs (symmetric)
+#     temporal(192) = 3 frames × [joint_pos(22) + joint_targets(22)
+#                                 + contacts(5) + contact_pos(15)]
+#     + target_obj_pos(3) + target_obj_quat(4)
 #
 #   rl_games reads env observations["policy"] for actor and
-#   env observations["critic"] for critic (both 101-dim, symmetric).
+#   env observations["critic"] for critic (both 199-dim, symmetric).
 # ==============================================================================
 
 ppo:
