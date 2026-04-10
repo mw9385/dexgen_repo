@@ -572,20 +572,23 @@ def update_curriculum(env, epoch: int, total_epochs: int = 10000):
 
     Both ramp linearly over warmup_ratio fraction of total_epochs.
     Call once per epoch from the training loop.
+
+    Gravity updates run whenever ``training_curriculum.enabled`` is true.
+    Orientation ``_curriculum_min_orn`` is stored on the merged grasp graph only
+    when a graph is loaded (no-op if missing).
     """
-    graph = _load_grasp_graph(env)
-    if graph is None:
-        return
     cur_cfg = dict((getattr(env.cfg, "training_curriculum", None) or {})
                    or (getattr(env.cfg, "gravity_curriculum", None) or {}))
     warmup_ratio = float(cur_cfg.get("warmup_ratio", 0.10))
     warmup_epochs = int(total_epochs * warmup_ratio)
     t = min(epoch / max(warmup_epochs, 1), 1.0)
 
-    # Orientation curriculum: increase min goal distance over warmup
-    min_orn_start = float(cur_cfg.get("min_orn_start", 0.10))
-    min_orn_end = float(cur_cfg.get("min_orn_end", 0.50))
-    graph._curriculum_min_orn = min_orn_start + t * (min_orn_end - min_orn_start)
+    graph = _load_grasp_graph(env)
+    if graph is not None:
+        # Orientation curriculum: increase min goal distance over warmup (kNN goals)
+        min_orn_start = float(cur_cfg.get("min_orn_start", 0.10))
+        min_orn_end = float(cur_cfg.get("min_orn_end", 0.50))
+        graph._curriculum_min_orn = min_orn_start + t * (min_orn_end - min_orn_start)
 
     # Gravity curriculum: ramp from near-zero to full gravity
     if cur_cfg.get("enabled", False):
