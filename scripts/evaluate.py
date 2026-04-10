@@ -465,33 +465,6 @@ class _EvalVecEnv(_IsaacLabVecEnv):
 # Metric-collecting play loop
 # ---------------------------------------------------------------------------
 
-def _compute_orn_error(env) -> torch.Tensor:
-    """Per-env object orientation error (rad) against the current target."""
-    target_quat = env.extras.get("target_object_quat_hand")
-    if target_quat is None:
-        return torch.full((env.num_envs,), float("inf"), device=env.device)
-    robot = env.scene["robot"]
-    obj = env.scene["object"]
-    root_quat = robot.data.root_quat_w
-
-    def _qc(q):
-        return torch.cat([q[..., :1], -q[..., 1:]], dim=-1)
-
-    def _qm(q1, q2):
-        w1, x1, y1, z1 = q1.unbind(-1)
-        w2, x2, y2, z2 = q2.unbind(-1)
-        return torch.stack([
-            w1*w2 - x1*x2 - y1*y2 - z1*z2,
-            w1*x2 + x1*w2 + y1*z2 - z1*y2,
-            w1*y2 - x1*z2 + y1*w2 + z1*x2,
-            w1*z2 + x1*y2 - y1*x2 + z1*w2,
-        ], dim=-1)
-
-    cur_quat = _qm(_qc(root_quat), obj.data.root_quat_w)
-    dot = (cur_quat * target_quat).sum(dim=-1).abs().clamp(0.0, 1.0)
-    return 2.0 * torch.acos(dot)
-
-
 def _run_eval_loop(player, vec_env, num_episodes: int, device: str, results_json: str | None,
                    checkpoint_path: str = "", goal_threshold: float = 0.4):
     """Manually drive the rl_games Player so we can collect per-episode metrics."""
@@ -503,9 +476,6 @@ def _run_eval_loop(player, vec_env, num_episodes: int, device: str, results_json
     ep_length = torch.zeros(num_envs, device=device, dtype=torch.long)
     ep_goal_hits = torch.zeros(num_envs, device=device, dtype=torch.long)
     ep_reached_goal = torch.zeros(num_envs, device=device, dtype=torch.bool)
-    # Track per-env goal state across steps so a sustained "at goal" segment
-    # only counts as one success (rising-edge detection).
-    was_at_goal = torch.zeros(num_envs, device=device, dtype=torch.bool)
 
     finished_rewards: list[float] = []
     finished_lengths: list[int] = []
@@ -537,20 +507,18 @@ def _run_eval_loop(player, vec_env, num_episodes: int, device: str, results_json
         ep_length += 1
         total_steps += 1
 
-        # --- Goal success detection (rising edge of rot_dist < threshold) ---
-        orn_err = _compute_orn_error(raw_env)
-        at_goal = orn_err < goal_threshold
-        new_goal_hits = at_goal & ~was_at_goal   # rising edge this step
-        was_at_goal = at_goal
-
-        if new_goal_hits.any():
-            hit_ids = new_goal_hits.nonzero(as_tuple=False).squeeze(-1).tolist()
+        # --- Goal success detection ---
+        # Read the per-env success mask that update_rolling_goal() stored
+        # BEFORE it changed the target. Checking orn_err after step()
+        # would always miss hits because the target has already moved.
+        goal_mask = raw_env.extras.get("_rolling_goal_success_mask")
+        if goal_mask is not None and goal_mask.any():
+            hit_ids = goal_mask.nonzero(as_tuple=False).squeeze(-1).tolist()
             for eid in hit_ids:
-                err_deg = float(orn_err[eid].item()) * 180 / 3.14159
                 print(f"  [✓ GOAL REACHED] step={total_steps}  env={eid}  "
-                      f"err={err_deg:.1f}°  ep_len={int(ep_length[eid].item())}")
-            ep_goal_hits[new_goal_hits] += 1
-            ep_reached_goal[new_goal_hits] = True
+                      f"ep_len={int(ep_length[eid].item())}")
+            ep_goal_hits[goal_mask] += 1
+            ep_reached_goal[goal_mask] = True
 
         drop_events += float(info.get("drop_ratio", 0.0)) * num_envs
         left_hand_events += float(info.get("left_hand_ratio", 0.0)) * num_envs
@@ -575,7 +543,6 @@ def _run_eval_loop(player, vec_env, num_episodes: int, device: str, results_json
                 ep_length[i] = 0
                 ep_goal_hits[i] = 0
                 ep_reached_goal[i] = False
-                was_at_goal[i] = False
 
                 if len(finished_rewards) >= num_episodes:
                     break

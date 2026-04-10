@@ -558,8 +558,11 @@ def update_rolling_goal(
     """
     from isaaclab.utils.math import quat_apply_inverse
 
+    _zero_mask = torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
+
     graph = _load_grasp_graph(env)
     if graph is None:
+        env.extras["_rolling_goal_success_mask"] = _zero_mask
         return 0
 
     goal_idx_buf  = env.extras.get("goal_grasp_idx")
@@ -567,6 +570,7 @@ def update_rolling_goal(
     target_pos    = env.extras.get("target_object_pos_hand")
     target_quat   = env.extras.get("target_object_quat_hand")
     if goal_idx_buf is None or target_pos is None or target_quat is None:
+        env.extras["_rolling_goal_success_mask"] = _zero_mask
         return 0
 
     # Object pose in hand frame
@@ -595,6 +599,10 @@ def update_rolling_goal(
 
     success_mask = success_mask & ~object_dropped(env)
     success_mask = success_mask & ~object_left_hand(env)
+
+    # Store per-env success mask so evaluate.py can read it after step().
+    # Must be stored BEFORE the target is updated below.
+    env.extras["_rolling_goal_success_mask"] = success_mask.clone()
 
     success_ids = success_mask.nonzero(as_tuple=False).squeeze(-1)
     if success_ids.numel() == 0:
