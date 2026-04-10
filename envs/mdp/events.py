@@ -311,6 +311,17 @@ def reset_to_random_grasp(
         np.stack(goal_object_quat_hand_list), device=env.device, dtype=torch.float32
     )
 
+    # Add random orientation noise to the spawned object so the policy
+    # doesn't only see the exact orientations stored in the grasp graph.
+    obj_orn_noise_rad = float(
+        (getattr(env.cfg, "hand", None) or {}).get("obj_orn_noise_deg", 15.0)
+    )
+    if obj_orn_noise_rad > 0:
+        import math
+        start_quat_hand_t = add_rotation_noise(
+            start_quat_hand_t, math.radians(obj_orn_noise_rad), env.device, n,
+        )
+
     obj_pos_w = wrist_pos + quat_apply(wrist_quat, start_pos_hand_t)
     obj_quat_w = quat_multiply(wrist_quat, start_quat_hand_t)
     obj_quat_w = obj_quat_w / (torch.norm(obj_quat_w, dim=-1, keepdim=True) + 1e-8)

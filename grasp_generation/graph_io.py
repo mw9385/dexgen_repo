@@ -105,7 +105,7 @@ class MultiObjectGraspGraph:
 
 
 # ---------------------------------------------------------------------------
-# Cube symmetry augmentation (24 rotations)
+# Orientation augmentation (uniform random rotation)
 # ---------------------------------------------------------------------------
 
 def _qmul(q1: np.ndarray, q2: np.ndarray) -> np.ndarray:
@@ -120,50 +120,28 @@ def _qmul(q1: np.ndarray, q2: np.ndarray) -> np.ndarray:
     ], axis=-1)
 
 
-def _axis_angle_quat(axis: np.ndarray, angle: float) -> np.ndarray:
-    a = np.asarray(axis, dtype=np.float64)
-    a = a / (np.linalg.norm(a) + 1e-8)
-    h = angle * 0.5
-    return np.array([np.cos(h), *(a * np.sin(h))], dtype=np.float64)
+def _uniform_random_quats(n: int, rng: np.random.Generator) -> np.ndarray:
+    """Sample n uniform random unit quaternions (w,x,y,z). Returns (n, 4)."""
+    q = rng.standard_normal((n, 4))
+    q = q / (np.linalg.norm(q, axis=-1, keepdims=True) + 1e-8)
+    return q
 
 
-def _cube_symmetry_quats() -> np.ndarray:
-    """24 quaternions of the cube rotation group. Returns (24, 4)."""
-    quats = [np.array([1, 0, 0, 0], dtype=np.float64)]
-    # Face rotations: 90°, 180°, 270° around x, y, z
-    for ax in [[1,0,0], [0,1,0], [0,0,1]]:
-        for ang in [np.pi/2, np.pi, 3*np.pi/2]:
-            quats.append(_axis_angle_quat(ax, ang))
-    # Edge rotations: 180° around face diagonals
-    for ax in [[1,1,0],[1,-1,0],[1,0,1],[1,0,-1],[0,1,1],[0,1,-1]]:
-        quats.append(_axis_angle_quat(ax, np.pi))
-    # Vertex rotations: 120°, 240° around body diagonals
-    for ax in [[1,1,1],[1,1,-1],[1,-1,1],[1,-1,-1]]:
-        for ang in [2*np.pi/3, 4*np.pi/3]:
-            quats.append(_axis_angle_quat(ax, ang))
-    arr = np.stack(quats)
-    return arr / (np.linalg.norm(arr, axis=-1, keepdims=True) + 1e-8)
+def _augment_orientation(data: np.ndarray, seed: int = 42) -> np.ndarray:
+    """Apply a uniform random rotation to each grasp's object quaternion.
 
-
-def _augment_cube_symmetry(data: np.ndarray, seed: int = 42) -> np.ndarray:
-    """Apply a random cube symmetry rotation to each grasp.
-
-    Input: (N, 29). Returns (N, 29) — same count, wider orientation spread.
-    Each grasp gets one of the 24 cube symmetry rotations chosen at random.
-    Joint angles and object position are unchanged; only object_quat_hand
-    is rotated. Valid because a cube is invariant under these rotations.
+    Input: (N, 29). Returns (N, 29) — same count, full SO(3) coverage.
+    Each grasp gets a random rotation applied to object_quat_hand.
+    Joint angles and object position are unchanged.
     """
-    sym_quats = _cube_symmetry_quats()  # (24, 4)
     N = data.shape[0]
     rng = np.random.default_rng(seed)
 
     out = data.copy()
-    # Pick a random symmetry rotation for each grasp
-    indices = rng.integers(0, 24, size=N)
-    chosen = sym_quats[indices]  # (N, 4)
+    rand_q = _uniform_random_quats(N, rng)  # (N, 4)
 
     obj_q = out[:, 25:29].astype(np.float64)
-    new_q = _qmul(obj_q, chosen)
+    new_q = _qmul(obj_q, rand_q)
     new_q = new_q / (np.linalg.norm(new_q, axis=-1, keepdims=True) + 1e-8)
     out[:, 25:29] = new_q.astype(np.float32)
     return out
@@ -201,10 +179,11 @@ def load_npy_as_graph(path: str | Path) -> MultiObjectGraspGraph:
                 except ValueError:
                     pass
 
-    # Auto-augment cubes with random symmetry rotations
-    if shape_type == "cube":
-        data = _augment_cube_symmetry(data)
-        print(f"[graph_io] Cube symmetry augmentation applied to {N_orig} grasps")
+    # Apply uniform random rotation to each grasp's object orientation
+    # so the policy learns to handle all orientations, not just the
+    # narrow band (~60°) from the original data generation.
+    data = _augment_orientation(data)
+    print(f"[graph_io] Orientation augmentation applied to {N_orig} grasps")
 
     N = data.shape[0]
     obj_name = f"{shape_type}_{int(size * 1000):03d}_f5"

@@ -157,6 +157,11 @@ def apply_env_config(env_cfg, env_cfg_dict: dict):
         env_cfg.sim.render_interval = env_cfg.decimation
     if "gravity_curriculum" in env_cfg_dict:
         env_cfg.gravity_curriculum = dict(env_cfg_dict["gravity_curriculum"])
+    if "obj_orn_noise_deg" in env_cfg_dict:
+        if env_cfg.hand is None:
+            env_cfg.hand = {}
+        env_cfg.hand = dict(env_cfg.hand)
+        env_cfg.hand["obj_orn_noise_deg"] = float(env_cfg_dict["obj_orn_noise_deg"])
 
     rewards_cfg = env_cfg_dict.get("rewards", {})
     if rewards_cfg:
