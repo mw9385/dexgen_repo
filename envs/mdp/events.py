@@ -166,13 +166,12 @@ def reset_to_random_grasp(
             goal_idx_list[local_i] = int(goals[j])
 
     # Extract grasp data in batch (one pass per object name group)
-    start_fps_list = [None] * n
-    goal_fps_list = [None] * n
+    start_fps_list = [np.zeros((env_num_fingers, 3), dtype=np.float32)] * n
+    goal_fps_list = [np.zeros((env_num_fingers, 3), dtype=np.float32)] * n
     start_joints_list = [None] * n
     start_object_pos_hand_list = [None] * n
     start_object_quat_hand_list = [None] * n
     start_object_pose_frame_list = [None] * n
-    goal_joints_list = [None] * n
     goal_object_pos_hand_list = [None] * n
     goal_object_quat_hand_list = [None] * n
     goal_object_pose_frame_list = [None] * n
@@ -185,31 +184,39 @@ def reset_to_random_grasp(
         else:
             g = graph
 
-        # Cache padded fingertip positions for this sub-graph
-        if not hasattr(g, "_cached_padded_fps"):
-            g._cached_padded_fps = np.stack([
-                pad_fingertip_positions(grasp.fingertip_positions.copy(), env_num_fingers)
-                for grasp in g.grasp_set.grasps
-            ])  # (N, F, 3)
+        # Build cached arrays once per sub-graph (numpy, fast indexing)
+        if not hasattr(g, "_cached_joints"):
+            grasps = g.grasp_set.grasps
+            g._cached_joints = np.stack([
+                gr.joint_angles if gr.joint_angles is not None
+                else np.zeros(22, dtype=np.float32) for gr in grasps
+            ])
+            g._cached_obj_pos = np.stack([
+                gr.object_pos_hand if gr.object_pos_hand is not None
+                else np.zeros(3, dtype=np.float32) for gr in grasps
+            ])
+            g._cached_obj_quat = np.stack([
+                gr.object_quat_hand if gr.object_quat_hand is not None
+                else np.array([1, 0, 0, 0], dtype=np.float32) for gr in grasps
+            ])
 
-        cached_fps = g._cached_padded_fps
-        grasps = g.grasp_set.grasps
+        si_arr = np.array([start_idx_list[i] for i in env_indices])
+        gi_arr = np.array([goal_idx_list[i] for i in env_indices])
 
-        for local_i in env_indices:
-            si = start_idx_list[local_i]
-            gi = goal_idx_list[local_i]
-            start_fps_list[local_i] = cached_fps[si]
-            goal_fps_list[local_i] = cached_fps[gi]
-            sg = grasps[si]
-            gg = grasps[gi]
-            start_joints_list[local_i] = getattr(sg, "joint_angles", None)
-            start_object_pos_hand_list[local_i] = getattr(sg, "object_pos_hand", None)
-            start_object_quat_hand_list[local_i] = getattr(sg, "object_quat_hand", None)
-            start_object_pose_frame_list[local_i] = getattr(sg, "object_pose_frame", None)
-            goal_joints_list[local_i] = getattr(gg, "joint_angles", None)
-            goal_object_pos_hand_list[local_i] = getattr(gg, "object_pos_hand", None)
-            goal_object_quat_hand_list[local_i] = getattr(gg, "object_quat_hand", None)
-            goal_object_pose_frame_list[local_i] = getattr(gg, "object_pose_frame", None)
+        s_joints = g._cached_joints[si_arr]     # (B, 22)
+        s_pos    = g._cached_obj_pos[si_arr]     # (B, 3)
+        s_quat   = g._cached_obj_quat[si_arr]    # (B, 4)
+        g_pos    = g._cached_obj_pos[gi_arr]     # (B, 3)
+        g_quat   = g._cached_obj_quat[gi_arr]    # (B, 4)
+
+        for j, local_i in enumerate(env_indices):
+            start_joints_list[local_i] = s_joints[j]
+            start_object_pos_hand_list[local_i] = s_pos[j]
+            start_object_quat_hand_list[local_i] = s_quat[j]
+            start_object_pose_frame_list[local_i] = "hand_root"
+            goal_object_pos_hand_list[local_i] = g_pos[j]
+            goal_object_quat_hand_list[local_i] = g_quat[j]
+            goal_object_pose_frame_list[local_i] = "hand_root"
 
     start_fps = torch.tensor(
         np.stack(start_fps_list), device=env.device, dtype=torch.float32
