@@ -337,6 +337,7 @@ def main():
             super()._reset_idx(env_ids)
             if len(env_ids) == 0:
                 return
+            # Random hand joint positions (default ± 0.15 rad)
             rand = 2.0 * torch.rand(
                 (len(env_ids), self.hand.num_joints), device=self.device,
             ) - 1.0
@@ -346,21 +347,19 @@ def main():
                 dof_pos, torch.zeros_like(dof_pos), env_ids=env_ids,
             )
             self.hand.set_joint_position_target(dof_pos, env_ids=env_ids)
+
             obj_state = self.object.data.default_root_state[env_ids].clone()
             obj_state[:, :3] += self.scene.env_origins[env_ids]
-            # Apply uniform random rotation to the object so grasps
-            # cover diverse orientations (full SO(3)).
+            # Random object orientation (uniform SO(3))
             rand_quat = torch.randn(len(env_ids), 4, device=self.device)
             rand_quat = rand_quat / (torch.norm(rand_quat, dim=-1, keepdim=True) + 1e-8)
             obj_state[:, 3:7] = rand_quat
+            # Random object position jitter (±1cm)
+            pos_noise = (torch.rand(len(env_ids), 3, device=self.device) - 0.5) * 0.02
+            obj_state[:, :3] += pos_noise
             obj_state[:, 7:] = 0.0
             self.object.write_root_pose_to_sim(obj_state[:, :7], env_ids=env_ids)
             self.object.write_root_velocity_to_sim(obj_state[:, 7:], env_ids=env_ids)
-            # Store the randomized start orientation for validation
-            if not hasattr(self, '_start_rot'):
-                self._start_rot = torch.zeros(self.num_envs, 4, device=self.device)
-                self._start_rot[:, 0] = 1.0
-            self._start_rot[env_ids] = rand_quat
 
     # ── Generate one shape×size per run ──
     import isaaclab.sim as _sim_utils
