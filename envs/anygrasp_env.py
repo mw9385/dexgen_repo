@@ -369,17 +369,6 @@ if _ISAACLAB_AVAILABLE:
             weight=1.0,
             params={"penalty": -20.0},
         )
-        # Action regularization
-        action_penalty = RewTerm(
-            func=mdp_rewards.action_penalty,
-            weight=0.01,
-            params={},
-        )
-        action_rate_penalty = RewTerm(
-            func=mdp_rewards.action_rate_penalty,
-            weight=0.01,
-            params={},
-        )
 
 
 # ---------------------------------------------------------------------------

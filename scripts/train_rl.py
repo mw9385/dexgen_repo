@@ -173,10 +173,6 @@ def apply_env_config(env_cfg, env_cfg_dict: dict):
                 env_cfg.rewards.goal_bonus.params["rot_thresh"] = float(rewards_cfg["goal_thresh"])
         if "drop_penalty" in rewards_cfg and hasattr(env_cfg.rewards, "drop"):
             env_cfg.rewards.drop.params["penalty"] = float(rewards_cfg["drop_penalty"])
-        if "action_penalty_weight" in rewards_cfg and hasattr(env_cfg.rewards, "action_penalty"):
-            env_cfg.rewards.action_penalty.weight = float(rewards_cfg["action_penalty_weight"])
-        if "action_rate_penalty_weight" in rewards_cfg and hasattr(env_cfg.rewards, "action_rate_penalty"):
-            env_cfg.rewards.action_rate_penalty.weight = float(rewards_cfg["action_rate_penalty_weight"])
 
     # Termination overrides from YAML
     term_cfg = env_cfg_dict.get("terminations", {})

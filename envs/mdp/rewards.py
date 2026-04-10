@@ -5,10 +5,6 @@ OpenAI "Learning Dexterous In-Hand Manipulation" (2018):
   r_t = d_t - d_{t+1}   (rotation distance reduction)
   + 5   when rot_dist < 0.4 rad  (goal achieved)
   - 20  when object drops        (fall penalty)
-
-Regularization (smooth control):
-  - action_penalty:      -α * ||a_t||²
-  - action_rate_penalty: -β * ||a_t - a_{t-1}||²
 """
 
 from __future__ import annotations
@@ -81,22 +77,3 @@ def drop_penalty(env, min_height: float = 0.2, max_dist: float = 0.20,
     left = mdp_events.object_left_hand(env, max_dist=max_dist)
     failed = dropped | left
     return torch.where(failed, penalty, torch.zeros(env.num_envs, device=env.device))
-
-
-# ── Action regularization ──
-
-def action_penalty(env) -> torch.Tensor:
-    """Penalise large actions: -||a_t||²."""
-    action = env.extras.get("current_action")
-    if action is None:
-        return torch.zeros(env.num_envs, device=env.device)
-    return -(action ** 2).sum(dim=-1)
-
-
-def action_rate_penalty(env) -> torch.Tensor:
-    """Penalise jerky actions: -||a_t - a_{t-1}||²."""
-    cur = env.extras.get("current_action")
-    prev = env.extras.get("last_action")
-    if cur is None or prev is None:
-        return torch.zeros(env.num_envs, device=env.device)
-    return -((cur - prev) ** 2).sum(dim=-1)
