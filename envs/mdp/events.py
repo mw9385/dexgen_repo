@@ -321,31 +321,11 @@ def reset_to_random_grasp(
     obj.write_root_state_to_sim(obj_root_state, env_ids=env_ids)
     obj.update(0.0)
 
-    # Step 7: Goal object pose in hand frame — rebase relative to actual
-    # start pose (same delta logic as update_rolling_goal).
+    # Step 7: Goal object pose in hand frame comes directly from the sampled goal grasp.
     robot.update(0.0)
     obj.update(0.0)
-
-    # Actual object pose in hand frame after reset
-    actual_obj_pos_hand = quat_apply_inverse(
-        wrist_quat, obj.data.root_pos_w[env_ids] - wrist_pos
-    )
-    actual_obj_quat_hand = quat_multiply(
-        quat_conjugate(wrist_quat), obj.data.root_quat_w[env_ids]
-    )
-
-    # Delta from start grasp → goal grasp (in graph space)
-    delta_pos = goal_pos_hand_t - start_pos_hand_t
-    target_pos = actual_obj_pos_hand + delta_pos
-
-    # Delta quaternion: q_delta = conj(q_start) * q_goal
-    start_quat_conj = torch.cat([start_quat_hand_t[..., :1], -start_quat_hand_t[..., 1:]], dim=-1)
-    delta_quat = quat_multiply(start_quat_conj, goal_quat_hand_t)
-    target_quat = quat_multiply(actual_obj_quat_hand, delta_quat)
-    target_quat = target_quat / (torch.norm(target_quat, dim=-1, keepdim=True) + 1e-8)
-
-    env.extras["target_object_pos_hand"][env_ids] = target_pos
-    env.extras["target_object_quat_hand"][env_ids] = target_quat
+    env.extras["target_object_pos_hand"][env_ids] = goal_pos_hand_t
+    env.extras["target_object_quat_hand"][env_ids] = goal_quat_hand_t
 
     # ------------------------------------------------------------------
     # Log start→goal distances (position & orientation) at reset
