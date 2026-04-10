@@ -764,7 +764,18 @@ class _IsaacLabVecEnv:
         else:
             # Absolute mode: apply EMA for smooth actions (OpenAI Dactyl style)
             if self._prev_actions is None:
-                self._prev_actions = actions.clone()
+                # Init to current joint positions so EMA starts from actual pose
+                robot = self.env.scene["robot"]
+                cur_q = robot.data.joint_pos
+                soft_lower = robot.data.soft_joint_pos_limits[..., 0]
+                soft_upper = robot.data.soft_joint_pos_limits[..., 1]
+                mid = (soft_upper + soft_lower) * 0.5
+                rng = (soft_upper - soft_lower) * 0.5
+                rng = rng.clamp(min=1e-6)
+                norm_q = ((cur_q - mid) / rng).clamp(-1.0, 1.0)
+                if norm_q.shape[-1] > actions.shape[-1]:
+                    norm_q = norm_q[:, -actions.shape[-1]:]
+                self._prev_actions = norm_q
             alpha = self._actions_moving_average
             env_actions = alpha * actions + (1.0 - alpha) * self._prev_actions
             self._prev_actions = env_actions.clone()
