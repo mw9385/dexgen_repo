@@ -34,6 +34,9 @@ env:
     goal_bonus: 5.0                    # +5 when rot_dist < goal_thresh
     goal_thresh: 0.4                   # rad (~23°)
     drop_penalty: -20.0                # when object falls or leaves hand
+    # Action regularization (smooth control)
+    action_penalty_weight: 0.01        # -||a_t||² — penalise large actions
+    action_rate_penalty_weight: 0.01   # -||a_t - a_{t-1}||² — penalise jerky actions
 
 # ==============================================================================
 # Symmetric Actor-Critic PPO (rl_games)
