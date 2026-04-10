@@ -66,6 +66,8 @@ def parse_args():
         help="Output directory for generated .npy grasp cache. Defaults to config output_dir.",
     )
     p.add_argument("--headless", action="store_true", default=False)
+    p.add_argument("--merge", action="store_true", default=False,
+                   help="Save all shape×size grasps into a single merged .npy file")
     p.add_argument("--device", type=str, default="cuda:0")
     p.add_argument("--physics_gpu", type=int, default=0)
     p.add_argument("--multi_gpu", action="store_true", default=False)
@@ -459,6 +461,25 @@ def main():
 
             env.close()
 
+    # Merge all into one file if requested
+    if args.merge:
+        all_parts = []
+        for shape in args.shapes:
+            for size in args.sizes:
+                tag = f"{shape}_{int(size * 1000):03d}"
+                p = out_dir / f"sharpa_grasp_{tag}.npy"
+                if p.exists():
+                    all_parts.append(np.load(str(p)))
+        if all_parts:
+            merged = np.concatenate(all_parts, axis=0)
+            # Shuffle so shapes/sizes are interleaved
+            rng = np.random.default_rng(args.seed)
+            rng.shuffle(merged)
+            shapes_tag = "_".join(args.shapes)
+            merged_path = out_dir / f"sharpa_grasp_mixed_{shapes_tag}.npy"
+            np.save(merged_path, merged)
+            print(f"\n  Merged {len(merged)} grasps → {merged_path}")
+
     # Summary
     print(f"\n{'='*60}")
     print("  DONE — Generated grasp caches:")
@@ -469,6 +490,12 @@ def main():
             if p.exists():
                 d = np.load(str(p))
                 print(f"  {p.name}: {d.shape}")
+    if args.merge:
+        shapes_tag = "_".join(args.shapes)
+        mp = out_dir / f"sharpa_grasp_mixed_{shapes_tag}.npy"
+        if mp.exists():
+            d = np.load(str(mp))
+            print(f"  {mp.name}: {d.shape}  (merged)")
     print(f"{'='*60}")
 
     sim_app.close()
