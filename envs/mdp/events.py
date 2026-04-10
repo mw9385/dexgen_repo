@@ -54,12 +54,14 @@ from .sim_utils import (
 def time_out(env) -> torch.Tensor:
     return env.episode_length_buf >= env.max_episode_length
 
-def object_dropped(env, min_height: float = 0.35) -> torch.Tensor:
-    """Object dropped = fell below min_height.
-    Hand is at z=0.5, so 0.35 means object fell ~15cm below hand.
-    """
+def object_dropped(env, max_dist: float = 0.01) -> torch.Tensor:
+    """Object dropped = moved more than max_dist from palm center."""
+    robot = env.scene["robot"]
     obj = env.scene["object"]
-    return obj.data.root_pos_w[:, 2] < min_height
+    palm_body_id = get_palm_body_id_from_env(robot, env)
+    palm_pos_w = robot.data.body_pos_w[:, palm_body_id, :]
+    dist = torch.norm(obj.data.root_pos_w - palm_pos_w, dim=-1)
+    return dist > max_dist
 
 # ---------------------------------------------------------------------------
 # Main reset event

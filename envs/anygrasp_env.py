@@ -382,7 +382,7 @@ if _ISAACLAB_AVAILABLE:
     @configclass
     class AnyGraspTerminationsCfg:
         time_out = DoneTerm(func=mdp_events.time_out, time_out=True)
-        object_drop = DoneTerm(func=mdp_events.object_dropped, params={"min_height": 0.35})
+        object_drop = DoneTerm(func=mdp_events.object_dropped, params={"max_dist": 0.01})
 
     @configclass
     class AnyGraspEventsCfg:
