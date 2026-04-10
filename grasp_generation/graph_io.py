@@ -145,26 +145,28 @@ def _cube_symmetry_quats() -> np.ndarray:
     return arr / (np.linalg.norm(arr, axis=-1, keepdims=True) + 1e-8)
 
 
-def _augment_cube_symmetry(data: np.ndarray) -> np.ndarray:
-    """Apply 24 cube symmetry rotations to expand orientation coverage.
+def _augment_cube_symmetry(data: np.ndarray, seed: int = 42) -> np.ndarray:
+    """Apply a random cube symmetry rotation to each grasp.
 
-    Input: (N, 29). Returns (N*24, 29).
+    Input: (N, 29). Returns (N, 29) — same count, wider orientation spread.
+    Each grasp gets one of the 24 cube symmetry rotations chosen at random.
     Joint angles and object position are unchanged; only object_quat_hand
-    is rotated, which is valid because a cube is invariant under these
-    rotations (contact geometry is preserved).
+    is rotated. Valid because a cube is invariant under these rotations.
     """
     sym_quats = _cube_symmetry_quats()  # (24, 4)
     N = data.shape[0]
-    parts = []
-    for sq in sym_quats:
-        block = data.copy()
-        obj_q = block[:, 25:29].astype(np.float64)
-        sq_batch = np.broadcast_to(sq, obj_q.shape)
-        new_q = _qmul(obj_q, sq_batch)
-        new_q = new_q / (np.linalg.norm(new_q, axis=-1, keepdims=True) + 1e-8)
-        block[:, 25:29] = new_q.astype(np.float32)
-        parts.append(block)
-    return np.concatenate(parts, axis=0)
+    rng = np.random.default_rng(seed)
+
+    out = data.copy()
+    # Pick a random symmetry rotation for each grasp
+    indices = rng.integers(0, 24, size=N)
+    chosen = sym_quats[indices]  # (N, 4)
+
+    obj_q = out[:, 25:29].astype(np.float64)
+    new_q = _qmul(obj_q, chosen)
+    new_q = new_q / (np.linalg.norm(new_q, axis=-1, keepdims=True) + 1e-8)
+    out[:, 25:29] = new_q.astype(np.float32)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -199,10 +201,10 @@ def load_npy_as_graph(path: str | Path) -> MultiObjectGraspGraph:
                 except ValueError:
                     pass
 
-    # Auto-augment cubes with symmetry rotations
+    # Auto-augment cubes with random symmetry rotations
     if shape_type == "cube":
         data = _augment_cube_symmetry(data)
-        print(f"[graph_io] Cube symmetry augmentation: {N_orig} × 24 = {len(data)} grasps")
+        print(f"[graph_io] Cube symmetry augmentation applied to {N_orig} grasps")
 
     N = data.shape[0]
     obj_name = f"{shape_type}_{int(size * 1000):03d}_f5"
