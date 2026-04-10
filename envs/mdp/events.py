@@ -514,8 +514,8 @@ def update_curriculum(env, epoch: int, total_epochs: int = 10000):
     )
     warmup_epochs = int(total_epochs * warmup_ratio)
     t = min(epoch / max(warmup_epochs, 1), 1.0)
-    min_orn_start = 0.50
-    min_orn_end = 1.50
+    min_orn_start = 0.10
+    min_orn_end = 0.50
     graph._curriculum_min_orn = min_orn_start + t * (min_orn_end - min_orn_start)
 
     gravity_cfg = dict((getattr(env.cfg, "gravity_curriculum", None) or {}))
