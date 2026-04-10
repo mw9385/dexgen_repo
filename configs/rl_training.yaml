@@ -12,16 +12,17 @@ env:
   action_scale: 1.0              # [-1,1] maps to full joint range
   action_mode: "absolute"        # policy outputs target joint positions directly (OpenAI Dactyl style)
   decimation: 12                 # control at 20 Hz (240 Hz sim / 12), matching Sharpa default
-  gravity_curriculum:
+  curriculum:
     enabled: true
+    warmup_ratio: 0.10            # fraction of total epochs for ramp-up
+    # Gravity: start near-zero, ramp to full
     start_gravity: 0.05
     end_gravity: 9.81
-    warmup_ratio: 0.10
-    min_orn_start: 0.10          # min goal orientation distance at epoch 0 (rad)
-    min_orn_end: 0.50            # min goal orientation distance at end of warmup (rad)
+    # Goal difficulty: min orientation distance for kNN goal selection
+    min_orn_start: 0.10           # rad (~5.7°) — easy goals at epoch 0
+    min_orn_end: 0.50             # rad (~28.6°) — harder goals at end of warmup
     # NOTE: min_orn_end must not exceed the dataset's max pairwise distance.
     # Current dataset (sharpa_grasp_cube_050.npy): max ~1.04 rad.
-    # Regenerate data with more orientation diversity to raise this.
 
   terminations:
     no_contact_patience: 30          # steps with 0 fingertip contact → reset (30 steps = 1s at 30Hz)

@@ -155,8 +155,10 @@ def apply_env_config(env_cfg, env_cfg_dict: dict):
     if "decimation" in env_cfg_dict:
         env_cfg.decimation = int(env_cfg_dict["decimation"])
         env_cfg.sim.render_interval = env_cfg.decimation
-    if "gravity_curriculum" in env_cfg_dict:
-        env_cfg.gravity_curriculum = dict(env_cfg_dict["gravity_curriculum"])
+    if "curriculum" in env_cfg_dict:
+        env_cfg.curriculum = dict(env_cfg_dict["curriculum"])
+    elif "gravity_curriculum" in env_cfg_dict:
+        env_cfg.curriculum = dict(env_cfg_dict["gravity_curriculum"])
 
     rewards_cfg = env_cfg_dict.get("rewards", {})
     if rewards_cfg:

@@ -271,11 +271,11 @@ def main():
     #   1. --curriculum_epoch CLI override, if provided
     #   2. auto-detect from the checkpoint's 'epoch' key
     #   3. fall back to 0 (start of curriculum)
-    # We intentionally do NOT disable env_cfg.gravity_curriculum — it stays
+    # We intentionally do NOT disable env_cfg.curriculum — it stays
     # enabled so mdp_events.update_curriculum() can apply the matching
-    # gravity later, once the sim is running. _EvalVecEnv.step() never
-    # re-calls update_curriculum, so whatever state we apply stays fixed
-    # for the whole eval run.
+    # gravity + min_orn later, once the sim is running. _EvalVecEnv.step()
+    # never re-calls update_curriculum, so whatever state we apply stays
+    # fixed for the whole eval run.
     ckpt_epoch = args.curriculum_epoch
     if ckpt_epoch is None:
         try:

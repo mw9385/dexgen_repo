@@ -407,7 +407,7 @@ if _ISAACLAB_AVAILABLE:
         grasp_graph_path: str = "data/grasp_graph.pkl"
         object_pool_specs: list = None   # type: ignore
         reset_refinement: dict = None    # type: ignore
-        gravity_curriculum: dict = None  # type: ignore
+        curriculum: dict = None  # type: ignore
         hand: dict = None                # type: ignore
 
         episode_length_s: float = 20.0
@@ -477,15 +477,17 @@ if _ISAACLAB_AVAILABLE:
             else:
                 self.hand = dict(self.hand)
 
-            if self.gravity_curriculum is None:
-                self.gravity_curriculum = {
+            if self.curriculum is None:
+                self.curriculum = {
                     "enabled": False,
                     "start_gravity": 0.05,
                     "end_gravity": 9.81,
                     "warmup_ratio": 0.10,
+                    "min_orn_start": 0.10,
+                    "min_orn_end": 0.50,
                 }
             else:
-                self.gravity_curriculum = dict(self.gravity_curriculum)
+                self.curriculum = dict(self.curriculum)
 
             # Sensor link mapping for Sharpa Hand
             sensor_attr_by_link = {

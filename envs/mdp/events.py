@@ -157,7 +157,7 @@ def reset_to_random_grasp(
         batch_size = len(env_indices)
         # Batch random start indices
         starts = rng.integers(0, N_grasps, size=batch_size)
-        cur_min_orn = getattr(graph, "_curriculum_min_orn", 0.50)
+        cur_min_orn = getattr(graph, "_curriculum_min_orn", 0.10)
         # Batch goal selection
         for j, local_i in enumerate(env_indices):
             start_idx_list[local_i] = int(starts[j])
@@ -501,29 +501,32 @@ def _get_cached_positions(graph) -> Optional[np.ndarray]:
 
 def update_curriculum(env, epoch: int, total_epochs: int = 10000):
     """
-    Linearly increase min_orn from 0.50 to 1.50 rad over the curriculum
-    warmup period. Stored on the graph object so reset picks it up.
+    Update gravity and goal difficulty over training.
 
+    - Gravity: ramp from start_gravity to end_gravity
+    - Goal difficulty (min_orn): ramp from min_orn_start to min_orn_end
+
+    Both ramp linearly over warmup_ratio fraction of total_epochs.
     Call once per epoch from the training loop.
     """
     graph = _load_grasp_graph(env)
     if graph is None:
         return
-    warmup_ratio = float(
-        (getattr(env.cfg, "gravity_curriculum", None) or {}).get("warmup_ratio", 0.10)
-    )
+    cur_cfg = dict((getattr(env.cfg, "curriculum", None) or {})
+                   or (getattr(env.cfg, "gravity_curriculum", None) or {}))
+    warmup_ratio = float(cur_cfg.get("warmup_ratio", 0.10))
     warmup_epochs = int(total_epochs * warmup_ratio)
     t = min(epoch / max(warmup_epochs, 1), 1.0)
-    orn_cfg = (getattr(env.cfg, "gravity_curriculum", None) or {})
-    min_orn_start = float(orn_cfg.get("min_orn_start", 0.10))
-    min_orn_end = float(orn_cfg.get("min_orn_end", 0.50))
+
+    # Orientation curriculum: increase min goal distance over warmup
+    min_orn_start = float(cur_cfg.get("min_orn_start", 0.10))
+    min_orn_end = float(cur_cfg.get("min_orn_end", 0.50))
     graph._curriculum_min_orn = min_orn_start + t * (min_orn_end - min_orn_start)
 
-    gravity_cfg = dict((getattr(env.cfg, "gravity_curriculum", None) or {}))
-    if gravity_cfg.get("enabled", False):
-        warmup_ratio = float(gravity_cfg.get("warmup_ratio", 0.10))
-        gravity_start = float(gravity_cfg.get("start_gravity", 0.05))
-        gravity_end = float(gravity_cfg.get("end_gravity", 9.81))
+    # Gravity curriculum: ramp from near-zero to full gravity
+    if cur_cfg.get("enabled", False):
+        gravity_start = float(cur_cfg.get("start_gravity", 0.05))
+        gravity_end = float(cur_cfg.get("end_gravity", 9.81))
         gravity_warmup_epochs = int(total_epochs * warmup_ratio)
         gravity_t = min(epoch / max(gravity_warmup_epochs, 1), 1.0)
         gravity_mag = gravity_start + gravity_t * (gravity_end - gravity_start)
