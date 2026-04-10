@@ -664,9 +664,13 @@ def update_rolling_goal(
         env.extras["_rolling_goal_success_mask"] = _zero_mask
         return 0
 
+    # Same orientation error as rewards.goal_bonus / orientation_delta (single source of truth).
+    from . import rewards as mdp_rewards
+
+    orn_err = mdp_rewards._get_orn_error(env)
+
     robot = env.scene["robot"]
     obj = env.scene["object"]
-    root_quat = robot.data.root_quat_w
 
     def _qc(q):
         return torch.cat([q[..., :1], -q[..., 1:]], dim=-1)
@@ -676,11 +680,6 @@ def update_rolling_goal(
         return torch.stack([
             w1*w2-x1*x2-y1*y2-z1*z2, w1*x2+x1*w2+y1*z2-z1*y2,
             w1*y2-x1*z2+y1*w2+z1*x2, w1*z2+x1*y2-y1*x2+z1*w2], dim=-1)
-
-    cur_quat = _qm(_qc(root_quat), obj.data.root_quat_w)
-
-    dot = (cur_quat * target_quat).sum(dim=-1).abs().clamp(0.0, 1.0)
-    orn_err = 2.0 * torch.acos(dot)
 
     success_mask = (orn_err < rot_threshold) & ~object_dropped(env)
 
