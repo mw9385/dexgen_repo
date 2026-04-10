@@ -781,7 +781,20 @@ class _IsaacLabVecEnv:
         # Re-initialise action buffers for reset envs
         if done.any() and self._action_mode != "delta" and self._prev_actions is not None:
             done_ids = done.nonzero(as_tuple=False).squeeze(-1)
-            self._prev_actions[done_ids] = 0.0
+            # Set prev_actions to current joint positions (normalized to [-1,1])
+            # so EMA doesn't pull the hand toward 0 (mid-range) after reset.
+            robot = self.env.scene["robot"]
+            cur_q = robot.data.joint_pos[done_ids]
+            soft_lower = robot.data.soft_joint_pos_limits[done_ids, :, 0]
+            soft_upper = robot.data.soft_joint_pos_limits[done_ids, :, 1]
+            mid = (soft_upper + soft_lower) * 0.5
+            rng = (soft_upper - soft_lower) * 0.5
+            rng = rng.clamp(min=1e-6)
+            norm_q = ((cur_q - mid) / rng).clamp(-1.0, 1.0)
+            num_dof = self._prev_actions.shape[-1]
+            if norm_q.shape[-1] > num_dof:
+                norm_q = norm_q[:, -num_dof:]
+            self._prev_actions[done_ids] = norm_q
 
         if self._action_mode == "delta" and done.any():
             done_ids = done.nonzero(as_tuple=False).squeeze(-1)
