@@ -364,7 +364,7 @@ if _ISAACLAB_AVAILABLE:
         goal_bonus = RewTerm(
             func=mdp_rewards.goal_bonus,
             weight=1.0,
-            params={"rot_thresh": 0.4, "bonus": 5.0},
+            params={"rot_thresh": 0.4, "pos_thresh": 0.05, "bonus": 5.0},
         )
         # -20 when object_dropped (palm distance) — OpenAI-style scale
         drop = RewTerm(

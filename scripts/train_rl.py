@@ -503,6 +503,7 @@ def main():
             _gget = _gp.get if hasattr(_gp, "get") else (lambda k, d=None: _gp[k] if k in _gp else d)
             print(
                 f"[CONFIG] goal_bonus: rot_thresh={_gget('rot_thresh')} rad  "
+                f"pos_thresh={_gget('pos_thresh')} m  "
                 f"bonus={_gget('bonus')}"
             )
         if hasattr(_term, "object_drop") and getattr(_term.object_drop, "params", None):

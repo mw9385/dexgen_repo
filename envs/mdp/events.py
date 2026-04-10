@@ -35,7 +35,6 @@ from .math_utils import (
     world_to_local_points,
 )
 from .sim_utils import (
-    pad_fingertip_positions,
     set_robot_joints_direct,
     expand_grasp_joint_vector,
     set_robot_root_pose,
@@ -158,8 +157,6 @@ def reset_to_random_grasp(
             goal_idx_list[local_i] = int(goals[j])
 
     # Extract grasp data in batch (one pass per object name group)
-    start_fps_list = [np.zeros((env_num_fingers, 3), dtype=np.float32)] * n
-    goal_fps_list = [np.zeros((env_num_fingers, 3), dtype=np.float32)] * n
     start_joints_list = [None] * n
     start_object_pos_hand_list = [None] * n
     start_object_quat_hand_list = [None] * n
@@ -209,22 +206,6 @@ def reset_to_random_grasp(
             goal_object_pos_hand_list[local_i] = g_pos[j]
             goal_object_quat_hand_list[local_i] = g_quat[j]
             goal_object_pose_frame_list[local_i] = "hand_root"
-
-    start_fps = torch.tensor(
-        np.stack(start_fps_list), device=env.device, dtype=torch.float32
-    )   # (n, num_fingers, 3)
-    goal_fps = torch.tensor(
-        np.stack(goal_fps_list), device=env.device, dtype=torch.float32
-    )   # (n, num_fingers, 3)
-
-    fp_dim = env_num_fingers * 3
-
-    # Store goal fingertip positions (object frame)
-    if "target_fingertip_pos" not in env.extras:
-        env.extras["target_fingertip_pos"] = torch.zeros(
-            env.num_envs, fp_dim, device=env.device
-        )
-    env.extras["target_fingertip_pos"][env_ids] = goal_fps.reshape(n, fp_dim)
 
     if "start_grasp_idx" not in env.extras:
         env.extras["start_grasp_idx"] = torch.full(
@@ -634,8 +615,8 @@ def update_curriculum(env, epoch: int, total_epochs: int = 10000):
 # Rolling goal: update goal when current goal is achieved mid-episode
 # ---------------------------------------------------------------------------
 
-def goal_rot_thresh_from_env(env, default: float = 0.4) -> float:
-    """``rot_thresh`` from ``env.cfg.rewards.goal_bonus`` (matches ``goal_bonus`` reward)."""
+def _goal_bonus_params_get(env, key: str, default):
+    """Read a scalar from ``env.cfg.rewards.goal_bonus.params`` (OmegaConf-safe)."""
     rw = getattr(env.cfg, "rewards", None)
     if rw is None:
         return default
@@ -646,7 +627,16 @@ def goal_rot_thresh_from_env(env, default: float = 0.4) -> float:
     if p is None:
         return default
     get = p.get if hasattr(p, "get") else (lambda k, d=None: p[k] if k in p else d)
-    return float(get("rot_thresh", default))
+    v = get(key, default)
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return default
+
+
+def goal_rot_thresh_from_env(env, default: float = 0.4) -> float:
+    """``rot_thresh`` from ``env.cfg.rewards.goal_bonus`` (matches ``goal_bonus`` reward)."""
+    return _goal_bonus_params_get(env, "rot_thresh", default)
 
 
 def update_rolling_goal(
@@ -656,18 +646,20 @@ def update_rolling_goal(
     """
     Called every control step from train_rl / evaluate after env.step().
 
-    For each env where orientation error < ``rot_threshold`` and the object has
-    not failed ``object_dropped``, samples a new nearby goal from the grasp
-    graph and updates ``target_object_*`` / fingertip targets.
+    For each env where orientation / position error are below the same
+    thresholds as ``goal_bonus`` and ``object_dropped`` is false, samples a new
+    nearby goal from the grasp graph and updates ``target_object_*``.
 
     If ``rot_threshold`` is omitted, uses ``goal_rot_thresh_from_env`` (same as
-    ``rewards.goal_bonus.params['rot_thresh']``).
+    ``rewards.goal_bonus.params['rot_thresh']``). Position uses
+    ``rewards.goal_bonus.params['pos_thresh']`` (default 0.05 m).
 
     Returns:
         Number of envs whose goal was updated this step.
     """
     if rot_threshold is None:
         rot_threshold = goal_rot_thresh_from_env(env)
+    pos_threshold = _goal_bonus_params_get(env, "pos_thresh", 0.05)
 
     _zero_mask = torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
 
@@ -702,7 +694,6 @@ def update_rolling_goal(
             w1*w2-x1*x2-y1*y2-z1*z2, w1*x2+x1*w2+y1*z2-z1*y2,
             w1*y2-x1*z2+y1*w2+z1*x2, w1*z2+x1*y2-y1*x2+z1*w2], dim=-1)
 
-    pos_threshold = 0.05  # 5cm — object must be near target position
     success_mask = (orn_err < rot_threshold) & (pos_err < pos_threshold) & ~object_dropped(env)
 
     # Store per-env success mask so evaluate.py can read it after step().
@@ -717,7 +708,6 @@ def update_rolling_goal(
     env_num_fingers = int(
         (getattr(env.cfg, "hand", None) or {}).get("num_fingers", 4)
     )
-    fp_dim = env_num_fingers * 3
 
     from grasp_generation.graph_io import MultiObjectGraspGraph
 
@@ -741,14 +731,6 @@ def update_rolling_goal(
             g, cur_goal_idx, rng, min_orn=cur_min_orn, num_fingers=env_num_fingers,
         )
         new_goal_grasp = g.grasp_set[new_goal_idx]
-
-        # Update goal fingertip positions
-        new_fps = pad_fingertip_positions(
-            new_goal_grasp.fingertip_positions.copy(), env_num_fingers
-        )
-        env.extras["target_fingertip_pos"][env_id] = torch.tensor(
-            new_fps.reshape(fp_dim), device=env.device, dtype=torch.float32
-        )
 
         # Rebase target: delta between old goal (now start) and new goal
         # stored object poses, applied to current actual sim pose.
@@ -999,12 +981,7 @@ def _reset_to_default_pose(env, env_ids: torch.Tensor):
     joint_vel = torch.zeros_like(joint_pos)
     robot.write_joint_state_to_sim(joint_pos, joint_vel, env_ids=env_ids)
     robot.set_joint_position_target(joint_pos, env_ids=env_ids)
-    hand_cfg = getattr(env.cfg, "hand", None) or {}
-    num_fingers = hand_cfg.get("num_fingers", 4)
     num_dof = joint_pos.shape[-1]
-    env.extras["target_fingertip_pos"] = torch.zeros(
-        env.num_envs, num_fingers * 3, device=env.device
-    )
     action_full = joint_positions_to_normalized_action(robot, env_ids, joint_pos)
     action_dim = _get_action_dim(env, num_dof)
     default_action = action_full[:, (num_dof - action_dim):]  # drop wrist
