@@ -174,11 +174,6 @@ def apply_env_config(env_cfg, env_cfg_dict: dict):
         if "drop_penalty" in rewards_cfg and hasattr(env_cfg.rewards, "drop"):
             env_cfg.rewards.drop.params["penalty"] = float(rewards_cfg["drop_penalty"])
 
-    # Termination overrides from YAML
-    term_cfg = env_cfg_dict.get("terminations", {})
-    if term_cfg:
-        if "no_contact_patience" in term_cfg and hasattr(env_cfg.terminations, "no_fingertip_contact"):
-            env_cfg.terminations.no_fingertip_contact.params["patience"] = int(term_cfg["no_contact_patience"])
 
 
 def _resolve_valid_minibatch_size(batch_size: int, requested_minibatch: int, seq_length: int) -> int:
@@ -615,8 +610,6 @@ def main():
                 "success_ratio": _rg / max(env.num_envs, 1),
                 "rolling_goal_updates": _rg,
                 "drop_ratio": stats.get("total_drops", 0) / total_resets,
-                "left_hand_ratio": stats.get("total_left_hand", 0) / total_resets,
-                "no_contact_ratio": stats.get("total_no_contact", 0) / total_resets,
                 "timeout_ratio": stats.get("total_timeouts", 0) / total_resets,
             }
 
@@ -801,30 +794,6 @@ class _IsaacLabVecEnv:
         info = dict(info) if isinstance(info, dict) else {}
         info["success_ratio"] = n_updated / self.env.num_envs
 
-        # Compute drop/left_hand from the done mask returned by env.step().
-        # Isaac Lab resets terminated envs inside step(), so querying the sim
-        # state afterwards would always show the post-reset (healthy) state.
-        # Instead, use the `done` mask (terminated | truncated) together with
-        # a fresh check to distinguish drop vs left_hand vs timeout.
-        # However, `done` already reflects reset envs too.
-        #
-        # The reliable source is the termination_manager's get_term() method
-        # which reads from the cached _term_dones tensor (computed BEFORE reset).
-        # _term_dones is a (num_envs, num_terms) bool Tensor, NOT a dict.
-        term_manager = getattr(self.env, "termination_manager", None)
-        drop_ratio = 0.0
-        left_hand_ratio = 0.0
-        if term_manager is not None:
-            active = set(getattr(term_manager, "active_terms", []))
-            if "object_drop" in active:
-                drop_ratio = float(term_manager.get_term("object_drop").float().mean().item())
-            if "object_left_hand" in active:
-                left_hand_ratio = float(term_manager.get_term("object_left_hand").float().mean().item())
-            if "no_fingertip_contact" in active:
-                info["no_contact_ratio"] = float(term_manager.get_term("no_fingertip_contact").float().mean().item())
-
-        info["drop_ratio"] = drop_ratio
-        info["left_hand_ratio"] = left_hand_ratio
         info["rolling_goal_updates"] = n_updated
 
         return _to_rl_obs(obs), rew, done, info

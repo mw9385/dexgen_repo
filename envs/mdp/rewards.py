@@ -69,11 +69,8 @@ def goal_bonus(env, rot_thresh: float = 0.4, bonus: float = 5.0) -> torch.Tensor
 
 # ── -20 drop penalty ──
 
-def drop_penalty(env, min_height: float = 0.2, max_dist: float = 0.20,
-                 penalty: float = -20.0) -> torch.Tensor:
-    """Penalty when object drops."""
+def drop_penalty(env, penalty: float = -20.0) -> torch.Tensor:
+    """Penalty when object drops (fell or left hand)."""
     from . import events as mdp_events
-    dropped = mdp_events.object_dropped(env, min_height=min_height)
-    left = mdp_events.object_left_hand(env, max_dist=max_dist)
-    failed = dropped | left
-    return torch.where(failed, penalty, torch.zeros(env.num_envs, device=env.device))
+    dropped = mdp_events.object_dropped(env)
+    return torch.where(dropped, penalty, torch.zeros(env.num_envs, device=env.device))

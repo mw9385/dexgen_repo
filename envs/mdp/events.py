@@ -54,41 +54,12 @@ from .sim_utils import (
 def time_out(env) -> torch.Tensor:
     return env.episode_length_buf >= env.max_episode_length
 
-def object_dropped(env, min_height: float = 0.2) -> torch.Tensor:
+def object_dropped(env, min_height: float = 0.35) -> torch.Tensor:
+    """Object dropped = fell below min_height.
+    Hand is at z=0.5, so 0.35 means object fell ~15cm below hand.
+    """
     obj = env.scene["object"]
     return obj.data.root_pos_w[:, 2] < min_height
-
-def object_left_hand(env, max_dist: float = 0.20) -> torch.Tensor:
-    """Terminate when object is too far from palm center."""
-    robot = env.scene["robot"]
-    obj = env.scene["object"]
-    palm_body_id = get_palm_body_id_from_env(robot, env)
-    palm_pos_w = robot.data.body_pos_w[:, palm_body_id, :]
-    dist = torch.norm(obj.data.root_pos_w - palm_pos_w, dim=-1)
-    return dist > max_dist
-
-def no_fingertip_contact(env, patience: int = 30) -> torch.Tensor:
-    """Terminate when no fingertip touches the object for `patience` consecutive steps.
-
-    Uses a per-env counter stored in env.extras["_no_contact_steps"].
-    patience=30 at 30Hz control = 1 second grace period.
-    """
-    from .observations import fingertip_contact_binary
-
-    contact = fingertip_contact_binary(env)          # (N, num_fingers)
-    any_contact = contact.sum(dim=-1) > 0             # (N,)
-
-    # Lazily initialise counter
-    buf = env.extras.get("_no_contact_steps")
-    if buf is None:
-        buf = torch.zeros(env.num_envs, device=env.device, dtype=torch.long)
-        env.extras["_no_contact_steps"] = buf
-
-    # Reset counter where contact exists, increment where it doesn't
-    buf[any_contact] = 0
-    buf[~any_contact] += 1
-
-    return buf >= patience
 
 # ---------------------------------------------------------------------------
 # Main reset event
@@ -357,10 +328,6 @@ def reset_to_random_grasp(
         )
     env.extras["last_action"][env_ids] = current_action
     env.extras["current_action"][env_ids] = current_action
-
-    # Reset no-contact termination counter
-    if "_no_contact_steps" in env.extras:
-        env.extras["_no_contact_steps"][env_ids] = 0
 
     # Reset delta reward prev-error buffers
     if "_prev_orn_error" in env.extras:
@@ -681,7 +648,7 @@ def update_rolling_goal(
     success_mask = (orn_err < rot_threshold)
 
     success_mask = success_mask & ~object_dropped(env)
-    success_mask = success_mask & ~object_left_hand(env)
+    success_mask = success_mask & ~object_dropped(env)
 
     # Store per-env success mask so evaluate.py can read it after step().
     # Must be stored BEFORE the target is updated below.
@@ -1065,50 +1032,38 @@ def _log_goal_distances(env, env_ids: torch.Tensor):
 
     # --- Termination reason breakdown for the envs being reset ---
     tm = getattr(env, "termination_manager", None)
-    n_drop = n_left = n_nocontact = n_timeout = 0
+    n_drop = n_timeout = 0
     if tm is not None:
         active = set(getattr(tm, "active_terms", []))
         try:
             if "object_drop" in active:
                 n_drop = int(tm.get_term("object_drop")[eids_t].sum().item())
-            if "object_left_hand" in active:
-                n_left = int(tm.get_term("object_left_hand")[eids_t].sum().item())
-            if "no_fingertip_contact" in active:
-                n_nocontact = int(tm.get_term("no_fingertip_contact")[eids_t].sum().item())
         except Exception:
             pass
-        # Envs that reset without any failure flag were timeouts / episode-end.
-        n_timeout = max(n - n_drop - n_left - n_nocontact, 0)
+        n_timeout = max(n - n_drop, 0)
 
     # --- Cumulative counters across training ---
     stats = env.extras.setdefault("_reset_log_stats", {
         "total_resets": 0,
         "total_drops": 0,
-        "total_left_hand": 0,
-        "total_no_contact": 0,
         "total_timeouts": 0,
     })
     stats["total_resets"] += n
     stats["total_drops"] += n_drop
-    stats["total_left_hand"] += n_left
-    stats["total_no_contact"] += n_nocontact
     stats["total_timeouts"] += n_timeout
 
-    # Rolling-goal (success) hits — accumulated by update_rolling_goal since
-    # the previous reset log line.
     goal_window = int(env.extras.pop("_reset_log_goal_hits_window", 0))
     goal_total = int(env.extras.get("_reset_log_goal_hits_total", 0))
 
     drop_rate = stats["total_drops"] / max(stats["total_resets"], 1)
-    left_rate = stats["total_left_hand"] / max(stats["total_resets"], 1)
 
     print(
         f"[Reset #{_GOAL_LOG_COUNT}] ({n} envs) "
         f"pos={np.mean(pos_dists):.4f}m [{np.min(pos_dists):.4f}-{np.max(pos_dists):.4f}] "
         f"orn={np.mean(orn_dists):.2f}rad [{np.min(orn_dists):.2f}-{np.max(orn_dists):.2f}]  "
-        f"term: drop={n_drop} left={n_left} noc={n_nocontact} timeout={n_timeout}  "
+        f"term: drop={n_drop} timeout={n_timeout}  "
         f"goal_hits(win/total)={goal_window}/{goal_total}  "
-        f"cum_drop_rate={drop_rate:.3f}  left_rate={left_rate:.3f}"
+        f"cum_drop_rate={drop_rate:.3f}"
     )
 
 
