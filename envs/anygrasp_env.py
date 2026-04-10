@@ -383,7 +383,7 @@ if _ISAACLAB_AVAILABLE:
     class AnyGraspTerminationsCfg:
         time_out = DoneTerm(func=mdp_events.time_out, time_out=True)
         # Palm–object distance (m); reward drop_penalty uses the same predicate.
-        object_drop = DoneTerm(func=mdp_events.object_dropped, params={"max_dist": 0.08})
+        object_drop = DoneTerm(func=mdp_events.object_dropped, params={"max_dist": 0.25})
 
     @configclass
     class AnyGraspEventsCfg:

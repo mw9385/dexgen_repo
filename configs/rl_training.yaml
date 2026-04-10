@@ -32,7 +32,9 @@ env:
     drop_penalty: -20.0                # when object_dropped (too far from palm; matches termination)
 
   terminations:
-    object_drop_max_dist: 0.08         # m — palm centre to object; failure if exceeded (~8 cm)
+    object_drop_max_dist: 0.25         # m — palm centre to object; failure if exceeded
+    # NOTE: object sits ~17cm from palm body in hand frame (grasp data),
+    # so threshold must be larger than that baseline distance.
 
 # ==============================================================================
 # Symmetric Actor-Critic PPO (rl_games)
