@@ -49,10 +49,13 @@ def parse_args():
                    help="Object shapes to generate grasps for (e.g., --shapes cube sphere cylinder)")
     p.add_argument("--sizes", nargs="+", type=float, default=[0.05],
                    help="Object sizes in metres (e.g., --sizes 0.04 0.05 0.06)")
-    p.add_argument("--num_grasps", type=int, default=1000)
+    p.add_argument("--num_grasps", type=int, default=10000,
+                   help="Total grasps to generate (spread across all shape×size combos)")
     p.add_argument("--num_envs", type=int, default=4096)
     p.add_argument("--episode_steps", type=int, default=50,
                    help="Steps per episode (at decimation=12, ~2.5s)")
+    p.add_argument("--output", type=str, default=None,
+                   help="Output .npy path. Default: data/sharpa_grasp_mixed.npy")
     p.add_argument(
         "--config",
         type=str,
@@ -66,8 +69,6 @@ def parse_args():
         help="Output directory for generated .npy grasp cache. Defaults to config output_dir.",
     )
     p.add_argument("--headless", action="store_true", default=False)
-    p.add_argument("--merge", action="store_true", default=False,
-                   help="Save all shape×size grasps into a single merged .npy file")
     p.add_argument("--device", type=str, default="cuda:0")
     p.add_argument("--physics_gpu", type=int, default=0)
     p.add_argument("--multi_gpu", action="store_true", default=False)
@@ -363,139 +364,117 @@ def main():
                 self._start_rot[:, 0] = 1.0
             self._start_rot[env_ids] = rand_quat
 
-    # ── Loop over all shape × size combinations ────────────────
-    import omni.physics.tensors.impl.api as physx
+    # ── Cycle through shape×size combos, collect into one file ──
     import isaaclab.sim as _sim_utils
+
+    combos = [(s, float(round(sz, 4))) for s in args.shapes for sz in args.sizes]
+    rng_combo = np.random.default_rng(args.seed)
+    rng_combo.shuffle(combos)
 
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = Path(args.output) if args.output else out_dir / "sharpa_grasp_mixed.npy"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    for shape in args.shapes:
-        for size in args.sizes:
-            size = float(round(size, 4))
-            tag = f"{shape}_{int(size * 1000):03d}"
+    total_target = args.num_grasps
+    per_combo = max(total_target // len(combos), 1)
+    all_saved = []
 
-            print(f"\n{'='*60}")
-            print(f"  [GenGrasp] {tag} (shape={shape}, size={size}m)")
-            print(f"  num_envs={args.num_envs}, target={args.num_grasps}")
-            print(f"{'='*60}")
-
-            cfg = build_env_cfg(shape, size, args.num_envs)
-            env = GraspGenEnv(cfg)
-            hand = env.hand
-            obj = env.object
-            device = env.device
-            N = env.num_envs
-
-            physics_sim_view = _sim_utils.SimulationContext.instance().physics_sim_view
-
-            saved = torch.zeros((0, 29), dtype=torch.float32, device=device)
-            gravity_id = 0
-            step_counter = 0
-            env.reset()
-
-            while len(saved) < args.num_grasps:
-                step_counter += 1
-
-                actions = torch.zeros(N, 22, device=device)
-                env.step(actions)
-
-                # Gravity cycling
-                if step_counter % 40 == 0:
-                    grav = GRAVITY_DIRECTIONS[gravity_id]
-                    physics_sim_view.set_gravity(carb.Float3(*grav))
-                    gravity_id = (gravity_id + 1) % len(GRAVITY_DIRECTIONS)
-
-                # ── Validation ──
-                fingertip_pos = hand.data.body_pos_w[:, env.finger_bodies, :]
-                object_pos = obj.data.root_pos_w[:, :3]
-                object_rot = obj.data.root_quat_w
-                hand_root_pos = hand.data.root_pos_w
-                hand_root_quat = hand.data.root_quat_w
-                object_pos_hand = quat_apply_inverse(hand_root_quat, object_pos - hand_root_pos)
-                object_rot_hand = quat_mul(quat_conjugate(hand_root_quat), object_rot)
-                object_rot_hand = object_rot_hand / (torch.norm(object_rot_hand, dim=-1, keepdim=True) + 1e-8)
-                hand_dof_pos = hand.data.joint_pos
-
-                ft_dists = torch.norm(
-                    fingertip_pos - object_pos.unsqueeze(1), dim=-1, p=2,
-                )
-                cond1 = (ft_dists < 0.1).all(dim=-1)
-
-                forces = []
-                for sensor in env._contact_sensors:
-                    f = sensor.data.force_matrix_w[:, 0, 0, :]
-                    forces.append(torch.norm(f, dim=-1, p=2))
-                contact_forces = torch.stack(forces, dim=1)
-                cond2 = (contact_forces > 0.5).sum(dim=-1) >= 3
-
-                cond_all = cond1 & cond2
-                fail_ids = torch.where(~cond_all)[0]
-
-                at_end = (env.episode_length_buf == env.max_episode_length - 1)
-                success = at_end & cond_all
-                if success.any():
-                    states = torch.cat([
-                        hand_dof_pos[success],
-                        object_pos_hand[success],
-                        object_rot_hand[success],
-                    ], dim=1)
-                    saved = torch.cat([saved, states], dim=0)
-
-                done_ids = torch.unique(torch.cat([
-                    fail_ids, torch.where(at_end)[0],
-                ]))
-                if len(done_ids) > 0:
-                    env._reset_idx(done_ids)
-                    env.episode_length_buf[done_ids] = 0
-
-                if step_counter % 100 == 0:
-                    print(f"  [{time.strftime('%H:%M:%S')}] step={step_counter}, "
-                          f"grasps={len(saved)}/{args.num_grasps}")
-
-            # Save this shape/size
-            data = saved[:args.num_grasps].cpu().numpy()
-            out_path = out_dir / f"sharpa_grasp_{tag}.npy"
-            np.save(out_path, data)
-            print(f"\n  Saved {len(data)} grasps → {out_path}")
-
-            env.close()
-
-    # Merge all into one file if requested
-    if args.merge:
-        all_parts = []
-        for shape in args.shapes:
-            for size in args.sizes:
-                tag = f"{shape}_{int(size * 1000):03d}"
-                p = out_dir / f"sharpa_grasp_{tag}.npy"
-                if p.exists():
-                    all_parts.append(np.load(str(p)))
-        if all_parts:
-            merged = np.concatenate(all_parts, axis=0)
-            # Shuffle so shapes/sizes are interleaved
-            rng = np.random.default_rng(args.seed)
-            rng.shuffle(merged)
-            shapes_tag = "_".join(args.shapes)
-            merged_path = out_dir / f"sharpa_grasp_mixed_{shapes_tag}.npy"
-            np.save(merged_path, merged)
-            print(f"\n  Merged {len(merged)} grasps → {merged_path}")
-
-    # Summary
     print(f"\n{'='*60}")
-    print("  DONE — Generated grasp caches:")
-    for shape in args.shapes:
-        for size in args.sizes:
-            tag = f"{shape}_{int(size * 1000):03d}"
-            p = out_dir / f"sharpa_grasp_{tag}.npy"
-            if p.exists():
-                d = np.load(str(p))
-                print(f"  {p.name}: {d.shape}")
-    if args.merge:
-        shapes_tag = "_".join(args.shapes)
-        mp = out_dir / f"sharpa_grasp_mixed_{shapes_tag}.npy"
-        if mp.exists():
-            d = np.load(str(mp))
-            print(f"  {mp.name}: {d.shape}  (merged)")
+    print(f"  [GenGrasp] {len(combos)} object combos, {total_target} total grasps")
+    print(f"  Combos: {combos}")
+    print(f"  Output: {out_path}")
+    print(f"{'='*60}")
+
+    for combo_idx, (shape, size) in enumerate(combos):
+        # Last combo gets the remainder
+        target = per_combo if combo_idx < len(combos) - 1 \
+            else total_target - sum(len(s) for s in all_saved)
+        if target <= 0:
+            break
+
+        tag = f"{shape}_{int(size * 1000):03d}"
+        print(f"\n  [{combo_idx+1}/{len(combos)}] {tag} — generating {target} grasps")
+
+        cfg = build_env_cfg(shape, size, args.num_envs)
+        env = GraspGenEnv(cfg)
+        hand = env.hand
+        obj = env.object
+        device = env.device
+        N = env.num_envs
+
+        physics_sim_view = _sim_utils.SimulationContext.instance().physics_sim_view
+
+        saved = torch.zeros((0, 29), dtype=torch.float32, device=device)
+        gravity_id = 0
+        step_counter = 0
+        env.reset()
+
+        while len(saved) < target:
+            step_counter += 1
+            actions = torch.zeros(N, 22, device=device)
+            env.step(actions)
+
+            if step_counter % 40 == 0:
+                grav = GRAVITY_DIRECTIONS[gravity_id]
+                physics_sim_view.set_gravity(carb.Float3(*grav))
+                gravity_id = (gravity_id + 1) % len(GRAVITY_DIRECTIONS)
+
+            fingertip_pos = hand.data.body_pos_w[:, env.finger_bodies, :]
+            object_pos = obj.data.root_pos_w[:, :3]
+            object_rot = obj.data.root_quat_w
+            hand_root_pos = hand.data.root_pos_w
+            hand_root_quat = hand.data.root_quat_w
+            object_pos_hand = quat_apply_inverse(hand_root_quat, object_pos - hand_root_pos)
+            object_rot_hand = quat_mul(quat_conjugate(hand_root_quat), object_rot)
+            object_rot_hand = object_rot_hand / (torch.norm(object_rot_hand, dim=-1, keepdim=True) + 1e-8)
+            hand_dof_pos = hand.data.joint_pos
+
+            ft_dists = torch.norm(fingertip_pos - object_pos.unsqueeze(1), dim=-1, p=2)
+            cond1 = (ft_dists < 0.1).all(dim=-1)
+
+            forces = []
+            for sensor in env._contact_sensors:
+                f = sensor.data.force_matrix_w[:, 0, 0, :]
+                forces.append(torch.norm(f, dim=-1, p=2))
+            contact_forces = torch.stack(forces, dim=1)
+            cond2 = (contact_forces > 0.5).sum(dim=-1) >= 3
+
+            cond_all = cond1 & cond2
+            fail_ids = torch.where(~cond_all)[0]
+
+            at_end = (env.episode_length_buf == env.max_episode_length - 1)
+            success = at_end & cond_all
+            if success.any():
+                states = torch.cat([
+                    hand_dof_pos[success],
+                    object_pos_hand[success],
+                    object_rot_hand[success],
+                ], dim=1)
+                saved = torch.cat([saved, states], dim=0)
+
+            done_ids = torch.unique(torch.cat([fail_ids, torch.where(at_end)[0]]))
+            if len(done_ids) > 0:
+                env._reset_idx(done_ids)
+                env.episode_length_buf[done_ids] = 0
+
+            if step_counter % 100 == 0:
+                total_so_far = sum(len(s) for s in all_saved) + len(saved)
+                print(f"    [{time.strftime('%H:%M:%S')}] step={step_counter}, "
+                      f"{tag}={len(saved)}/{target}, total={total_so_far}/{total_target}")
+
+        all_saved.append(saved[:target].cpu().numpy())
+        print(f"    {tag}: collected {len(all_saved[-1])} grasps")
+        env.close()
+
+    # Concatenate, shuffle, save one file
+    merged = np.concatenate(all_saved, axis=0)
+    rng_combo.shuffle(merged)
+    merged = merged[:total_target]
+    np.save(out_path, merged)
+
+    print(f"\n{'='*60}")
+    print(f"  DONE — {len(merged)} grasps → {out_path}")
     print(f"{'='*60}")
 
     sim_app.close()
