@@ -29,7 +29,7 @@ env:
     orientation_delta_weight: 1.0      # weight on r_t = d_t - d_{t+1}
     goal_bonus: 5.0                    # +5 when rot_dist < goal_thresh
     goal_thresh: 0.4                   # rad (~23°)
-    drop_penalty: -20.0                # when object falls or leaves hand
+    drop_penalty: -20.0                # when object_dropped (too far from palm; matches termination)
 
 # ==============================================================================
 # Symmetric Actor-Critic PPO (rl_games)

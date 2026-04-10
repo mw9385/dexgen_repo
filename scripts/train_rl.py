@@ -785,8 +785,8 @@ class _IsaacLabVecEnv:
         from envs.mdp import events as mdp_events
         from envs.mdp import rewards as mdp_rewards
 
-        # Rolling goal: when all fingertips are within threshold of goal,
-        # select a new nearby goal (kNN) so the policy keeps transitioning.
+        # Rolling goal: when orientation error < rot_threshold and object still
+        # in hand, sample a new nearby grasp goal (kNN).
         n_updated = mdp_events.update_rolling_goal(self.env)
         # Cache on env so the observer can read it for Performance/ logging
         self.env._last_rolling_goal_updates = n_updated

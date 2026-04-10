@@ -348,7 +348,7 @@ if _ISAACLAB_AVAILABLE:
 
 # ---------------------------------------------------------------------------
 # Reward configuration (OpenAI "Learning Dexterous In-Hand Manipulation")
-# r_t = d_t - d_{t+1}  +  goal_bonus  +  fall_penalty
+# r_t = d_t - d_{t+1}  +  goal_bonus  +  drop_penalty (object_dropped)
 # ---------------------------------------------------------------------------
 
 if _ISAACLAB_AVAILABLE:
@@ -366,7 +366,7 @@ if _ISAACLAB_AVAILABLE:
             weight=1.0,
             params={"rot_thresh": 0.4, "bonus": 5.0},
         )
-        # -20 when object dropped — OpenAI Dactyl
+        # -20 when object_dropped (palm distance) — OpenAI-style scale
         drop = RewTerm(
             func=mdp_rewards.drop_penalty,
             weight=1.0,
@@ -382,6 +382,7 @@ if _ISAACLAB_AVAILABLE:
     @configclass
     class AnyGraspTerminationsCfg:
         time_out = DoneTerm(func=mdp_events.time_out, time_out=True)
+        # Same max_dist as mdp_events.object_dropped default (meters from palm).
         object_drop = DoneTerm(func=mdp_events.object_dropped, params={"max_dist": 0.01})
 
     @configclass

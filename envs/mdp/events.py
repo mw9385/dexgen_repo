@@ -10,8 +10,9 @@ Reset logic per episode (DexterityGen §3.2):
   4. Compute GOAL object pose as delta(start→goal) applied to actual sim state
      → start ≠ goal from step 0; policy must reorient toward goal immediately
 
-Rolling goal: when current goal is achieved (pos < 2cm, rot < 0.1rad),
-  a new nearby goal is selected via kNN from the grasp graph.
+Rolling goal: when orientation error < rot_threshold (default 0.4 rad) and the
+  object is still within the palm (see object_dropped), pick a new nearby goal
+  via kNN. Position error is not part of this success test.
 """
 
 from __future__ import annotations
@@ -600,16 +601,16 @@ def update_rolling_goal(
     rot_threshold: float = 0.4,
 ) -> int:
     """
-    Called every step. For each env where the orientation is within
-    threshold of the target, select a new nearby goal via kNN.
+    Called every control step from train_rl / evaluate after env.step().
 
-    Success = object orientation error < rot_threshold (0.4 rad ~23°).
+    For each env where orientation error to the current target is below
+    ``rot_threshold`` and the object has not failed ``object_dropped`` (too
+    far from palm), samples a new nearby goal from the grasp graph and updates
+    ``target_object_*`` / fingertip targets. Position match is not required.
 
     Returns:
         Number of envs whose goal was updated this step.
     """
-    from isaaclab.utils.math import quat_apply_inverse
-
     _zero_mask = torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
 
     graph = _load_grasp_graph(env)
@@ -625,12 +626,9 @@ def update_rolling_goal(
         env.extras["_rolling_goal_success_mask"] = _zero_mask
         return 0
 
-    # Object pose in hand frame
     robot = env.scene["robot"]
     obj = env.scene["object"]
-    root_pos = robot.data.root_pos_w
     root_quat = robot.data.root_quat_w
-    cur_pos = quat_apply_inverse(root_quat, obj.data.root_pos_w - root_pos)
 
     def _qc(q):
         return torch.cat([q[..., :1], -q[..., 1:]], dim=-1)
@@ -643,14 +641,10 @@ def update_rolling_goal(
 
     cur_quat = _qm(_qc(root_quat), obj.data.root_quat_w)
 
-    pos_err = torch.norm(cur_pos - target_pos, dim=-1)
     dot = (cur_quat * target_quat).sum(dim=-1).abs().clamp(0.0, 1.0)
     orn_err = 2.0 * torch.acos(dot)
 
-    success_mask = (orn_err < rot_threshold)
-
-    success_mask = success_mask & ~object_dropped(env)
-    success_mask = success_mask & ~object_dropped(env)
+    success_mask = (orn_err < rot_threshold) & ~object_dropped(env)
 
     # Store per-env success mask so evaluate.py can read it after step().
     # Must be stored BEFORE the target is updated below.
@@ -1003,8 +997,8 @@ def _load_grasp_graph(env):
 _GOAL_LOG_COUNT = 0
 
 def _log_goal_distances(env, env_ids: torch.Tensor):
-    """Log per-reset metrics: start→goal distances + termination reasons +
-    cumulative goal-reach / drop / left-hand counters."""
+    """Log per-reset metrics: start→goal distances, termination (drop/timeout),
+    and cumulative rolling-goal hit counts."""
     global _GOAL_LOG_COUNT
     _GOAL_LOG_COUNT += 1
 

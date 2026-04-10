@@ -4,7 +4,7 @@ Reward functions for in-hand object reorientation.
 OpenAI "Learning Dexterous In-Hand Manipulation" (2018):
   r_t = d_t - d_{t+1}   (rotation distance reduction)
   + 5   when rot_dist < 0.4 rad  (goal achieved)
-  - 20  when object drops        (fall penalty)
+  - 20  when object_dropped (object too far from palm; same predicate as termination)
 """
 
 from __future__ import annotations
@@ -70,7 +70,7 @@ def goal_bonus(env, rot_thresh: float = 0.4, bonus: float = 5.0) -> torch.Tensor
 # ── -20 drop penalty ──
 
 def drop_penalty(env, penalty: float = -20.0) -> torch.Tensor:
-    """Penalty when object drops (fell or left hand)."""
+    """Sparse penalty when ``object_dropped`` (palm–object distance exceeds threshold)."""
     from . import events as mdp_events
     dropped = mdp_events.object_dropped(env)
     return torch.where(dropped, penalty, torch.zeros(env.num_envs, device=env.device))

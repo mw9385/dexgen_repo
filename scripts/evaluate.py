@@ -7,8 +7,8 @@ on the Isaac Lab environment using rl_games' play loop.
 Reports per-episode success metrics:
     - mean episode reward
     - mean episode length
-    - drop / left-hand / no-contact termination ratios
-    - rolling-goal updates per step (success rate)
+    - object_drop termination ratio (palm–object distance)
+    - rolling-goal hits (orientation threshold) and updates per step
 
 Usage:
     python scripts/evaluate.py \
@@ -434,6 +434,7 @@ class _EvalVecEnv(_IsaacLabVecEnv):
 
         from envs.mdp import events as mdp_events
 
+        # Same rolling-goal logic as train_rl: see mdp_events.update_rolling_goal
         n_updated = mdp_events.update_rolling_goal(self.env)
         self.env._last_rolling_goal_updates = n_updated
 
@@ -442,20 +443,12 @@ class _EvalVecEnv(_IsaacLabVecEnv):
 
         term_manager = getattr(self.env, "termination_manager", None)
         drop_ratio = 0.0
-        left_hand_ratio = 0.0
-        no_contact_ratio = 0.0
         if term_manager is not None:
             active = set(getattr(term_manager, "active_terms", []))
             if "object_drop" in active:
                 drop_ratio = float(term_manager.get_term("object_drop").float().mean().item())
-            if "object_left_hand" in active:
-                left_hand_ratio = float(term_manager.get_term("object_left_hand").float().mean().item())
-            if "no_fingertip_contact" in active:
-                no_contact_ratio = float(term_manager.get_term("no_fingertip_contact").float().mean().item())
 
         info["drop_ratio"] = drop_ratio
-        info["left_hand_ratio"] = left_hand_ratio
-        info["no_contact_ratio"] = no_contact_ratio
 
         return _to_rl_obs(obs), rew, done, info
 
@@ -481,8 +474,6 @@ def _run_eval_loop(player, vec_env, num_episodes: int, device: str, results_json
     finished_goal_hits: list[int] = []
     finished_reached: list[bool] = []
     drop_events = 0
-    left_hand_events = 0
-    no_contact_events = 0
     total_steps = 0
 
     obs_dict = vec_env.reset()
@@ -520,8 +511,6 @@ def _run_eval_loop(player, vec_env, num_episodes: int, device: str, results_json
             ep_reached_goal[goal_mask] = True
 
         drop_events += float(info.get("drop_ratio", 0.0)) * num_envs
-        left_hand_events += float(info.get("left_hand_ratio", 0.0)) * num_envs
-        no_contact_events += float(info.get("no_contact_ratio", 0.0)) * num_envs
 
         if dones.any():
             done_ids = dones.nonzero(as_tuple=False).squeeze(-1).tolist()
@@ -575,12 +564,8 @@ def _run_eval_loop(player, vec_env, num_episodes: int, device: str, results_json
         "std_reward": float(rewards_np.std()) if len(rewards_np) else 0.0,
         "mean_length": float(lengths_np.mean()) if len(lengths_np) else 0.0,
         "drop_events": float(drop_events),
-        "left_hand_events": float(left_hand_events),
-        "no_contact_events": float(no_contact_events),
         "total_steps": int(total_steps),
         "drop_rate_per_step": float(drop_events / max(total_steps * num_envs, 1)),
-        "left_hand_rate_per_step": float(left_hand_events / max(total_steps * num_envs, 1)),
-        "no_contact_rate_per_step": float(no_contact_events / max(total_steps * num_envs, 1)),
     }
 
     print("\n" + "=" * 60)
