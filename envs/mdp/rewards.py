@@ -38,6 +38,14 @@ def _get_orn_error(env):
     return _rotation_distance(cur_quat, target_quat)
 
 
+def _get_pos_error(env):
+    cur_pos, _ = _obj_pose_in_hand_frame(env)
+    target_pos = env.extras.get("target_object_pos_hand")
+    if target_pos is None:
+        return torch.zeros(env.num_envs, device=env.device)
+    return torch.norm(cur_pos - target_pos, dim=-1)
+
+
 # ── r_t = d_t - d_{t+1} ──
 
 def orientation_delta_reward(env) -> torch.Tensor:
