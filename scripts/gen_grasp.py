@@ -50,12 +50,10 @@ def parse_args():
     p.add_argument("--sizes", nargs="+", type=float, default=[0.05],
                    help="Object sizes in metres (e.g., --sizes 0.04 0.05 0.06)")
     p.add_argument("--num_grasps", type=int, default=10000,
-                   help="Total grasps to generate (spread across all shape×size combos)")
+                   help="Grasps to generate per shape×size combo")
     p.add_argument("--num_envs", type=int, default=4096)
     p.add_argument("--episode_steps", type=int, default=50,
                    help="Steps per episode (at decimation=12, ~2.5s)")
-    p.add_argument("--output", type=str, default=None,
-                   help="Output .npy path. Default: data/sharpa_grasp_mixed.npy")
     p.add_argument(
         "--config",
         type=str,
@@ -364,43 +362,20 @@ def main():
                 self._start_rot[:, 0] = 1.0
             self._start_rot[env_ids] = rand_quat
 
-    # ── Generate grasps for one shape×size combo per process run ──
-    # Isaac Lab cannot reliably create/destroy multiple envs in one
-    # process, so we pick ONE random combo per run and append to the
-    # output file. Run this script multiple times (or in a loop) to
-    # cover all combos.
+    # ── Generate one shape×size per run ──
     import isaaclab.sim as _sim_utils
 
-    combos = [(s, float(round(sz, 4))) for s in args.shapes for sz in args.sizes]
-    rng_combo = np.random.default_rng(args.seed + int(time.time()) % 10000)
+    shape = args.shapes[0]
+    size = float(round(args.sizes[0], 4))
+    tag = f"{shape}_{int(size * 1000):03d}"
 
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = Path(args.output) if args.output else out_dir / "sharpa_grasp_mixed.npy"
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-
-    # Pick a random combo
-    shape, size = combos[rng_combo.integers(0, len(combos))]
-    tag = f"{shape}_{int(size * 1000):03d}"
-    total_target = args.num_grasps
-
-    # Load existing data if appending
-    existing = None
-    if out_path.exists():
-        existing = np.load(str(out_path))
-        already = len(existing)
-        remaining = total_target - already
-        if remaining <= 0:
-            print(f"  Already have {already}/{total_target} grasps in {out_path}. Done.")
-            sim_app.close()
-            return
-        print(f"  Appending to {out_path} ({already} existing, {remaining} remaining)")
-    else:
-        remaining = total_target
+    out_path = out_dir / f"sharpa_grasp_{tag}.npy"
 
     print(f"\n{'='*60}")
     print(f"  [GenGrasp] {tag} (shape={shape}, size={size}m)")
-    print(f"  Target: {remaining} new grasps (total target: {total_target})")
+    print(f"  num_envs={args.num_envs}, target={args.num_grasps}")
     print(f"  Output: {out_path}")
     print(f"{'='*60}")
 
@@ -418,7 +393,7 @@ def main():
     step_counter = 0
     env.reset()
 
-    while len(saved) < remaining:
+    while len(saved) < args.num_grasps:
         step_counter += 1
         actions = torch.zeros(N, 22, device=device)
         env.step(actions)
@@ -468,20 +443,13 @@ def main():
 
         if step_counter % 100 == 0:
             print(f"    [{time.strftime('%H:%M:%S')}] step={step_counter}, "
-                  f"{tag}={len(saved)}/{remaining}")
+                  f"{tag}={len(saved)}/{args.num_grasps}")
 
-    new_data = saved[:remaining].cpu().numpy()
-    if existing is not None:
-        merged = np.concatenate([existing, new_data], axis=0)
-    else:
-        merged = new_data
-    # Shuffle
-    rng_combo.shuffle(merged)
-    np.save(out_path, merged)
+    data = saved[:args.num_grasps].cpu().numpy()
+    np.save(out_path, data)
 
     print(f"\n{'='*60}")
-    print(f"  DONE — {len(merged)} grasps → {out_path}")
-    print(f"  (added {len(new_data)} {tag} grasps this run)")
+    print(f"  DONE — {len(data)} grasps → {out_path}")
     print(f"{'='*60}")
 
     env.close()
