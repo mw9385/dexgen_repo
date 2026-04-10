@@ -482,7 +482,7 @@ if _ISAACLAB_AVAILABLE:
                     "enabled": False,
                     "start_gravity": 0.05,
                     "end_gravity": 9.81,
-                    "warmup_ratio": 0.30,
+                    "warmup_ratio": 0.10,
                 }
             else:
                 self.gravity_curriculum = dict(self.gravity_curriculum)

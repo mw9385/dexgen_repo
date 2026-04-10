@@ -600,25 +600,21 @@ def main():
                     self.writer.add_scalar("Episode/" + key, value, epoch_num)
                 self.ep_infos.clear()
 
-            # Override direct_info — prevent rl_games from injecting its own
-            # success metrics. Use accumulated per-step counts from the wrapper
-            # so that drop_ratio reflects actual termination events, not
-            # the post-reset sim state.
+            # Use the same cumulative reset-reason counters that the print
+            # statement in events.py uses (_reset_log_stats), so Performance/
+            # metrics and console output show identical values.
             env = self.algo.vec_env.env
             _rg = getattr(env, "_last_rolling_goal_updates", 0)
-            _accum_steps = getattr(env, "_accum_step_count", 1)
-            _accum_drops = getattr(env, "_accum_drop_count", 0.0)
-            _accum_left = getattr(env, "_accum_left_hand_count", 0.0)
+            stats = env.extras.get("_reset_log_stats", {})
+            total_resets = max(stats.get("total_resets", 0), 1)
             self.direct_info = {
                 "success_ratio": _rg / max(env.num_envs, 1),
                 "rolling_goal_updates": _rg,
-                "drop_ratio": _accum_drops / max(_accum_steps, 1),
-                "left_hand_ratio": _accum_left / max(_accum_steps, 1),
+                "drop_ratio": stats.get("total_drops", 0) / total_resets,
+                "left_hand_ratio": stats.get("total_left_hand", 0) / total_resets,
+                "no_contact_ratio": stats.get("total_no_contact", 0) / total_resets,
+                "timeout_ratio": stats.get("total_timeouts", 0) / total_resets,
             }
-            # Reset accumulators for next epoch
-            env._accum_drop_count = 0.0
-            env._accum_left_hand_count = 0.0
-            env._accum_step_count = 0
 
             for k, v in self.direct_info.items():
                 self.writer.add_scalar(f"Performance/{k}", v, epoch_num)
@@ -822,11 +818,6 @@ class _IsaacLabVecEnv:
         info["drop_ratio"] = drop_ratio
         info["left_hand_ratio"] = left_hand_ratio
         info["rolling_goal_updates"] = n_updated
-
-        # Accumulate for epoch-level Performance/ logging
-        self.env._accum_drop_count = getattr(self.env, "_accum_drop_count", 0) + drop_ratio
-        self.env._accum_left_hand_count = getattr(self.env, "_accum_left_hand_count", 0) + left_hand_ratio
-        self.env._accum_step_count = getattr(self.env, "_accum_step_count", 0) + 1
 
         return _to_rl_obs(obs), rew, done, info
 
