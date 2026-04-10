@@ -390,8 +390,6 @@ def main():
             saved = torch.zeros((0, 29), dtype=torch.float32, device=device)
             gravity_id = 0
             step_counter = 0
-            reset_angle_diff = 30 / 180 * math.pi
-
             env.reset()
 
             while len(saved) < args.num_grasps:
@@ -429,15 +427,7 @@ def main():
                 contact_forces = torch.stack(forces, dim=1)
                 cond2 = (contact_forces > 0.5).sum(dim=-1) >= 3
 
-                # Check displacement from this episode's start orientation
-                # (not the fixed default, since we randomize start rot)
-                start_rot = env._start_rot
-                delta_rot = quat_mul(object_rot, quat_conjugate(start_rot))
-                delta_rot = delta_rot / (torch.norm(delta_rot, dim=-1, keepdim=True) + 1e-8)
-                angle = 2 * torch.acos(delta_rot[:, 0].clamp(-1, 1))
-                cond3 = angle < reset_angle_diff
-
-                cond_all = cond1 & cond2 & cond3
+                cond_all = cond1 & cond2
                 fail_ids = torch.where(~cond_all)[0]
 
                 at_end = (env.episode_length_buf == env.max_episode_length - 1)
