@@ -4,6 +4,9 @@ Grasp data structures + IO for .npy grasp caches.
 Supports:
   - .npy (sharpa-style): (N, 29) = 22 joints + 3 obj_pos + 4 obj_quat
   - .pkl (legacy GraspGraph): pickle format
+
+Cube .npy files are automatically augmented with 24 symmetry rotations
+at load time, expanding orientation coverage from ~60° to full SO(3).
 """
 from __future__ import annotations
 
@@ -102,6 +105,69 @@ class MultiObjectGraspGraph:
 
 
 # ---------------------------------------------------------------------------
+# Cube symmetry augmentation (24 rotations)
+# ---------------------------------------------------------------------------
+
+def _qmul(q1: np.ndarray, q2: np.ndarray) -> np.ndarray:
+    """Hamilton product of two quaternions (w,x,y,z)."""
+    w1, x1, y1, z1 = q1[..., 0], q1[..., 1], q1[..., 2], q1[..., 3]
+    w2, x2, y2, z2 = q2[..., 0], q2[..., 1], q2[..., 2], q2[..., 3]
+    return np.stack([
+        w1*w2 - x1*x2 - y1*y2 - z1*z2,
+        w1*x2 + x1*w2 + y1*z2 - z1*y2,
+        w1*y2 - x1*z2 + y1*w2 + z1*x2,
+        w1*z2 + x1*y2 - y1*x2 + z1*w2,
+    ], axis=-1)
+
+
+def _axis_angle_quat(axis: np.ndarray, angle: float) -> np.ndarray:
+    a = np.asarray(axis, dtype=np.float64)
+    a = a / (np.linalg.norm(a) + 1e-8)
+    h = angle * 0.5
+    return np.array([np.cos(h), *(a * np.sin(h))], dtype=np.float64)
+
+
+def _cube_symmetry_quats() -> np.ndarray:
+    """24 quaternions of the cube rotation group. Returns (24, 4)."""
+    quats = [np.array([1, 0, 0, 0], dtype=np.float64)]
+    # Face rotations: 90°, 180°, 270° around x, y, z
+    for ax in [[1,0,0], [0,1,0], [0,0,1]]:
+        for ang in [np.pi/2, np.pi, 3*np.pi/2]:
+            quats.append(_axis_angle_quat(ax, ang))
+    # Edge rotations: 180° around face diagonals
+    for ax in [[1,1,0],[1,-1,0],[1,0,1],[1,0,-1],[0,1,1],[0,1,-1]]:
+        quats.append(_axis_angle_quat(ax, np.pi))
+    # Vertex rotations: 120°, 240° around body diagonals
+    for ax in [[1,1,1],[1,1,-1],[1,-1,1],[1,-1,-1]]:
+        for ang in [2*np.pi/3, 4*np.pi/3]:
+            quats.append(_axis_angle_quat(ax, ang))
+    arr = np.stack(quats)
+    return arr / (np.linalg.norm(arr, axis=-1, keepdims=True) + 1e-8)
+
+
+def _augment_cube_symmetry(data: np.ndarray) -> np.ndarray:
+    """Apply 24 cube symmetry rotations to expand orientation coverage.
+
+    Input: (N, 29). Returns (N*24, 29).
+    Joint angles and object position are unchanged; only object_quat_hand
+    is rotated, which is valid because a cube is invariant under these
+    rotations (contact geometry is preserved).
+    """
+    sym_quats = _cube_symmetry_quats()  # (24, 4)
+    N = data.shape[0]
+    parts = []
+    for sq in sym_quats:
+        block = data.copy()
+        obj_q = block[:, 25:29].astype(np.float64)
+        sq_batch = np.broadcast_to(sq, obj_q.shape)
+        new_q = _qmul(obj_q, sq_batch)
+        new_q = new_q / (np.linalg.norm(new_q, axis=-1, keepdims=True) + 1e-8)
+        block[:, 25:29] = new_q.astype(np.float32)
+        parts.append(block)
+    return np.concatenate(parts, axis=0)
+
+
+# ---------------------------------------------------------------------------
 # .npy loader
 # ---------------------------------------------------------------------------
 
@@ -111,10 +177,13 @@ def load_npy_as_graph(path: str | Path) -> MultiObjectGraspGraph:
 
     Input: (N, 29) = [22 joint_pos | 3 obj_pos | 4 obj_quat]
     Filename convention: sharpa_grasp_{shape}_{size_mm}.npy
+
+    Cube files are automatically augmented with 24 symmetry rotations
+    (N → N*24) to expand orientation coverage to the full rotation space.
     """
     path = Path(path)
     data = np.load(str(path))
-    N = data.shape[0]
+    N_orig = data.shape[0]
 
     # Parse shape/size from filename
     stem = path.stem
@@ -130,6 +199,12 @@ def load_npy_as_graph(path: str | Path) -> MultiObjectGraspGraph:
                 except ValueError:
                     pass
 
+    # Auto-augment cubes with symmetry rotations
+    if shape_type == "cube":
+        data = _augment_cube_symmetry(data)
+        print(f"[graph_io] Cube symmetry augmentation: {N_orig} × 24 = {len(data)} grasps")
+
+    N = data.shape[0]
     obj_name = f"{shape_type}_{int(size * 1000):03d}_f5"
 
     grasps = []
@@ -149,9 +224,7 @@ def load_npy_as_graph(path: str | Path) -> MultiObjectGraspGraph:
 
     # NOTE: goal sampling (_sample_nearby_goal_index) computes nearest
     # neighbours on-the-fly from cached quaternion / position arrays — it
-    # does NOT read the `edges` list. Building edges here used to do an
-    # O(N^2) Python loop (~50M iters for N=10000) and blocked env startup
-    # by tens of seconds. Keep edges empty.
+    # does NOT read the `edges` list. Keep edges empty.
     grasp_set = GraspSet(grasps=grasps, object_name=obj_name)
     graph = GraspGraph(
         grasp_set=grasp_set, edges=[],
