@@ -347,9 +347,19 @@ def main():
             self.hand.set_joint_position_target(dof_pos, env_ids=env_ids)
             obj_state = self.object.data.default_root_state[env_ids].clone()
             obj_state[:, :3] += self.scene.env_origins[env_ids]
+            # Apply uniform random rotation to the object so grasps
+            # cover diverse orientations (full SO(3)).
+            rand_quat = torch.randn(len(env_ids), 4, device=self.device)
+            rand_quat = rand_quat / (torch.norm(rand_quat, dim=-1, keepdim=True) + 1e-8)
+            obj_state[:, 3:7] = rand_quat
             obj_state[:, 7:] = 0.0
             self.object.write_root_pose_to_sim(obj_state[:, :7], env_ids=env_ids)
             self.object.write_root_velocity_to_sim(obj_state[:, 7:], env_ids=env_ids)
+            # Store the randomized start orientation for validation
+            if not hasattr(self, '_start_rot'):
+                self._start_rot = torch.zeros(self.num_envs, 4, device=self.device)
+                self._start_rot[:, 0] = 1.0
+            self._start_rot[env_ids] = rand_quat
 
     # ── Loop over all shape × size combinations ────────────────
     import omni.physics.tensors.impl.api as physx
@@ -419,8 +429,10 @@ def main():
                 contact_forces = torch.stack(forces, dim=1)
                 cond2 = (contact_forces > 0.5).sum(dim=-1) >= 3
 
-                default_rot = obj.data.default_root_state[:, 3:7]
-                delta_rot = quat_mul(object_rot, quat_conjugate(default_rot))
+                # Check displacement from this episode's start orientation
+                # (not the fixed default, since we randomize start rot)
+                start_rot = env._start_rot
+                delta_rot = quat_mul(object_rot, quat_conjugate(start_rot))
                 delta_rot = delta_rot / (torch.norm(delta_rot, dim=-1, keepdim=True) + 1e-8)
                 angle = 2 * torch.acos(delta_rot[:, 0].clamp(-1, 1))
                 cond3 = angle < reset_angle_diff
