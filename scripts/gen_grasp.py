@@ -364,118 +364,127 @@ def main():
                 self._start_rot[:, 0] = 1.0
             self._start_rot[env_ids] = rand_quat
 
-    # ── Cycle through shape×size combos, collect into one file ──
+    # ── Generate grasps for one shape×size combo per process run ──
+    # Isaac Lab cannot reliably create/destroy multiple envs in one
+    # process, so we pick ONE random combo per run and append to the
+    # output file. Run this script multiple times (or in a loop) to
+    # cover all combos.
     import isaaclab.sim as _sim_utils
 
     combos = [(s, float(round(sz, 4))) for s in args.shapes for sz in args.sizes]
-    rng_combo = np.random.default_rng(args.seed)
-    rng_combo.shuffle(combos)
+    rng_combo = np.random.default_rng(args.seed + int(time.time()) % 10000)
 
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = Path(args.output) if args.output else out_dir / "sharpa_grasp_mixed.npy"
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # Pick a random combo
+    shape, size = combos[rng_combo.integers(0, len(combos))]
+    tag = f"{shape}_{int(size * 1000):03d}"
     total_target = args.num_grasps
-    per_combo = max(total_target // len(combos), 1)
-    all_saved = []
+
+    # Load existing data if appending
+    existing = None
+    if out_path.exists():
+        existing = np.load(str(out_path))
+        already = len(existing)
+        remaining = total_target - already
+        if remaining <= 0:
+            print(f"  Already have {already}/{total_target} grasps in {out_path}. Done.")
+            sim_app.close()
+            return
+        print(f"  Appending to {out_path} ({already} existing, {remaining} remaining)")
+    else:
+        remaining = total_target
 
     print(f"\n{'='*60}")
-    print(f"  [GenGrasp] {len(combos)} object combos, {total_target} total grasps")
-    print(f"  Combos: {combos}")
+    print(f"  [GenGrasp] {tag} (shape={shape}, size={size}m)")
+    print(f"  Target: {remaining} new grasps (total target: {total_target})")
     print(f"  Output: {out_path}")
     print(f"{'='*60}")
 
-    for combo_idx, (shape, size) in enumerate(combos):
-        # Last combo gets the remainder
-        target = per_combo if combo_idx < len(combos) - 1 \
-            else total_target - sum(len(s) for s in all_saved)
-        if target <= 0:
-            break
+    cfg = build_env_cfg(shape, size, args.num_envs)
+    env = GraspGenEnv(cfg)
+    hand = env.hand
+    obj = env.object
+    device = env.device
+    N = env.num_envs
 
-        tag = f"{shape}_{int(size * 1000):03d}"
-        print(f"\n  [{combo_idx+1}/{len(combos)}] {tag} — generating {target} grasps")
+    physics_sim_view = _sim_utils.SimulationContext.instance().physics_sim_view
 
-        cfg = build_env_cfg(shape, size, args.num_envs)
-        env = GraspGenEnv(cfg)
-        hand = env.hand
-        obj = env.object
-        device = env.device
-        N = env.num_envs
+    saved = torch.zeros((0, 29), dtype=torch.float32, device=device)
+    gravity_id = 0
+    step_counter = 0
+    env.reset()
 
-        physics_sim_view = _sim_utils.SimulationContext.instance().physics_sim_view
+    while len(saved) < remaining:
+        step_counter += 1
+        actions = torch.zeros(N, 22, device=device)
+        env.step(actions)
 
-        saved = torch.zeros((0, 29), dtype=torch.float32, device=device)
-        gravity_id = 0
-        step_counter = 0
-        env.reset()
+        if step_counter % 40 == 0:
+            grav = GRAVITY_DIRECTIONS[gravity_id]
+            physics_sim_view.set_gravity(carb.Float3(*grav))
+            gravity_id = (gravity_id + 1) % len(GRAVITY_DIRECTIONS)
 
-        while len(saved) < target:
-            step_counter += 1
-            actions = torch.zeros(N, 22, device=device)
-            env.step(actions)
+        fingertip_pos = hand.data.body_pos_w[:, env.finger_bodies, :]
+        object_pos = obj.data.root_pos_w[:, :3]
+        object_rot = obj.data.root_quat_w
+        hand_root_pos = hand.data.root_pos_w
+        hand_root_quat = hand.data.root_quat_w
+        object_pos_hand = quat_apply_inverse(hand_root_quat, object_pos - hand_root_pos)
+        object_rot_hand = quat_mul(quat_conjugate(hand_root_quat), object_rot)
+        object_rot_hand = object_rot_hand / (torch.norm(object_rot_hand, dim=-1, keepdim=True) + 1e-8)
+        hand_dof_pos = hand.data.joint_pos
 
-            if step_counter % 40 == 0:
-                grav = GRAVITY_DIRECTIONS[gravity_id]
-                physics_sim_view.set_gravity(carb.Float3(*grav))
-                gravity_id = (gravity_id + 1) % len(GRAVITY_DIRECTIONS)
+        ft_dists = torch.norm(fingertip_pos - object_pos.unsqueeze(1), dim=-1, p=2)
+        cond1 = (ft_dists < 0.1).all(dim=-1)
 
-            fingertip_pos = hand.data.body_pos_w[:, env.finger_bodies, :]
-            object_pos = obj.data.root_pos_w[:, :3]
-            object_rot = obj.data.root_quat_w
-            hand_root_pos = hand.data.root_pos_w
-            hand_root_quat = hand.data.root_quat_w
-            object_pos_hand = quat_apply_inverse(hand_root_quat, object_pos - hand_root_pos)
-            object_rot_hand = quat_mul(quat_conjugate(hand_root_quat), object_rot)
-            object_rot_hand = object_rot_hand / (torch.norm(object_rot_hand, dim=-1, keepdim=True) + 1e-8)
-            hand_dof_pos = hand.data.joint_pos
+        forces = []
+        for sensor in env._contact_sensors:
+            f = sensor.data.force_matrix_w[:, 0, 0, :]
+            forces.append(torch.norm(f, dim=-1, p=2))
+        contact_forces = torch.stack(forces, dim=1)
+        cond2 = (contact_forces > 0.5).sum(dim=-1) >= 3
 
-            ft_dists = torch.norm(fingertip_pos - object_pos.unsqueeze(1), dim=-1, p=2)
-            cond1 = (ft_dists < 0.1).all(dim=-1)
+        cond_all = cond1 & cond2
+        fail_ids = torch.where(~cond_all)[0]
 
-            forces = []
-            for sensor in env._contact_sensors:
-                f = sensor.data.force_matrix_w[:, 0, 0, :]
-                forces.append(torch.norm(f, dim=-1, p=2))
-            contact_forces = torch.stack(forces, dim=1)
-            cond2 = (contact_forces > 0.5).sum(dim=-1) >= 3
+        at_end = (env.episode_length_buf == env.max_episode_length - 1)
+        success = at_end & cond_all
+        if success.any():
+            states = torch.cat([
+                hand_dof_pos[success],
+                object_pos_hand[success],
+                object_rot_hand[success],
+            ], dim=1)
+            saved = torch.cat([saved, states], dim=0)
 
-            cond_all = cond1 & cond2
-            fail_ids = torch.where(~cond_all)[0]
+        done_ids = torch.unique(torch.cat([fail_ids, torch.where(at_end)[0]]))
+        if len(done_ids) > 0:
+            env._reset_idx(done_ids)
+            env.episode_length_buf[done_ids] = 0
 
-            at_end = (env.episode_length_buf == env.max_episode_length - 1)
-            success = at_end & cond_all
-            if success.any():
-                states = torch.cat([
-                    hand_dof_pos[success],
-                    object_pos_hand[success],
-                    object_rot_hand[success],
-                ], dim=1)
-                saved = torch.cat([saved, states], dim=0)
+        if step_counter % 100 == 0:
+            print(f"    [{time.strftime('%H:%M:%S')}] step={step_counter}, "
+                  f"{tag}={len(saved)}/{remaining}")
 
-            done_ids = torch.unique(torch.cat([fail_ids, torch.where(at_end)[0]]))
-            if len(done_ids) > 0:
-                env._reset_idx(done_ids)
-                env.episode_length_buf[done_ids] = 0
-
-            if step_counter % 100 == 0:
-                total_so_far = sum(len(s) for s in all_saved) + len(saved)
-                print(f"    [{time.strftime('%H:%M:%S')}] step={step_counter}, "
-                      f"{tag}={len(saved)}/{target}, total={total_so_far}/{total_target}")
-
-        all_saved.append(saved[:target].cpu().numpy())
-        print(f"    {tag}: collected {len(all_saved[-1])} grasps")
-        env.close()
-
-    # Concatenate, shuffle, save one file
-    merged = np.concatenate(all_saved, axis=0)
+    new_data = saved[:remaining].cpu().numpy()
+    if existing is not None:
+        merged = np.concatenate([existing, new_data], axis=0)
+    else:
+        merged = new_data
+    # Shuffle
     rng_combo.shuffle(merged)
-    merged = merged[:total_target]
     np.save(out_path, merged)
 
     print(f"\n{'='*60}")
     print(f"  DONE — {len(merged)} grasps → {out_path}")
+    print(f"  (added {len(new_data)} {tag} grasps this run)")
     print(f"{'='*60}")
+
+    env.close()
 
     sim_app.close()
 
