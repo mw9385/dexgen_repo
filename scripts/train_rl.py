@@ -561,6 +561,13 @@ def main():
             # reliable place to read the restored epoch_num and seed the
             # curriculum before the first rollout runs.
             super().after_init(algo)
+            # Wrap writer immediately so rl_games' own lowercase
+            # "performance/" metrics are filtered from the first epoch.
+            if not self._writer_wrapped and hasattr(self, "writer"):
+                self.writer = _FilteredWriter(self.writer)
+                if hasattr(algo, "writer"):
+                    algo.writer = _FilteredWriter(algo.writer)
+                self._writer_wrapped = True
             epoch = int(getattr(algo, "epoch_num", 0) or 0)
             frame = int(getattr(algo, "frame", 0) or 0)
             if epoch > 0 or frame > 0:
@@ -575,13 +582,6 @@ def main():
                 print(f"[Stage 1] WARNING: could not apply curriculum in after_init: {_e}")
 
         def after_print_stats(self, frame, epoch_num, total_time):
-            # Wrap the writer once on first callback to filter redundant metrics
-            if not self._writer_wrapped and hasattr(self, "writer"):
-                self.writer = _FilteredWriter(self.writer)
-                if hasattr(self.algo, "writer"):
-                    self.algo.writer = _FilteredWriter(self.algo.writer)
-                self._writer_wrapped = True
-
             from envs.mdp import events as mdp_events
             # Update curriculum (min_dist: 3cm → 8cm over first 30%)
             mdp_events.update_curriculum(
