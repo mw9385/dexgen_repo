@@ -31,6 +31,9 @@ env:
     goal_thresh: 0.4                   # rad (~23°)
     drop_penalty: -20.0                # when object_dropped (too far from palm; matches termination)
 
+  terminations:
+    object_drop_max_dist: 0.08         # m — palm centre to object; failure if exceeded (~8 cm)
+
 # ==============================================================================
 # Symmetric Actor-Critic PPO (rl_games)
 # ==============================================================================

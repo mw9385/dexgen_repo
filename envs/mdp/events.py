@@ -10,9 +10,8 @@ Reset logic per episode (DexterityGen §3.2):
   4. Compute GOAL object pose as delta(start→goal) applied to actual sim state
      → start ≠ goal from step 0; policy must reorient toward goal immediately
 
-Rolling goal: when orientation error < rot_threshold (default 0.4 rad) and the
-  object is still within the palm (see object_dropped), pick a new nearby goal
-  via kNN. Position error is not part of this success test.
+Rolling goal: when orientation error < rot_thresh and object_dropped is false,
+  pick a new nearby goal via kNN. ``rot_thresh`` matches ``rewards.goal_bonus``.
 """
 
 from __future__ import annotations
@@ -55,8 +54,27 @@ from .sim_utils import (
 def time_out(env) -> torch.Tensor:
     return env.episode_length_buf >= env.max_episode_length
 
-def object_dropped(env, max_dist: float = 0.01) -> torch.Tensor:
-    """Object dropped = moved more than max_dist from palm center."""
+
+def object_drop_max_dist_for_env(env, default: float = 0.08) -> float:
+    """``max_dist`` from ``terminations.object_drop`` if set, else ``default``."""
+    term = getattr(getattr(env.cfg, "terminations", None), "object_drop", None)
+    if term is None:
+        return default
+    p = getattr(term, "params", None)
+    if not p:
+        return default
+    get = p.get if hasattr(p, "get") else (lambda k, d=None: p[k] if k in p else d)
+    v = get("max_dist", default)
+    return float(v)
+
+
+def object_dropped(env, max_dist: float | None = None) -> torch.Tensor:
+    """Object dropped = palm–object distance exceeds ``max_dist`` (metres).
+
+    If ``max_dist`` is None, uses :func:`object_drop_max_dist_for_env`.
+    """
+    if max_dist is None:
+        max_dist = object_drop_max_dist_for_env(env)
     robot = env.scene["robot"]
     obj = env.scene["object"]
     palm_body_id = get_palm_body_id_from_env(robot, env)
@@ -336,9 +354,6 @@ def reset_to_random_grasp(
     if "_prev_orn_error" in env.extras:
         from .rewards import _get_orn_error
         env.extras["_prev_orn_error"][env_ids] = _get_orn_error(env)[env_ids]
-    if "_prev_pos_error" in env.extras:
-        from .rewards import _get_pos_error
-        env.extras["_prev_pos_error"][env_ids] = _get_pos_error(env)[env_ids]
 
 # ---------------------------------------------------------------------------
 # Nearest-neighbor goal selection
@@ -596,21 +611,41 @@ def update_curriculum(env, epoch: int, total_epochs: int = 10000):
 # Rolling goal: update goal when current goal is achieved mid-episode
 # ---------------------------------------------------------------------------
 
+def goal_rot_thresh_from_env(env, default: float = 0.4) -> float:
+    """``rot_thresh`` from ``env.cfg.rewards.goal_bonus`` (matches ``goal_bonus`` reward)."""
+    rw = getattr(env.cfg, "rewards", None)
+    if rw is None:
+        return default
+    gb = getattr(rw, "goal_bonus", None)
+    if gb is None:
+        return default
+    p = getattr(gb, "params", None)
+    if p is None:
+        return default
+    get = p.get if hasattr(p, "get") else (lambda k, d=None: p[k] if k in p else d)
+    return float(get("rot_thresh", default))
+
+
 def update_rolling_goal(
     env,
-    rot_threshold: float = 0.4,
+    rot_threshold: float | None = None,
 ) -> int:
     """
     Called every control step from train_rl / evaluate after env.step().
 
-    For each env where orientation error to the current target is below
-    ``rot_threshold`` and the object has not failed ``object_dropped`` (too
-    far from palm), samples a new nearby goal from the grasp graph and updates
-    ``target_object_*`` / fingertip targets. Position match is not required.
+    For each env where orientation error < ``rot_threshold`` and the object has
+    not failed ``object_dropped``, samples a new nearby goal from the grasp
+    graph and updates ``target_object_*`` / fingertip targets.
+
+    If ``rot_threshold`` is omitted, uses ``goal_rot_thresh_from_env`` (same as
+    ``rewards.goal_bonus.params['rot_thresh']``).
 
     Returns:
         Number of envs whose goal was updated this step.
     """
+    if rot_threshold is None:
+        rot_threshold = goal_rot_thresh_from_env(env)
+
     _zero_mask = torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
 
     graph = _load_grasp_graph(env)

@@ -37,6 +37,7 @@ sys.path.insert(0, str(Path(__file__).parent))  # for `import train_rl`
 
 from isaaclab.app import AppLauncher
 from grasp_generation.graph_io import MultiObjectGraspGraph, load_merged_graph, parse_graph_paths
+from envs.mdp.events import goal_rot_thresh_from_env
 
 # Reuse helpers from train_rl.py so behaviour matches 1:1.
 from train_rl import (  # noqa: E402
@@ -458,10 +459,11 @@ class _EvalVecEnv(_IsaacLabVecEnv):
 # ---------------------------------------------------------------------------
 
 def _run_eval_loop(player, vec_env, num_episodes: int, device: str, results_json: str | None,
-                   checkpoint_path: str = "", goal_threshold: float = 0.4):
+                   checkpoint_path: str = ""):
     """Manually drive the rl_games Player so we can collect per-episode metrics."""
     num_envs = vec_env.num_envs
     raw_env = vec_env.env  # inner ManagerBasedRLEnv
+    _rg_rot = goal_rot_thresh_from_env(raw_env)
 
     # Episode accumulators (one entry per env slot, reset on done)
     ep_reward = torch.zeros(num_envs, device=device)
@@ -482,8 +484,10 @@ def _run_eval_loop(player, vec_env, num_episodes: int, device: str, results_json
         player.init_rnn()
 
     print("\n" + "=" * 60)
-    print(f"[Evaluate] Rolling goal threshold: {goal_threshold:.2f} rad "
-          f"(~{goal_threshold * 180 / 3.14159:.1f}°)")
+    print(
+        f"[Evaluate] Rolling goal (matches goal_bonus): "
+        f"orn_err < {_rg_rot:.2f} rad (~{_rg_rot * 180 / 3.14159:.1f}°)"
+    )
     print("=" * 60)
 
     while len(finished_rewards) < num_episodes:
@@ -554,7 +558,7 @@ def _run_eval_loop(player, vec_env, num_episodes: int, device: str, results_json
 
     summary = {
         "checkpoint": checkpoint_path,
-        "goal_threshold_rad": float(goal_threshold),
+        "goal_threshold_rad": float(_rg_rot),
         "num_episodes": n_total,
         "num_success": n_success,
         "success_rate": float(n_success / max(n_total, 1)),

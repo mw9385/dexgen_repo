@@ -3,7 +3,7 @@ Reward functions for in-hand object reorientation.
 
 OpenAI "Learning Dexterous In-Hand Manipulation" (2018):
   r_t = d_t - d_{t+1}   (rotation distance reduction)
-  + 5   when rot_dist < 0.4 rad  (goal achieved)
+  + 5   when rot_dist < rot_thresh  (goal achieved)
   - 20  when object_dropped (object too far from palm; same predicate as termination)
 """
 
@@ -38,14 +38,6 @@ def _get_orn_error(env):
     return _rotation_distance(cur_quat, target_quat)
 
 
-def _get_pos_error(env):
-    cur_pos, _ = _obj_pose_in_hand_frame(env)
-    target_pos = env.extras.get("target_object_pos_hand")
-    if target_pos is None:
-        return torch.zeros(env.num_envs, device=env.device)
-    return torch.norm(cur_pos - target_pos, dim=-1)
-
-
 # ── r_t = d_t - d_{t+1} ──
 
 def orientation_delta_reward(env) -> torch.Tensor:
@@ -62,7 +54,7 @@ def orientation_delta_reward(env) -> torch.Tensor:
 # ── +5 goal bonus ──
 
 def goal_bonus(env, rot_thresh: float = 0.4, bonus: float = 5.0) -> torch.Tensor:
-    """Sparse bonus when goal achieved."""
+    """Sparse bonus when orientation error is below threshold."""
     rot_dist = _get_orn_error(env)
     return torch.where(rot_dist < rot_thresh, bonus, torch.zeros_like(rot_dist))
 

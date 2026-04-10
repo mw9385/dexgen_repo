@@ -360,7 +360,7 @@ if _ISAACLAB_AVAILABLE:
             weight=1.0,
             params={},
         )
-        # +5 when goal achieved (rot_dist < 0.4 rad) — OpenAI Dactyl
+        # +5 when goal achieved (rot_dist < 0.4 rad) — OpenAI-style scale
         goal_bonus = RewTerm(
             func=mdp_rewards.goal_bonus,
             weight=1.0,
@@ -382,8 +382,8 @@ if _ISAACLAB_AVAILABLE:
     @configclass
     class AnyGraspTerminationsCfg:
         time_out = DoneTerm(func=mdp_events.time_out, time_out=True)
-        # Same max_dist as mdp_events.object_dropped default (meters from palm).
-        object_drop = DoneTerm(func=mdp_events.object_dropped, params={"max_dist": 0.01})
+        # Palm–object distance (m); reward drop_penalty uses the same predicate.
+        object_drop = DoneTerm(func=mdp_events.object_dropped, params={"max_dist": 0.08})
 
     @configclass
     class AnyGraspEventsCfg:

@@ -174,6 +174,12 @@ def apply_env_config(env_cfg, env_cfg_dict: dict):
         if "drop_penalty" in rewards_cfg and hasattr(env_cfg.rewards, "drop"):
             env_cfg.rewards.drop.params["penalty"] = float(rewards_cfg["drop_penalty"])
 
+    term_cfg = env_cfg_dict.get("terminations", {})
+    if term_cfg and hasattr(env_cfg.terminations, "object_drop"):
+        if "object_drop_max_dist" in term_cfg:
+            env_cfg.terminations.object_drop.params["max_dist"] = float(
+                term_cfg["object_drop_max_dist"]
+            )
 
 
 def _resolve_valid_minibatch_size(batch_size: int, requested_minibatch: int, seq_length: int) -> int:
@@ -492,6 +498,17 @@ def main():
                 reward_parts.append(f"{reward_name}={reward_term.weight}")
         if reward_parts:
             print(f"[CONFIG] rewards:  {'  '.join(reward_parts)}")
+        if hasattr(_rw, "goal_bonus") and getattr(_rw.goal_bonus, "params", None):
+            _gp = _rw.goal_bonus.params
+            _gget = _gp.get if hasattr(_gp, "get") else (lambda k, d=None: _gp[k] if k in _gp else d)
+            print(
+                f"[CONFIG] goal_bonus: rot_thresh={_gget('rot_thresh')} rad  "
+                f"bonus={_gget('bonus')}"
+            )
+        if hasattr(_term, "object_drop") and getattr(_term.object_drop, "params", None):
+            _od = _term.object_drop.params
+            _odget = _od.get if hasattr(_od, "get") else (lambda k, d=None: _od[k] if k in _od else d)
+            print(f"[CONFIG] object_drop: max_dist={_odget('max_dist')} m (palm–object)")
         if hasattr(_term, "no_fingertip_contact"):
             print(f"[CONFIG] no_contact_patience: {_term.no_fingertip_contact.params.get('patience')}")
         print(f"[CONFIG] episode_length_s: {env_cfg.episode_length_s}")
