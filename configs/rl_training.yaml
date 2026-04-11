@@ -18,7 +18,7 @@ env:
     # Performance-gated: only advances when drop_ratio < threshold
     advance_drop_thresh: 0.3      # advance curriculum when <30% drops
     # Gravity: incremental steps when performing well
-    start_gravity: 4.5
+    start_gravity: 1.0
     end_gravity: 9.81
     gravity_step: 0.1             # +0.1 m/s² per advance
     # Goal difficulty: min orientation distance for kNN goal selection
