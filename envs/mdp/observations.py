@@ -1,22 +1,31 @@
 """
-Observation functions — Sharpa Wave Hand.
+Observation functions — Sharpa Wave Hand (DeXtreme-aligned).
 
-Tactile sensing and temporal stacking copied verbatim from sharpa-rl-lab
+Tactile sensing and temporal stacking from sharpa-rl-lab
 (sharpa_wave_env.py compute_observations).
 
-  Per-step block (64 dims):
+  Per-step block (86 dims):
     joint_pos_normalized    22   (unscale to [-1, 1] + noise)
-    joint_targets           22   (current position targets)
+    joint_vel_normalized    22   (÷5.0, clamp [-1,1])
+    joint_targets           22   (current action targets)
     tactile_forces           5   (smoothed contact force magnitude)
     contact_positions       15   (5 fingers × 3, in tactile frame)
 
-  3-step temporal stacking: 64 × 3 = 192 dims
+  3-step temporal stacking: 86 × 3 = 258 dims
 
-  + Target info (DexGen, non-temporal):
-    target_object_pos_hand   3
-    target_object_quat_hand  4
+  + Non-temporal (appended once):
+    last_action              22  (previous step's action)
+    object_pos_hand           3  (current object position in hand frame)
+    object_quat_hand          4  (current object quaternion in hand frame)
+    object_linvel_hand        3  (object linear velocity in hand frame)
+    object_angvel_hand        3  (object angular velocity, ×0.2)
+    target_object_pos_hand    3  (goal object position)
+    target_object_quat_hand   4  (goal object quaternion)
+    goal_relative_rot         4  (quaternion diff: object→target)
+    rotation_distance         2  (current + best rot error)
+    dr_params                 3  (mass, friction, damping — normalised)
 
-  Total: 192 + 7 = 199 dims
+  Total: 258 + 22 + 3 + 4 + 3 + 3 + 3 + 4 + 4 + 2 + 3 = 309 dims
 """
 
 from __future__ import annotations
@@ -56,8 +65,10 @@ def init_sharpa_obs_buffers(env):
     device = env.device
     hand = env.scene["robot"]
 
+    _PER_STEP_DIM = 86  # 22 joint_pos + 22 joint_vel + 22 targets + 5 tactile + 15 contact_pos
+    env.extras["_per_step_dim"] = _PER_STEP_DIM
     env.extras["_obs_lag_history"] = torch.zeros(
-        N, 80, 64, device=device, dtype=torch.float,
+        N, 80, _PER_STEP_DIM, device=device, dtype=torch.float,
     )
     env.extras["_at_reset_buf"] = torch.ones(N, device=device, dtype=torch.long)
     env.extras["_last_contacts"] = torch.zeros(N, 5, device=device, dtype=torch.float)
@@ -99,8 +110,8 @@ def init_sharpa_obs_buffers(env):
 
 def sharpa_observation_temporal(env) -> torch.Tensor:
     """
-    Sharpa-style 64-dim × 3 temporal = 192 dims.
-    Copied from sharpa_wave_env.py compute_observations.
+    Sharpa-style 86-dim × 3 temporal = 258 dims.
+    Extended from sharpa_wave_env.py with joint velocities (DeXtreme-aligned).
     """
     hand = env.scene["robot"]
     device = env.device
@@ -130,6 +141,7 @@ def sharpa_observation_temporal(env) -> torch.Tensor:
     joint_noise_scale = float(hand_cfg.get("joint_noise_scale", 0.02))
 
     hand_dof_pos = hand.data.joint_pos
+    hand_dof_vel = hand.data.joint_vel
     hand_dof_lower = hand.data.soft_joint_pos_limits[..., 0]
     hand_dof_upper = hand.data.soft_joint_pos_limits[..., 1]
 
@@ -193,33 +205,38 @@ def sharpa_observation_temporal(env) -> torch.Tensor:
         contact_pos[:] = 0.0
         sensed_contacts[:] = 0.0
 
-    # ── Sliding window observation (sharpa verbatim) ──────────
+    # ── Sliding window observation (extended with joint_vel) ──────────
     prev_obs_buf = obs_buf_lag_history[:, 1:].clone()
 
     joint_noise_matrix = (
         torch.rand(hand_dof_pos.shape, device=device) * 2.0 - 1.0
     ) * joint_noise_scale
 
-    cur_obs_buf = _unscale(
+    # joint_pos normalised (22)
+    cur_jpos = _unscale(
         joint_noise_matrix + hand_dof_pos,
         hand_dof_lower, hand_dof_upper,
     ).clone().unsqueeze(1)  # (N, 1, 22)
+
+    # joint_vel normalised (22) — DeXtreme-style
+    cur_jvel = (hand_dof_vel / 5.0).clamp(-1.0, 1.0).unsqueeze(1)  # (N, 1, 22)
 
     cur_targets = env.extras.get("current_action")
     if cur_targets is None:
         cur_targets = hand_dof_pos.clone()
     cur_tar_buf = cur_targets[:, None]  # (N, 1, 22)
 
-    cur_obs_buf = torch.cat([cur_obs_buf, cur_tar_buf], dim=-1)  # (N, 1, 44)
     cur_obs_buf = torch.cat([
-        cur_obs_buf,
-        sensed_contacts.clone().unsqueeze(1),   # (N, 1, 5)
-        contact_pos.clone().unsqueeze(1),        # (N, 1, 15)
-    ], dim=-1)  # (N, 1, 64)
+        cur_jpos,                                   # (N, 1, 22)
+        cur_jvel,                                   # (N, 1, 22)
+        cur_tar_buf,                                # (N, 1, 22)
+        sensed_contacts.clone().unsqueeze(1),       # (N, 1, 5)
+        contact_pos.clone().unsqueeze(1),           # (N, 1, 15)
+    ], dim=-1)  # (N, 1, 86)
 
     obs_buf_lag_history[:] = torch.cat([prev_obs_buf, cur_obs_buf], dim=1)
 
-    # Refill initialized buffers (sharpa verbatim)
+    # Refill initialised buffers for just-reset envs
     at_reset_env_ids = at_reset_buf.nonzero(as_tuple=False).squeeze(-1)
     if len(at_reset_env_ids) > 0:
         obs_buf_lag_history[at_reset_env_ids, :, 0:22] = _unscale(
@@ -227,15 +244,18 @@ def sharpa_observation_temporal(env) -> torch.Tensor:
             hand_dof_lower[at_reset_env_ids],
             hand_dof_upper[at_reset_env_ids],
         ).clone().unsqueeze(1)
-        obs_buf_lag_history[at_reset_env_ids, :, 22:44] = hand_dof_pos[at_reset_env_ids].unsqueeze(1)
-        obs_buf_lag_history[at_reset_env_ids, :, 44:49] = sensed_contacts[at_reset_env_ids].unsqueeze(1)
-        obs_buf_lag_history[at_reset_env_ids, :, 49:64] = contact_pos[at_reset_env_ids].unsqueeze(1)
+        obs_buf_lag_history[at_reset_env_ids, :, 22:44] = (
+            hand_dof_vel[at_reset_env_ids] / 5.0
+        ).clamp(-1.0, 1.0).unsqueeze(1)
+        obs_buf_lag_history[at_reset_env_ids, :, 44:66] = hand_dof_pos[at_reset_env_ids].unsqueeze(1)
+        obs_buf_lag_history[at_reset_env_ids, :, 66:71] = sensed_contacts[at_reset_env_ids].unsqueeze(1)
+        obs_buf_lag_history[at_reset_env_ids, :, 71:86] = contact_pos[at_reset_env_ids].unsqueeze(1)
         at_reset_buf[at_reset_env_ids] = 0
 
     env.extras["_obs_lag_history"] = obs_buf_lag_history
     env.extras["_at_reset_buf"] = at_reset_buf
 
-    obs_buf = obs_buf_lag_history[:, -3:].reshape(N, -1).clone()  # (N, 192)
+    obs_buf = obs_buf_lag_history[:, -3:].reshape(N, -1).clone()  # (N, 258)
     return obs_buf
 
 
@@ -257,6 +277,54 @@ def target_object_quat_in_hand_frame(env) -> torch.Tensor:
         out[:, 0] = 1.0
         return out
     return target
+
+
+# ---------------------------------------------------------------------------
+# Non-temporal observations (DeXtreme-aligned, appended once)
+# ---------------------------------------------------------------------------
+
+def goal_relative_rotation(env) -> torch.Tensor:
+    """Quaternion difference from current object to target: quat_mul(obj, conj(target)). (N, 4)"""
+    obj_quat = object_quat_in_hand_frame(env)
+    target_quat = env.extras.get("target_object_quat_hand")
+    if target_quat is None:
+        out = torch.zeros(env.num_envs, 4, device=env.device)
+        out[:, 0] = 1.0
+        return out
+    return _quat_multiply(obj_quat, _quat_conjugate(target_quat))
+
+
+def rotation_distance_obs(env) -> torch.Tensor:
+    """Current + best rotation distance in episode. (N, 2)
+
+    rot_dist = 2 * arcsin(clamp(||quat_diff[:, 1:4]||, max=1.0))
+    """
+    rel_rot = goal_relative_rotation(env)
+    rot_dist = 2.0 * torch.asin(rel_rot[:, 1:4].norm(dim=-1).clamp(max=1.0))
+
+    # Track best (minimum) rotation distance per episode
+    best = env.extras.get("_best_rot_dist")
+    if best is None:
+        best = rot_dist.clone()
+    else:
+        best = torch.minimum(best, rot_dist)
+    env.extras["_best_rot_dist"] = best
+
+    return torch.stack([rot_dist, best], dim=-1)  # (N, 2)
+
+
+def object_vel_in_hand_frame(env) -> torch.Tensor:
+    """Object linear (3) + angular velocity (3, scaled ×0.2) in hand frame. (N, 6)"""
+    linvel = object_lin_vel_hand_frame(env)
+    angvel = object_ang_vel_hand_frame(env) * 0.2  # DeXtreme scale
+    return torch.cat([linvel, angvel], dim=-1)
+
+
+def object_pose_in_hand_frame_obs(env) -> torch.Tensor:
+    """Current object pos (3) + quat (4) in hand frame. (N, 7)"""
+    pos = object_pos_in_hand_frame(env)
+    quat = object_quat_in_hand_frame(env)
+    return torch.cat([pos, quat], dim=-1)
 
 
 # ---------------------------------------------------------------------------

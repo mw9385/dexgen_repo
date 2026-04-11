@@ -16,9 +16,9 @@ import torch
 def randomize_object_physics(
     env,
     env_ids: torch.Tensor,
-    mass_range: tuple = (0.03, 0.30),
-    friction_range: tuple = (0.30, 1.20),
-    restitution_range: tuple = (0.00, 0.40),
+    mass_range: tuple = (0.03, 0.30),       # DeXtreme-aligned
+    friction_range: tuple = (0.30, 1.20),   # DeXtreme-aligned
+    restitution_range: tuple = (0.00, 0.40),  # DeXtreme-aligned
 ):
     n   = len(env_ids)
     obj = env.scene["object"]
@@ -55,8 +55,8 @@ def randomize_object_physics(
 def randomize_robot_physics(
     env,
     env_ids: torch.Tensor,
-    damping_range: tuple = (0.01, 0.30),
-    armature_range: tuple = (0.001, 0.03),
+    damping_range: tuple = (0.01, 0.30),    # DeXtreme-aligned
+    armature_range: tuple = (0.001, 0.03),  # DeXtreme-aligned
 ):
     n     = len(env_ids)
     robot = env.scene["robot"]

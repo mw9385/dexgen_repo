@@ -164,15 +164,24 @@ def apply_env_config(env_cfg, env_cfg_dict: dict):
 
     rewards_cfg = env_cfg_dict.get("rewards", {})
     if rewards_cfg:
-        if "orientation_delta_weight" in rewards_cfg and hasattr(env_cfg.rewards, "orientation_delta"):
-            env_cfg.rewards.orientation_delta.weight = float(rewards_cfg["orientation_delta_weight"])
+        # DeXtreme-aligned reward weights
+        if "distance_weight" in rewards_cfg and hasattr(env_cfg.rewards, "distance"):
+            env_cfg.rewards.distance.weight = float(rewards_cfg["distance_weight"])
+        if "rotation_weight" in rewards_cfg and hasattr(env_cfg.rewards, "rotation"):
+            env_cfg.rewards.rotation.weight = float(rewards_cfg["rotation_weight"])
+        if "rotation_eps" in rewards_cfg and hasattr(env_cfg.rewards, "rotation"):
+            env_cfg.rewards.rotation.params["rot_eps"] = float(rewards_cfg["rotation_eps"])
+        if "action_penalty_weight" in rewards_cfg and hasattr(env_cfg.rewards, "action_penalty"):
+            env_cfg.rewards.action_penalty.weight = float(rewards_cfg["action_penalty_weight"])
+        if "action_delta_penalty_weight" in rewards_cfg and hasattr(env_cfg.rewards, "action_delta_penalty"):
+            env_cfg.rewards.action_delta_penalty.weight = float(rewards_cfg["action_delta_penalty_weight"])
+        if "velocity_penalty_weight" in rewards_cfg and hasattr(env_cfg.rewards, "velocity_penalty"):
+            env_cfg.rewards.velocity_penalty.weight = float(rewards_cfg["velocity_penalty_weight"])
         if hasattr(env_cfg.rewards, "goal_bonus"):
             if "goal_bonus" in rewards_cfg:
                 env_cfg.rewards.goal_bonus.params["bonus"] = float(rewards_cfg["goal_bonus"])
             if "goal_thresh" in rewards_cfg:
                 env_cfg.rewards.goal_bonus.params["rot_thresh"] = float(rewards_cfg["goal_thresh"])
-        if "drop_penalty" in rewards_cfg and hasattr(env_cfg.rewards, "drop"):
-            env_cfg.rewards.drop.params["penalty"] = float(rewards_cfg["drop_penalty"])
 
     term_cfg = env_cfg_dict.get("terminations", {})
     if term_cfg and hasattr(env_cfg.terminations, "object_drop"):
@@ -492,7 +501,8 @@ def main():
             print(f"[CONFIG] friction_range:  {_dr_obj.get('friction_range')}")
             print(f"[CONFIG] restitution:     {_dr_obj.get('restitution_range')}")
         reward_parts = []
-        for reward_name in ("object_orientation", "object_position", "goal_bonus", "drop", "work", "action", "torque"):
+        for reward_name in ("distance", "rotation", "action_penalty", "action_delta_penalty",
+                            "velocity_penalty", "goal_bonus"):
             reward_term = getattr(_rw, reward_name, None)
             if reward_term is not None and hasattr(reward_term, "weight"):
                 reward_parts.append(f"{reward_name}={reward_term.weight}")
@@ -503,8 +513,7 @@ def main():
             _gget = _gp.get if hasattr(_gp, "get") else (lambda k, d=None: _gp[k] if k in _gp else d)
             print(
                 f"[CONFIG] goal_bonus: rot_thresh={_gget('rot_thresh')} rad  "
-                f"pos_thresh={_gget('pos_thresh')} m  "
-                f"bonus={_gget('bonus')}"
+                f"bonus={_gget('bonus')} (rotation only, no pos check)"
             )
         if hasattr(_term, "object_drop") and getattr(_term.object_drop, "params", None):
             _od = _term.object_drop.params
@@ -542,14 +551,23 @@ def main():
     _action_mode = cfg_file.get("env", {}).get("action_mode", "absolute")
     _delta_scale = float(cfg_file.get("env", {}).get("delta_scale", 1.0 / 24.0))
     _actions_ma = float(cfg_file.get("env", {}).get("actions_moving_average", 1.0))
+    # EMA annealing: linearly interpolate from ema_lower → ema_upper over schedule_steps
+    _ema_cfg = cfg_file.get("env", {}).get("actions_moving_average_schedule", {})
+    _ema_lower = float(_ema_cfg.get("lower", _actions_ma))
+    _ema_upper = float(_ema_cfg.get("upper", _actions_ma))
+    _ema_schedule_steps = int(_ema_cfg.get("schedule_steps", 0))
     if _action_mode == "delta":
         print(f"[Stage 1] Action mode: delta (scale={_delta_scale}, moving_avg={_actions_ma})")
+    if _ema_schedule_steps > 0:
+        print(f"[Stage 1] EMA annealing: {_ema_lower} → {_ema_upper} over {_ema_schedule_steps} steps")
     vecenv.register(
         "RLGPU",
         lambda config_name, num_actors, **kwargs: _IsaacLabVecEnv(
             create_env(), num_actors,
             action_mode=_action_mode, delta_scale=_delta_scale,
             actions_moving_average=_actions_ma,
+            ema_lower=_ema_lower, ema_upper=_ema_upper,
+            ema_schedule_steps=_ema_schedule_steps,
         ),
     )
 
@@ -692,12 +710,18 @@ class _IsaacLabVecEnv:
     """Thin wrapper to make Isaac Lab ManagerBasedRLEnv compatible with rl_games."""
 
     def __init__(self, env, num_envs: int, action_mode: str = "absolute", delta_scale: float = 0.05,
-                 actions_moving_average: float = 1.0):
+                 actions_moving_average: float = 1.0,
+                 ema_lower: float = 1.0, ema_upper: float = 1.0,
+                 ema_schedule_steps: int = 0):
         self.env = env
         self.num_envs = num_envs
         self._action_mode = action_mode
         self._delta_scale = delta_scale
         self._actions_moving_average = actions_moving_average
+        self._ema_lower = ema_lower
+        self._ema_upper = ema_upper
+        self._ema_schedule_steps = ema_schedule_steps
+        self._global_step = 0
         self._joint_target = None  # initialised on first reset
         self._prev_actions = None  # for moving average
 
@@ -747,6 +771,14 @@ class _IsaacLabVecEnv:
         else:
             extras["last_action"] = actions.clone()
         extras["current_action"] = actions.clone()
+
+        # EMA annealing: linearly interpolate lower → upper over schedule_steps
+        self._global_step += 1
+        if self._ema_schedule_steps > 0:
+            t = min(self._global_step / self._ema_schedule_steps, 1.0)
+            self._actions_moving_average = (
+                self._ema_lower + (self._ema_upper - self._ema_lower) * t
+            )
 
         # Delta action mode (IsaacGymEnvs ShadowHand style):
         #   smoothed = α * actions + (1-α) * prev_actions

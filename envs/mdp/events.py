@@ -331,10 +331,12 @@ def reset_to_random_grasp(
     env.extras["last_action"][env_ids] = current_action
     env.extras["current_action"][env_ids] = current_action
 
-    # Reset delta reward prev-error buffers
+    # Reset reward/observation episode buffers
+    from .rewards import _get_orn_error
     if "_prev_orn_error" in env.extras:
-        from .rewards import _get_orn_error
         env.extras["_prev_orn_error"][env_ids] = _get_orn_error(env)[env_ids]
+    if "_best_rot_dist" in env.extras:
+        env.extras["_best_rot_dist"][env_ids] = float("inf")
 
 # ---------------------------------------------------------------------------
 # Nearest-neighbor goal selection
@@ -665,20 +667,16 @@ def update_rolling_goal(
     """
     Called every control step from train_rl / evaluate after env.step().
 
-    For each env where orientation / position error are below the same
-    thresholds as ``goal_bonus`` and ``object_dropped`` is false, samples a new
-    nearby goal from the grasp graph and updates ``target_object_*``.
+    For each env where orientation error is below threshold and object is
+    still in hand, samples a new nearby goal from the grasp graph.
 
-    If ``rot_threshold`` is omitted, uses ``goal_rot_thresh_from_env`` (same as
-    ``rewards.goal_bonus.params['rot_thresh']``). Position uses
-    ``rewards.goal_bonus.params['pos_thresh']`` (default 0.05 m).
+    DeXtreme-aligned: rotation-only success (no position threshold).
 
     Returns:
         Number of envs whose goal was updated this step.
     """
     if rot_threshold is None:
         rot_threshold = goal_rot_thresh_from_env(env)
-    pos_threshold = _goal_bonus_params_get(env, "pos_thresh", 0.05)
 
     _zero_mask = torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
 
@@ -695,11 +693,10 @@ def update_rolling_goal(
         env.extras["_rolling_goal_success_mask"] = _zero_mask
         return 0
 
-    # Same error metrics as rewards.goal_bonus (single source of truth).
+    # Same error metric as rewards.goal_bonus (rotation only).
     from . import rewards as mdp_rewards
 
     orn_err = mdp_rewards._get_orn_error(env)
-    pos_err = mdp_rewards._get_pos_error(env)
 
     robot = env.scene["robot"]
     obj = env.scene["object"]
@@ -713,7 +710,7 @@ def update_rolling_goal(
             w1*w2-x1*x2-y1*y2-z1*z2, w1*x2+x1*w2+y1*z2-z1*y2,
             w1*y2-x1*z2+y1*w2+z1*x2, w1*z2+x1*y2-y1*x2+z1*w2], dim=-1)
 
-    success_mask = (orn_err < rot_threshold) & (pos_err < pos_threshold) & ~object_dropped(env)
+    success_mask = (orn_err < rot_threshold) & ~object_dropped(env)
 
     # Store per-env success mask so evaluate.py can read it after step().
     # Must be stored BEFORE the target is updated below.

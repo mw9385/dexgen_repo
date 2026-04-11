@@ -1,8 +1,9 @@
 # ==============================================================================
-# Stage 1 – RL Training Configuration
+# Stage 1 – RL Training Configuration (DeXtreme-aligned)
 # ==============================================================================
 # Task:      AnyGrasp-to-AnyGrasp (DexterityGen §3.2)
 # Algorithm: Symmetric Actor-Critic PPO via rl_games
+# Reward:    DeXtreme (Handa et al., ICRA 2023)
 # ==============================================================================
 
 env:
@@ -10,9 +11,13 @@ env:
   num_envs: 512
   episode_length_s: 10.0
   action_scale: 1.0              # [-1,1] maps to full joint range
-  action_mode: "absolute"        # policy outputs target joint positions directly (OpenAI Dactyl style)
-  actions_moving_average: 1.0    # 1.0 = no smoothing (add EMA later for sim-to-real)
-  decimation: 12                 # control at 20 Hz (240 Hz sim / 12), matching Sharpa default
+  action_mode: "absolute"        # policy outputs target joint positions directly
+  actions_moving_average: 0.15   # EMA initial value (heavy smoothing)
+  actions_moving_average_schedule:
+    lower: 0.15                  # start: heavy smoothing (stable grasps)
+    upper: 0.35                  # end:   lighter smoothing (agile manipulation)
+    schedule_steps: 1000000      # linearly anneal over 1M steps
+  decimation: 12                 # control at 20 Hz (240 Hz sim / 12)
   training_curriculum:
     enabled: true
     # Performance-gated: only advances when drop_ratio < threshold
@@ -27,30 +32,37 @@ env:
     orn_step: 0.05                # +0.05 rad per advance
 
   rewards:
-    # OpenAI "Learning Dexterous In-Hand Manipulation" (2018)
-    # r_t = (d_t - d_{t+1}) + goal_bonus + drop_penalty
-    orientation_delta_weight: 10.0     # ~0.04/step, ~8 per episode
-    goal_bonus: 5.0                    # +5 when rot_dist < goal_thresh
-    goal_thresh: 0.4                   # rad (~23°)
-    drop_penalty: -20.0                # when object_dropped (too far from palm; matches termination)
+    # DeXtreme (Handa et al., ICRA 2023)
+    # r_t = dist_rew + rot_rew + action_penalty + action_delta_penalty
+    #       + velocity_penalty + reach_goal_bonus
+    distance_weight: -10.0             # goal_dist × weight (penalises distance)
+    rotation_weight: 1.0               # 1/(|rot_dist|+0.1) × weight
+    rotation_eps: 0.1                  # denominator epsilon for rot reward
+    action_penalty_weight: -0.0002     # Σ(a²) × weight
+    action_delta_penalty_weight: -0.01 # Σ(Δa²) × weight
+    velocity_penalty_weight: -0.05     # Σ((v/4)²) × weight
+    goal_bonus: 250.0                  # +250 when rot_dist < goal_thresh
+    goal_thresh: 0.4                   # rad (~23°) — rotation only, no pos check
 
   terminations:
-    object_drop_max_dist: 0.25         # m — palm centre to object; failure if exceeded
-    # NOTE: object sits ~17cm from palm body in hand frame (grasp data),
-    # so threshold must be larger than that baseline distance.
+    object_drop_max_dist: 0.24         # m — DeXtreme fall_dist = 0.24
+    # Episode ends on drop; no reward penalty (opportunity cost of +250 is signal).
 
 # ==============================================================================
 # Symmetric Actor-Critic PPO (rl_games)
 # ==============================================================================
 #
 #   Sharpa Hand (22 DOF, 5 fingers; no wrist):
-#   Actor = Critic: MLP [512, 512]  input: 199-dim obs (symmetric)
-#     temporal(192) = 3 frames × [joint_pos(22) + joint_targets(22)
-#                                 + contacts(5) + contact_pos(15)]
-#     + target_obj_pos(3) + target_obj_quat(4)
+#   Actor = Critic: MLP [512, 512]  input: 309-dim obs (symmetric)
+#     temporal(258) = 3 frames × [joint_pos(22) + joint_vel(22)
+#                                 + joint_targets(22) + contacts(5)
+#                                 + contact_pos(15)]
+#     + last_action(22) + obj_pose(7) + obj_vel(6)
+#     + target_pos(3) + target_quat(4) + goal_rel_rot(4)
+#     + rot_dist(2) + dr_params(3)
 #
 #   rl_games reads env observations["policy"] for actor and
-#   env observations["critic"] for critic (both 199-dim, symmetric).
+#   env observations["critic"] for critic (both 309-dim, symmetric).
 # ==============================================================================
 
 ppo:
@@ -110,14 +122,14 @@ logging:
 
 domain_randomization:
   object_physics:
-    mass_range:        [0.05, 0.10]
-    friction_range:    [0.80, 1.20]
-    restitution_range: [0.00, 0.20]
+    mass_range:        [0.03, 0.30]     # DeXtreme-aligned (wider range)
+    friction_range:    [0.30, 1.20]     # DeXtreme-aligned
+    restitution_range: [0.00, 0.40]     # DeXtreme-aligned
   robot_physics:
-    damping_range:     [0.01, 0.10]
-    armature_range:    [0.001, 0.01]
+    damping_range:     [0.01, 0.30]     # DeXtreme-aligned (wider range)
+    armature_range:    [0.001, 0.03]    # DeXtreme-aligned
   action_delay:
-    max_delay: 1
+    max_delay: 2                        # DeXtreme uses higher delay
   obs_noise:
     joint_pos_std:     0.005
     joint_vel_std:     0.04

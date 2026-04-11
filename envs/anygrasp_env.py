@@ -6,6 +6,7 @@ Implements the core RL environment from DexterityGen §3.2 with:
   - Tactile sensing via ContactSensorCfg on 5 elastomer fingertip links
   - Domain Randomization (object physics, joint dynamics)
   - Object pool (cube / sphere / cylinder)
+  - DeXtreme-aligned reward, obs, and termination structure
 
 Sharpa Wave Hand: 5 fingers, 22 actuated DOF
   Thumb (5):  right_thumb_CMC_FE, CMC_AA, MCP_FE, MCP_AA, IP
@@ -21,23 +22,30 @@ Sharpa Wave Hand: 5 fingers, 22 actuated DOF
   OBSERVATION SPLIT  (see mdp/observations.py for full details)
 =======================================================================
 
-  ACTOR = CRITIC — 199 dims (symmetric, no privileged info)
+  ACTOR = CRITIC — 309 dims (symmetric, DR params included)
 
-  Temporal (3 frames × 64-dim per step = 192):
+  Temporal (3 frames × 86-dim per step = 258):
   ─────────────────────────────────────────────────────────────────
   joint_pos_normalized       22   (all joints, [-1,1] + noise)
+  joint_vel_normalized       22   (÷5.0, clamp [-1,1])
   joint_targets              22   (current action targets)
   sensed_contacts             5   (smoothed force magnitude per tip)
   contact_positions           15  (5 fingers × 3D position)
   ─────────────────────────────────────────────────────────────────
-  Per-step: 22+22+5+15 = 64  ×  3 frames = 192
+  Per-step: 22+22+22+5+15 = 86  ×  3 frames = 258
 
   Non-temporal (appended once):
+  ───────────────────────────────��────────────────────────────────��
+  last_action                 22  (previous step's action)
+  object_pose_hand             7  (current obj pos+quat in hand frame)
+  object_vel_hand              6  (lin vel + ang vel × 0.2)
+  target_object_pos_hand       3  (goal object position)
+  target_object_quat_hand      4  (goal object quaternion)
+  goal_relative_rotation       4  (quat diff: object→target)
+  rotation_distance            2  (current + best rot error)
+  dr_params                    3  (mass, friction, damping normalised)
   ─────────────────────────────────────────────────────────────────
-  target_object_pos_hand      3   (goal object position)
-  target_object_quat_hand     4   (goal object quaternion)
-  ─────────────────────────────────────────────────────────────────
-  Total: 192 + 3 + 4 = 199
+  Total: 258 + 22 + 7 + 6 + 3 + 4 + 4 + 2 + 3 = 309
 
 =======================================================================
 """
@@ -294,9 +302,10 @@ if _ISAACLAB_AVAILABLE:
 
 
 # ---------------------------------------------------------------------------
-# Observation groups — 199 dims (sharpa temporal + target info)
-# 192 = 64×3 temporal (joint_pos + targets + tactile + contact_pos)
-# + 7 = target_obj_pos(3) + target_obj_quat(4)
+# Observation groups — 309 dims (DeXtreme-aligned)
+# 258 = 86×3 temporal (joint_pos + joint_vel + targets + tactile + contact_pos)
+# + 51 = last_action(22) + obj_pose(7) + obj_vel(6) + target_pos(3)
+#         + target_quat(4) + goal_rel_rot(4) + rot_dist(2) + dr_params(3)
 # ---------------------------------------------------------------------------
 
 if _ISAACLAB_AVAILABLE:
@@ -304,11 +313,17 @@ if _ISAACLAB_AVAILABLE:
     class AnyGraspObservationsCfg:
         @configclass
         class PolicyObs(ObsGroup):
-            # 192-dim: sharpa 3-step temporal (joint_pos + targets + tactile)
+            # 258-dim: sharpa 3-step temporal (joint_pos + joint_vel + targets + tactile)
             temporal = ObsTerm(func=mdp_obs.sharpa_observation_temporal)
-            # 7-dim: DexGen target info (non-temporal)
-            target_obj_pos = ObsTerm(func=mdp_obs.target_object_pos_in_hand_frame)
-            target_obj_quat = ObsTerm(func=mdp_obs.target_object_quat_in_hand_frame)
+            # Non-temporal (appended once)
+            last_action = ObsTerm(func=mdp_obs.last_action)                         # 22
+            object_pose = ObsTerm(func=mdp_obs.object_pose_in_hand_frame_obs)       # 7
+            object_vel = ObsTerm(func=mdp_obs.object_vel_in_hand_frame)             # 6
+            target_obj_pos = ObsTerm(func=mdp_obs.target_object_pos_in_hand_frame)  # 3
+            target_obj_quat = ObsTerm(func=mdp_obs.target_object_quat_in_hand_frame)  # 4
+            goal_rel_rot = ObsTerm(func=mdp_obs.goal_relative_rotation)             # 4
+            rot_dist = ObsTerm(func=mdp_obs.rotation_distance_obs)                  # 2
+            dr_params = ObsTerm(func=mdp_obs.domain_randomization_params)           # 3
 
             def __post_init__(self):
                 self.enable_corruption = True
@@ -317,8 +332,14 @@ if _ISAACLAB_AVAILABLE:
         @configclass
         class CriticObs(ObsGroup):
             temporal = ObsTerm(func=mdp_obs.sharpa_observation_temporal)
-            target_obj_pos = ObsTerm(func=mdp_obs.target_object_pos_in_hand_frame)
-            target_obj_quat = ObsTerm(func=mdp_obs.target_object_quat_in_hand_frame)
+            last_action = ObsTerm(func=mdp_obs.last_action)                         # 22
+            object_pose = ObsTerm(func=mdp_obs.object_pose_in_hand_frame_obs)       # 7
+            object_vel = ObsTerm(func=mdp_obs.object_vel_in_hand_frame)             # 6
+            target_obj_pos = ObsTerm(func=mdp_obs.target_object_pos_in_hand_frame)  # 3
+            target_obj_quat = ObsTerm(func=mdp_obs.target_object_quat_in_hand_frame)  # 4
+            goal_rel_rot = ObsTerm(func=mdp_obs.goal_relative_rotation)             # 4
+            rot_dist = ObsTerm(func=mdp_obs.rotation_distance_obs)                  # 2
+            dr_params = ObsTerm(func=mdp_obs.domain_randomization_params)           # 3
 
             def __post_init__(self):
                 self.enable_corruption = True
@@ -347,30 +368,50 @@ if _ISAACLAB_AVAILABLE:
 
 
 # ---------------------------------------------------------------------------
-# Reward configuration (OpenAI "Learning Dexterous In-Hand Manipulation")
-# r_t = d_t - d_{t+1}  +  goal_bonus  +  drop_penalty (object_dropped)
+# Reward configuration (DeXtreme-aligned)
+# r_t = dist_rew + rot_rew + action_penalty + action_delta_penalty
+#        + velocity_penalty + reach_goal_bonus
+# No drop penalty — episode termination is the implicit penalty.
 # ---------------------------------------------------------------------------
 
 if _ISAACLAB_AVAILABLE:
     @configclass
     class AnyGraspRewardsCfg:
-        # r_t = d_t - d_{t+1}
-        orientation_delta = RewTerm(
-            func=mdp_rewards.orientation_delta_reward,
-            weight=1.0,
+        # Dense: goal_dist × weight (negative → penalises distance)
+        distance = RewTerm(
+            func=mdp_rewards.distance_reward,
+            weight=-10.0,
             params={},
         )
-        # +5 when goal achieved (rot_dist < 0.4 rad) — OpenAI-style scale
+        # Dense: 1/(|rot_dist| + eps) × weight (positive → rewards alignment)
+        rotation = RewTerm(
+            func=mdp_rewards.rotation_reward,
+            weight=1.0,
+            params={"rot_eps": 0.1},
+        )
+        # Dense: Σ(actions²) × weight (negative → penalises large actions)
+        action_penalty = RewTerm(
+            func=mdp_rewards.action_penalty,
+            weight=-0.0002,
+            params={},
+        )
+        # Dense: Σ(Δactions²) × weight (negative → penalises jerky motion)
+        action_delta_penalty = RewTerm(
+            func=mdp_rewards.action_delta_penalty,
+            weight=-0.01,
+            params={},
+        )
+        # Dense: Σ((dof_vel/4)²) × weight (negative → penalises high velocity)
+        velocity_penalty = RewTerm(
+            func=mdp_rewards.velocity_penalty,
+            weight=-0.05,
+            params={},
+        )
+        # Sparse: +250 when rot_dist < 0.4 rad (rotation only, no pos check)
         goal_bonus = RewTerm(
             func=mdp_rewards.goal_bonus,
             weight=1.0,
-            params={"rot_thresh": 0.4, "pos_thresh": 0.05, "bonus": 5.0},
-        )
-        # -20 when object_dropped (palm distance) — OpenAI-style scale
-        drop = RewTerm(
-            func=mdp_rewards.drop_penalty,
-            weight=1.0,
-            params={"penalty": -20.0},
+            params={"rot_thresh": 0.4, "bonus": 250.0},
         )
 
 
@@ -382,8 +423,9 @@ if _ISAACLAB_AVAILABLE:
     @configclass
     class AnyGraspTerminationsCfg:
         time_out = DoneTerm(func=mdp_events.time_out, time_out=True)
-        # Palm–object distance (m); reward drop_penalty uses the same predicate.
-        object_drop = DoneTerm(func=mdp_events.object_dropped, params={"max_dist": 0.25})
+        # DeXtreme: fall_dist = 0.24 m — episode ends when object is too far from palm.
+        # No reward penalty; opportunity cost of missing +250 goal bonus is the signal.
+        object_drop = DoneTerm(func=mdp_events.object_dropped, params={"max_dist": 0.24})
 
     @configclass
     class AnyGraspEventsCfg:
