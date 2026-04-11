@@ -59,6 +59,13 @@ def orientation_delta_reward(env) -> torch.Tensor:
     return delta
 
 
+# ── alive penalty (per-step cost for not reaching goal) ──
+
+def alive_penalty(env, penalty: float = -0.1) -> torch.Tensor:
+    """Small per-step penalty to prevent 'do nothing' local optimum."""
+    return torch.full((env.num_envs,), penalty, device=env.device)
+
+
 # ── +5 goal bonus ──
 
 def goal_bonus(env, rot_thresh: float = 0.4, pos_thresh: float = 0.05,
