@@ -790,9 +790,6 @@ class _IsaacLabVecEnv:
         obs, rew, terminated, truncated, info = self.env.step(delayed_actions)
         done = terminated | truncated
 
-        # Debug: log per-step reward stats
-        print(f"  [REW] mean={rew.mean().item():.4f}  min={rew.min().item():.4f}  "
-              f"max={rew.max().item():.4f}  std={rew.std().item():.4f}")
 
         # Re-initialise action buffers for reset envs
         if done.any() and self._action_mode != "delta" and self._prev_actions is not None:
