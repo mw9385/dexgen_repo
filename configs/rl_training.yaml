@@ -12,11 +12,11 @@ env:
   episode_length_s: 10.0
   action_scale: 1.0              # [-1,1] maps to full joint range
   action_mode: "absolute"        # policy outputs target joint positions directly
-  actions_moving_average: 0.15   # EMA initial value (heavy smoothing)
+  actions_moving_average: 0.3    # fixed EMA smoothing (no annealing)
   actions_moving_average_schedule:
-    lower: 0.15                  # start: heavy smoothing (stable grasps)
-    upper: 0.35                  # end:   lighter smoothing (agile manipulation)
-    schedule_steps: 1000000      # linearly anneal over 1M steps
+    lower: 0.3
+    upper: 0.3
+    schedule_steps: 0            # 0 = no annealing, fixed at 0.3
   decimation: 12                 # control at 20 Hz (240 Hz sim / 12)
   training_curriculum:
     enabled: true
