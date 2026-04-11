@@ -372,12 +372,6 @@ if _ISAACLAB_AVAILABLE:
             weight=1.0,
             params={"penalty": -20.0},
         )
-        # Small per-step penalty to prevent "do nothing" local optimum
-        alive = RewTerm(
-            func=mdp_rewards.alive_penalty,
-            weight=1.0,
-            params={"penalty": -0.1},
-        )
 
 
 # ---------------------------------------------------------------------------
