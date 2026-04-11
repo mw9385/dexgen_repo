@@ -713,16 +713,7 @@ def update_rolling_goal(
             w1*w2-x1*x2-y1*y2-z1*z2, w1*x2+x1*w2+y1*z2-z1*y2,
             w1*y2-x1*z2+y1*w2+z1*x2, w1*z2+x1*y2-y1*x2+z1*w2], dim=-1)
 
-    dropped = object_dropped(env)
-    success_mask = (orn_err < rot_threshold) & (pos_err < pos_threshold) & ~dropped
-
-    # Debug: log first few goal hits to diagnose false positives
-    if success_mask.any():
-        _sids = success_mask.nonzero(as_tuple=False).squeeze(-1)[:5]
-        for _sid in _sids.tolist():
-            print(f"  [GOAL HIT DEBUG] env={_sid}  orn_err={orn_err[_sid].item():.4f}rad  "
-                  f"pos_err={pos_err[_sid].item():.4f}m  dropped={dropped[_sid].item()}  "
-                  f"step={env.episode_length_buf[_sid].item()}")
+    success_mask = (orn_err < rot_threshold) & (pos_err < pos_threshold) & ~object_dropped(env)
 
     # Store per-env success mask so evaluate.py can read it after step().
     # Must be stored BEFORE the target is updated below.
