@@ -15,13 +15,16 @@ env:
   decimation: 12                 # control at 20 Hz (240 Hz sim / 12), matching Sharpa default
   training_curriculum:
     enabled: true
-    warmup_ratio: 0.10            # fraction of total epochs for ramp-up
-    # Gravity: start near-zero, ramp to full
+    # Performance-gated: only advances when drop_ratio < threshold
+    advance_drop_thresh: 0.3      # advance curriculum when <30% drops
+    # Gravity: incremental steps when performing well
     start_gravity: 4.5
     end_gravity: 9.81
+    gravity_step: 0.1             # +0.1 m/s² per advance
     # Goal difficulty: min orientation distance for kNN goal selection
-    min_orn_start: 0.80           # rad (~45.8°) — must be > goal rot_thresh (0.4)
-    min_orn_end: 3.14             # rad (~180°) — full rotation at end of warmup
+    min_orn_start: 0.80           # rad (~45.8°)
+    min_orn_end: 3.14             # rad (~180°)
+    orn_step: 0.05                # +0.05 rad per advance
 
   rewards:
     # OpenAI "Learning Dexterous In-Hand Manipulation" (2018)
