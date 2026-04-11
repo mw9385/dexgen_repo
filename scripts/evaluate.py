@@ -37,7 +37,6 @@ sys.path.insert(0, str(Path(__file__).parent))  # for `import train_rl`
 
 from isaaclab.app import AppLauncher
 from grasp_generation.graph_io import MultiObjectGraspGraph, load_merged_graph, parse_graph_paths
-from envs.mdp.events import goal_rot_thresh_from_env
 
 # Reuse helpers from train_rl.py so behaviour matches 1:1.
 from train_rl import (  # noqa: E402
@@ -463,6 +462,7 @@ def _run_eval_loop(player, vec_env, num_episodes: int, device: str, results_json
     """Manually drive the rl_games Player so we can collect per-episode metrics."""
     num_envs = vec_env.num_envs
     raw_env = vec_env.env  # inner ManagerBasedRLEnv
+    from envs.mdp.events import goal_rot_thresh_from_env
     _rg_rot = goal_rot_thresh_from_env(raw_env)
 
     # Episode accumulators (one entry per env slot, reset on done)
