@@ -49,14 +49,18 @@ def _get_pos_error(env):
 # ── r_t = d_t - d_{t+1} ──
 
 def orientation_delta_reward(env) -> torch.Tensor:
-    """Positive when rotation error decreases."""
+    """Positive when rotation error decreases. Zero if no fingertip contact."""
     cur_err = _get_orn_error(env)
     prev_err = env.extras.get("_prev_orn_error")
     if prev_err is None:
         prev_err = cur_err.clone()
     delta = prev_err - cur_err
     env.extras["_prev_orn_error"] = cur_err.clone()
-    return delta
+
+    # Only reward rotation when fingers are touching the object
+    from .observations import fingertip_contact_binary
+    contact = fingertip_contact_binary(env).sum(dim=-1) > 0
+    return delta * contact.float()
 
 
 # ── +5 goal bonus ──
