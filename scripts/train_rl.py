@@ -791,13 +791,8 @@ class _IsaacLabVecEnv:
         done = terminated | truncated
 
         # Debug: log per-step reward stats
-        if hasattr(self, '_step_log_counter'):
-            self._step_log_counter += 1
-        else:
-            self._step_log_counter = 0
-        if self._step_log_counter % 200 == 0:
-            print(f"  [REW] mean={rew.mean().item():.4f}  min={rew.min().item():.4f}  "
-                  f"max={rew.max().item():.4f}  std={rew.std().item():.4f}")
+        print(f"  [REW] mean={rew.mean().item():.4f}  min={rew.min().item():.4f}  "
+              f"max={rew.max().item():.4f}  std={rew.std().item():.4f}")
 
         # Re-initialise action buffers for reset envs
         if done.any() and self._action_mode != "delta" and self._prev_actions is not None:
