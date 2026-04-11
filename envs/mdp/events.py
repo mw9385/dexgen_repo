@@ -147,7 +147,7 @@ def reset_to_random_grasp(
 
         batch_size = len(env_indices)
         starts = rng.integers(0, N_grasps, size=batch_size)
-        cur_min_orn = getattr(graph, "_curriculum_min_orn", 0.10)
+        cur_min_orn = getattr(graph, "_curriculum_min_orn", 0.80)
         # Batch goal selection — single matrix op instead of per-env loop
         goals = _batch_sample_nearby_goals(
             g, starts, rng, min_orn=cur_min_orn, num_fingers=env_num_fingers,
@@ -562,6 +562,25 @@ def update_curriculum(env, epoch: int, total_epochs: int = 10000):
     cur_cfg = dict((getattr(env.cfg, "training_curriculum", None) or {})
                    or (getattr(env.cfg, "gravity_curriculum", None) or {}))
 
+    # Always initialize min_orn to start value (needed before first reset)
+    graph = _load_grasp_graph(env)
+    min_orn_start = float(cur_cfg.get("min_orn_start", 0.80))
+    if graph is not None and not hasattr(graph, "_curriculum_min_orn"):
+        graph._curriculum_min_orn = min_orn_start
+
+    # Initialize gravity on first call
+    if cur_cfg.get("enabled", False) and not hasattr(env, "_curriculum_gravity"):
+        gravity_start = float(cur_cfg.get("start_gravity", 1.0))
+        env._curriculum_gravity = gravity_start
+        try:
+            import carb
+            import isaaclab.sim as sim_utils
+            sim_utils.SimulationContext.instance().physics_sim_view.set_gravity(
+                carb.Float3(0.0, 0.0, -gravity_start)
+            )
+        except Exception:
+            pass
+
     # Check performance: only advance if drop ratio is low
     drop_thresh = float(cur_cfg.get("advance_drop_thresh", 0.3))
     stats = env.extras.get("_reset_log_stats", {})
@@ -569,7 +588,7 @@ def update_curriculum(env, epoch: int, total_epochs: int = 10000):
     total_drops = stats.get("total_drops", 0)
     drop_ratio = total_drops / max(total_resets, 1)
 
-    # Skip first few epochs (not enough data)
+    # Skip first few epochs (not enough data to judge performance)
     if epoch < 5 or total_resets < 100:
         return
 
@@ -735,7 +754,7 @@ def update_rolling_goal(
             g = graph
 
         # kNN from current goal → new goal (use curriculum min_orn)
-        cur_min_orn = getattr(graph, "_curriculum_min_orn", 0.10)
+        cur_min_orn = getattr(graph, "_curriculum_min_orn", 0.80)
         new_goal_idx = _sample_nearby_goal_index(
             g, cur_goal_idx, rng, min_orn=cur_min_orn, num_fingers=env_num_fingers,
         )
