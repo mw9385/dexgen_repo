@@ -16,10 +16,8 @@ Rolling goal: when orientation error < rot_thresh and object_dropped is false,
 
 from __future__ import annotations
 
-import math
-import os
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional
 
 import torch
 import numpy as np
@@ -31,19 +29,12 @@ from .math_utils import (
     quat_multiply,
     quat_conjugate,
     add_rotation_noise,
-    local_to_world_points,
-    world_to_local_points,
 )
 from .sim_utils import (
     set_robot_joints_direct,
-    expand_grasp_joint_vector,
     set_robot_root_pose,
     get_palm_body_id_from_env,
-    set_adaptive_joint_pose,
-    apply_palm_up_transform,
-    refine_hand_to_start_grasp,
     joint_positions_to_normalized_action,
-    get_fingertip_body_ids_from_env,
 )
 
 # ---------------------------------------------------------------------------
@@ -1065,6 +1056,3 @@ def _log_goal_distances(env, env_ids: torch.Tensor):
         f"goal_hits(win/total)={goal_window}/{goal_total}  "
         f"cum_drop_rate={drop_rate:.3f}"
     )
-
-
-_world_to_local_points = world_to_local_points
