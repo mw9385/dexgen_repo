@@ -28,22 +28,21 @@ env:
     min_orn_end: 3.14             # rad (~180°)
 
   rewards:
-    # DexterityGen (Yin et al., 2025) AnyGrasp-to-AnyGrasp:
-    # r_t = r_goal + r_style + r_reg
+    # Delta-form primary rewards: do-nothing → 0, only progress earns reward
+    # r_t = w_rot × Δrot_err + w_pos × Δpos_err + w_finger × Δfinger_err
+    #     + reg + style + goal_bonus
     #
-    # r_goal:
-    rotation_weight: 1.0               # 1/(|rot_err|+0.1)  PRIMARY positive
-    rotation_eps: 0.1
-    distance_weight: -10.0             # pos_err × weight (linear negative)
-    finger_match_weight: 0.5           # 1/(||q-q_target||+0.5)  auxiliary
-    finger_eps: 0.5
-    goal_bonus: 250.0                  # +250 when rot AND pos within thresh
-    goal_thresh: 0.4                   # rad (~23°)
+    # r_goal (delta):
+    rotation_weight: 500.0             # Δrot_err × weight  PRIMARY
+    distance_weight: 100.0             # Δpos_err × weight  auxiliary
+    finger_match_weight: 50.0          # Δfinger_err × weight
+    goal_bonus: 250.0                  # +250 sparse when reached
+    goal_thresh: 0.4                   # rad
     pos_thresh: 0.05                   # m
     # r_style:
-    fingertip_velocity_weight: -0.001  # Σ ||v_tip||²
+    fingertip_velocity_weight: -0.001
     # r_reg:
-    action_penalty_weight: -0.0001     # Σ(a²)
+    action_penalty_weight: -0.0001     # Σ(a²) — raw policy output (pre-EMA)
     action_delta_penalty_weight: -0.01 # Σ(Δa²)
     velocity_penalty_weight: -0.05     # Σ((v/4)²)
     torque_penalty_weight: -0.0001     # Σ(τ²)

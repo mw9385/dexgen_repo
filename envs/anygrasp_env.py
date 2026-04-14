@@ -377,33 +377,33 @@ if _ISAACLAB_AVAILABLE:
 if _ISAACLAB_AVAILABLE:
     @configclass
     class AnyGraspRewardsCfg:
-        # ── r_goal ──
-        # Dense: 1/(|rot_dist| + eps) × weight (PRIMARY positive signal)
+        # ── r_goal (delta forms — do-nothing → 0) ──
+        # PRIMARY: Δrot_err × big weight
         rotation = RewTerm(
             func=mdp_rewards.rotation_reward,
-            weight=1.0,
-            params={"rot_eps": 0.1},
-        )
-        # Dense: pos_err × weight (linear negative → drift penalty)
-        distance = RewTerm(
-            func=mdp_rewards.distance_reward,
-            weight=-10.0,
+            weight=500.0,
             params={},
         )
-        # Dense: 1/(||q-q_target|| + eps) × weight (DexGen finger matching)
+        # Auxiliary: Δpos_err × weight
+        distance = RewTerm(
+            func=mdp_rewards.distance_reward,
+            weight=100.0,
+            params={},
+        )
+        # Auxiliary: Δfinger_match × weight
         finger_match = RewTerm(
             func=mdp_rewards.finger_match_reward,
-            weight=0.5,
-            params={"finger_eps": 0.5},
+            weight=50.0,
+            params={},
         )
-        # Sparse: +250 when rot_dist < 0.4 AND pos_err < 0.05
+        # Sparse: +250 when both rot AND pos within thresh
         goal_bonus = RewTerm(
             func=mdp_rewards.goal_bonus,
             weight=1.0,
             params={"rot_thresh": 0.4, "pos_thresh": 0.05, "bonus": 250.0},
         )
 
-        # ── r_style (DexGen fingertip velocity) ──
+        # ── r_style ──
         fingertip_velocity = RewTerm(
             func=mdp_rewards.fingertip_velocity_penalty,
             weight=-0.001,

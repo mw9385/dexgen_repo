@@ -167,14 +167,10 @@ def apply_env_config(env_cfg, env_cfg_dict: dict):
         # DexGen-aligned reward weights
         if "rotation_weight" in rewards_cfg and hasattr(env_cfg.rewards, "rotation"):
             env_cfg.rewards.rotation.weight = float(rewards_cfg["rotation_weight"])
-        if "rotation_eps" in rewards_cfg and hasattr(env_cfg.rewards, "rotation"):
-            env_cfg.rewards.rotation.params["rot_eps"] = float(rewards_cfg["rotation_eps"])
         if "distance_weight" in rewards_cfg and hasattr(env_cfg.rewards, "distance"):
             env_cfg.rewards.distance.weight = float(rewards_cfg["distance_weight"])
         if "finger_match_weight" in rewards_cfg and hasattr(env_cfg.rewards, "finger_match"):
             env_cfg.rewards.finger_match.weight = float(rewards_cfg["finger_match_weight"])
-        if "finger_eps" in rewards_cfg and hasattr(env_cfg.rewards, "finger_match"):
-            env_cfg.rewards.finger_match.params["finger_eps"] = float(rewards_cfg["finger_eps"])
         if "fingertip_velocity_weight" in rewards_cfg and hasattr(env_cfg.rewards, "fingertip_velocity"):
             env_cfg.rewards.fingertip_velocity.weight = float(rewards_cfg["fingertip_velocity_weight"])
         if "action_penalty_weight" in rewards_cfg and hasattr(env_cfg.rewards, "action_penalty"):
