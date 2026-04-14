@@ -603,23 +603,29 @@ def goal_rot_thresh_from_env(env, default: float = 0.4) -> float:
     return _goal_bonus_params_get(env, "rot_thresh", default)
 
 
+def goal_pos_thresh_from_env(env, default: float = 0.05) -> float:
+    """``pos_thresh`` from ``env.cfg.rewards.goal_bonus`` (matches ``goal_bonus`` reward)."""
+    return _goal_bonus_params_get(env, "pos_thresh", default)
+
+
 def update_rolling_goal(
     env,
     rot_threshold: float | None = None,
+    pos_threshold: float | None = None,
 ) -> int:
     """
     Called every control step from train_rl / evaluate after env.step().
 
-    For each env where orientation error is below threshold and object is
-    still in hand, samples a new nearby goal from the grasp graph.
-
-    DeXtreme-aligned: rotation-only success (no position threshold).
+    For each env where orientation AND position errors are below thresholds
+    and object is still in hand, samples a new nearby goal from the grasp graph.
 
     Returns:
         Number of envs whose goal was updated this step.
     """
     if rot_threshold is None:
         rot_threshold = goal_rot_thresh_from_env(env)
+    if pos_threshold is None:
+        pos_threshold = goal_pos_thresh_from_env(env)
 
     _zero_mask = torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
 
@@ -640,6 +646,7 @@ def update_rolling_goal(
     from . import rewards as mdp_rewards
 
     orn_err = mdp_rewards._get_orn_error(env)
+    pos_err = mdp_rewards._get_pos_error(env)
 
     robot = env.scene["robot"]
     obj = env.scene["object"]
@@ -653,7 +660,7 @@ def update_rolling_goal(
             w1*w2-x1*x2-y1*y2-z1*z2, w1*x2+x1*w2+y1*z2-z1*y2,
             w1*y2-x1*z2+y1*w2+z1*x2, w1*z2+x1*y2-y1*x2+z1*w2], dim=-1)
 
-    success_mask = (orn_err < rot_threshold) & ~object_dropped(env)
+    success_mask = (orn_err < rot_threshold) & (pos_err < pos_threshold) & ~object_dropped(env)
 
     # Store per-env success mask so evaluate.py can read it after step().
     # Must be stored BEFORE the target is updated below.

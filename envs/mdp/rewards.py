@@ -99,12 +99,12 @@ def velocity_penalty(env) -> torch.Tensor:
     return (vel_normalised ** 2).sum(dim=-1)
 
 
-# ── +250 goal bonus (rotation only, DeXtreme-style) ──
+# ── +250 goal bonus (rotation + position) ──
 
-def goal_bonus(env, rot_thresh: float = 0.4,
+def goal_bonus(env, rot_thresh: float = 0.4, pos_thresh: float = 0.05,
                bonus: float = 250.0) -> torch.Tensor:
-    """Sparse bonus when rotation error is below threshold.
-    No position threshold (DeXtreme-aligned)."""
+    """Sparse bonus when BOTH rotation and position errors are below threshold."""
     rot_dist = _get_orn_error(env)
-    reached = rot_dist < rot_thresh
+    pos_dist = _get_pos_error(env)
+    reached = (rot_dist < rot_thresh) & (pos_dist < pos_thresh)
     return torch.where(reached, bonus, torch.zeros_like(rot_dist))

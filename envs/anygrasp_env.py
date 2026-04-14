@@ -407,11 +407,11 @@ if _ISAACLAB_AVAILABLE:
             weight=-0.05,
             params={},
         )
-        # Sparse: +250 when rot_dist < 0.4 rad (rotation only, no pos check)
+        # Sparse: +250 when rot_dist < 0.4 rad AND pos_err < 0.05 m
         goal_bonus = RewTerm(
             func=mdp_rewards.goal_bonus,
             weight=1.0,
-            params={"rot_thresh": 0.4, "bonus": 250.0},
+            params={"rot_thresh": 0.4, "pos_thresh": 0.05, "bonus": 250.0},
         )
 
 
