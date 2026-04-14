@@ -583,18 +583,28 @@ def update_curriculum(env, epoch: int, total_epochs: int = 10000):
         except Exception:
             pass
 
-    # Check performance: only advance if drop ratio is low
+    # Check performance: only advance if recent drop ratio is low
+    # Use windowed stats, not cumulative (cumulative doesn't react to recent performance).
     drop_thresh = float(cur_cfg.get("advance_drop_thresh", 0.3))
+
+    # Snapshot previous totals; compute delta since last curriculum call
+    prev = env.extras.get("_curriculum_prev_stats", {"resets": 0, "drops": 0})
     stats = env.extras.get("_reset_log_stats", {})
     total_resets = stats.get("total_resets", 0)
     total_drops = stats.get("total_drops", 0)
-    drop_ratio = total_drops / max(total_resets, 1)
+    window_resets = total_resets - prev["resets"]
+    window_drops = total_drops - prev["drops"]
+    drop_ratio = window_drops / max(window_resets, 1)
 
     # Skip first few epochs (not enough data to judge performance)
-    if epoch < 5 or total_resets < 100:
+    if epoch < 5 or window_resets < 100:
         return
 
+    # Update snapshot BEFORE advance check so next epoch sees fresh window
+    env.extras["_curriculum_prev_stats"] = {"resets": total_resets, "drops": total_drops}
+
     if drop_ratio >= drop_thresh:
+        print(f"[Curriculum] HOLD (window drop_ratio={drop_ratio:.3f} >= {drop_thresh})")
         return  # Policy not ready, don't advance
 
     # --- Advance orientation curriculum ---
