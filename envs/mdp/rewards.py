@@ -100,14 +100,18 @@ def velocity_penalty(env) -> torch.Tensor:
 
 def finger_match_reward(env, finger_eps: float = 0.5) -> torch.Tensor:
     """Inverse joint-pos distance from current to target grasp.
-    DexGen r_goal component — encourages adopting the goal hand shape."""
+    DexGen r_goal component — encourages adopting the goal hand shape.
+
+    target_joint_pos and robot.data.joint_pos must use the SAME joint order
+    (which they do: both come from robot.data.joint_pos at gen/train time).
+    """
     target_q = env.extras.get("target_joint_pos")
     if target_q is None:
         return torch.zeros(env.num_envs, device=env.device)
     cur_q = env.scene["robot"].data.joint_pos
-    if cur_q.shape[-1] != target_q.shape[-1]:
-        cur_q = cur_q[:, -target_q.shape[-1]:]
-    err = torch.norm(cur_q - target_q, dim=-1)
+    # Trim to matching dim if hand has extra (e.g., wrist) DOFs
+    n = min(cur_q.shape[-1], target_q.shape[-1])
+    err = torch.norm(cur_q[:, :n] - target_q[:, :n], dim=-1)
     return 1.0 / (err + finger_eps)
 
 
