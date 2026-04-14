@@ -834,23 +834,21 @@ class _IsaacLabVecEnv:
         obs, rew, terminated, truncated, info = self.env.step(delayed_actions)
         done = terminated | truncated
 
-        # Debug: log per-term reward breakdown every 100 steps
-        self._reward_log_step = getattr(self, '_reward_log_step', 0) + 1
-        if self._reward_log_step % 100 == 0:
-            rm = getattr(self.env, "reward_manager", None)
-            if rm is not None:
-                parts = []
-                for name in rm.active_terms:
-                    try:
-                        v = rm.get_term_cfg(name).func(self.env, **rm.get_term_cfg(name).params)
-                        w = rm.get_term_cfg(name).weight
-                        weighted = (v * w).mean().item()
-                        raw = v.mean().item()
-                        parts.append(f"{name}={weighted:+.3f}(raw={raw:+.3f})")
-                    except Exception as e:
-                        parts.append(f"{name}=ERR({e})")
-                total = rew.mean().item()
-                print(f"  [REW step={self._reward_log_step}] total={total:+.3f}  " + "  ".join(parts))
+        # Debug: log per-term reward breakdown every step
+        rm = getattr(self.env, "reward_manager", None)
+        if rm is not None:
+            parts = []
+            for name in rm.active_terms:
+                try:
+                    v = rm.get_term_cfg(name).func(self.env, **rm.get_term_cfg(name).params)
+                    w = rm.get_term_cfg(name).weight
+                    weighted = (v * w).mean().item()
+                    raw = v.mean().item()
+                    parts.append(f"{name}={weighted:+.3f}(raw={raw:+.3f})")
+                except Exception as e:
+                    parts.append(f"{name}=ERR({e})")
+            total = rew.mean().item()
+            print(f"  [REW] total={total:+.3f}  " + "  ".join(parts))
 
 
         # Re-initialise action buffers for reset envs
