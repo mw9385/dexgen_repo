@@ -165,8 +165,6 @@ def apply_env_config(env_cfg, env_cfg_dict: dict):
     rewards_cfg = env_cfg_dict.get("rewards", {})
     if rewards_cfg:
         # DeXtreme-aligned reward weights
-        if "distance_weight" in rewards_cfg and hasattr(env_cfg.rewards, "distance"):
-            env_cfg.rewards.distance.weight = float(rewards_cfg["distance_weight"])
         if "rotation_weight" in rewards_cfg and hasattr(env_cfg.rewards, "rotation"):
             env_cfg.rewards.rotation.weight = float(rewards_cfg["rotation_weight"])
         if "rotation_eps" in rewards_cfg and hasattr(env_cfg.rewards, "rotation"):

@@ -2,9 +2,11 @@
 Reward functions for in-hand object reorientation (DeXtreme-aligned).
 
 DeXtreme (Handa et al., ICRA 2023):
-  r_t = dist_rew + rot_rew + action_penalty + action_delta_penalty
+  r_t = rot_rew + action_penalty + action_delta_penalty
         + velocity_penalty + reach_goal_bonus
 
+  - distance reward removed (start/goal pos differ in our grasp data;
+    pos_err pushes policy to drift instead of rotating)
   - No explicit drop penalty (episode termination = opportunity cost of +250)
   - No contact gating
   - No position threshold for goal success (rotation only)
@@ -47,13 +49,6 @@ def _get_pos_error(env):
     if target_pos is None:
         return torch.zeros(env.num_envs, device=env.device)
     return torch.norm(cur_pos - target_pos, dim=-1)
-
-
-# ── Distance reward: goal_dist × weight (dense, negative) ──
-
-def distance_reward(env) -> torch.Tensor:
-    """Penalises L2 distance between object and target position. (DeXtreme dist_rew)"""
-    return _get_pos_error(env)
 
 
 # ── Rotation reward: 1/(|rot_dist| + eps) (dense, positive) ──

@@ -28,13 +28,12 @@ env:
     min_orn_end: 3.14             # rad (~180°)
 
   rewards:
-    # DeXtreme (Handa et al., ICRA 2023)
-    # r_t = dist_rew + rot_rew + action_penalty + action_delta_penalty
+    # DeXtreme (Handa et al., ICRA 2023) — distance term removed
+    # r_t = rot_rew + action_penalty + action_delta_penalty
     #       + velocity_penalty + reach_goal_bonus
-    distance_weight: -10.0             # goal_dist × weight (penalises distance)
     rotation_weight: 1.0               # 1/(|rot_dist|+0.1) × weight
     rotation_eps: 0.1                  # denominator epsilon for rot reward
-    action_penalty_weight: -0.0002     # Σ(a²) × weight
+    action_penalty_weight: -0.0001     # Σ(a²) × weight (DeXtreme value)
     action_delta_penalty_weight: -0.01 # Σ(Δa²) × weight
     velocity_penalty_weight: -0.05     # Σ((v/4)²) × weight
     goal_bonus: 250.0                  # +250 when rot_dist < goal_thresh
