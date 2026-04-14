@@ -21,7 +21,7 @@ env:
   training_curriculum:
     enabled: true
     # Time-based linear ramp over warmup_ratio × total_epochs
-    warmup_ratio: 0.30            # reach end values at 30% of training
+    warmup_ratio: 0.10            # reach end values at 10% of training (5000/50000)
     start_gravity: 1.0
     end_gravity: 9.81
     min_orn_start: 0.80           # rad (~45.8°)
