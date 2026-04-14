@@ -831,21 +831,19 @@ class _IsaacLabVecEnv:
         done = terminated | truncated
 
         # Debug: log reward + state every step.
-        # We CANNOT re-call delta reward functions (would corrupt _prev_*_err).
-        # So we just log:
-        #   - total reward (from env.step())
-        #   - underlying state errors (read-only, no buffer mutation)
+        # Track our own prev buffers (separate from the reward function's
+        # internal _prev_*_err which we cannot read after step()).
         from envs.mdp.rewards import _get_orn_error, _get_pos_error
         try:
             rot_err = _get_orn_error(self.env).mean().item()
             pos_err = _get_pos_error(self.env).mean().item()
-            prev_rot = self.env.extras.get("_prev_rot_err")
-            prev_pos = self.env.extras.get("_prev_pos_err")
-            d_rot = (prev_rot.mean().item() - rot_err) if prev_rot is not None else 0.0
-            d_pos = (prev_pos.mean().item() - pos_err) if prev_pos is not None else 0.0
+            d_rot = (self._log_prev_rot_err - rot_err) if hasattr(self, "_log_prev_rot_err") else 0.0
+            d_pos = (self._log_prev_pos_err - pos_err) if hasattr(self, "_log_prev_pos_err") else 0.0
+            self._log_prev_rot_err = rot_err
+            self._log_prev_pos_err = pos_err
             print(f"  [REW] total={rew.mean().item():+.4f}  "
-                  f"rot_err={rot_err:.3f}({d_rot:+.4f})  "
-                  f"pos_err={pos_err:.4f}({d_pos:+.5f})")
+                  f"rot_err={rot_err:.3f}(Δ={d_rot:+.4f})  "
+                  f"pos_err={pos_err:.4f}(Δ={d_pos:+.5f})")
         except Exception as e:
             print(f"  [REW] total={rew.mean().item():+.4f}  state_err={e}")
 
