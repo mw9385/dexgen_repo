@@ -9,7 +9,7 @@
 env:
   task: DexGen-AnyGrasp-Sharpa-v0
   num_envs: 512
-  episode_length_s: 10.0
+  episode_length_s: 8.0          # DeXtreme resetTime
   action_scale: 1.0              # [-1,1] maps to full joint range
   action_mode: "absolute"        # policy outputs target joint positions directly
   actions_moving_average: 0.3    # fixed EMA smoothing (no annealing)
@@ -17,7 +17,7 @@ env:
     lower: 0.3
     upper: 0.3
     schedule_steps: 0            # 0 = no annealing, fixed at 0.3
-  decimation: 12                 # control at 20 Hz (240 Hz sim / 12)
+  decimation: 8                  # 30 Hz control (240 Hz sim / 8), DeXtreme-aligned
   training_curriculum:
     enabled: true
     # Time-based linear ramp over warmup_ratio × total_epochs
@@ -75,10 +75,10 @@ ppo:
     before_mlp: false
     concat_input: true
 
-  learning_rate: 5.0e-4
+  learning_rate: 1.0e-4          # DeXtreme-aligned
   lr_schedule: adaptive
   lr_threshold: 0.008
-  gamma: 0.99
+  gamma: 0.998                   # DeXtreme (longer horizon for sparse +250 bonus)
   tau: 0.95
   e_clip: 0.2
   entropy_coef: 0.0
@@ -94,10 +94,10 @@ ppo:
   horizon_length: 16
   seq_length: 8
   num_steps_per_env: 16
-  mini_epochs: 8
-  minibatch_size: 4096
+  mini_epochs: 4                 # DeXtreme-aligned
+  minibatch_size: 16384          # DeXtreme-aligned (batch=num_envs×16; at num_envs=4096 → 4 minibatches)
 
-  max_iterations: 10000
+  max_iterations: 50000          # DeXtreme-aligned
 
 central_value:
   units: [512, 512]
