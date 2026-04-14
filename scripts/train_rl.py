@@ -830,21 +830,24 @@ class _IsaacLabVecEnv:
         obs, rew, terminated, truncated, info = self.env.step(delayed_actions)
         done = terminated | truncated
 
-        # Debug: log per-term reward breakdown every step
-        rm = getattr(self.env, "reward_manager", None)
-        if rm is not None:
-            parts = []
-            for name in rm.active_terms:
-                try:
-                    v = rm.get_term_cfg(name).func(self.env, **rm.get_term_cfg(name).params)
-                    w = rm.get_term_cfg(name).weight
-                    weighted = (v * w).mean().item()
-                    raw = v.mean().item()
-                    parts.append(f"{name}={weighted:+.3f}(raw={raw:+.3f})")
-                except Exception as e:
-                    parts.append(f"{name}=ERR({e})")
-            total = rew.mean().item()
-            print(f"  [REW] total={total:+.3f}  " + "  ".join(parts))
+        # Debug: log reward + state every step.
+        # We CANNOT re-call delta reward functions (would corrupt _prev_*_err).
+        # So we just log:
+        #   - total reward (from env.step())
+        #   - underlying state errors (read-only, no buffer mutation)
+        from envs.mdp.rewards import _get_orn_error, _get_pos_error
+        try:
+            rot_err = _get_orn_error(self.env).mean().item()
+            pos_err = _get_pos_error(self.env).mean().item()
+            prev_rot = self.env.extras.get("_prev_rot_err")
+            prev_pos = self.env.extras.get("_prev_pos_err")
+            d_rot = (prev_rot.mean().item() - rot_err) if prev_rot is not None else 0.0
+            d_pos = (prev_pos.mean().item() - pos_err) if prev_pos is not None else 0.0
+            print(f"  [REW] total={rew.mean().item():+.4f}  "
+                  f"rot_err={rot_err:.3f}({d_rot:+.4f})  "
+                  f"pos_err={pos_err:.4f}({d_pos:+.5f})")
+        except Exception as e:
+            print(f"  [REW] total={rew.mean().item():+.4f}  state_err={e}")
 
 
         # Re-initialise action buffers for reset envs
