@@ -243,18 +243,6 @@ def reset_to_random_grasp(
                 gq, device=env.device, dtype=torch.float32
             )
 
-    # Store target joint positions for finger matching reward
-    if "target_joint_pos" not in env.extras:
-        n_dof = len(goal_joints_list[0]) if goal_joints_list[0] is not None else 22
-        env.extras["target_joint_pos"] = torch.zeros(
-            env.num_envs, n_dof, device=env.device
-        )
-    for i, gj in enumerate(goal_joints_list):
-        if gj is not None:
-            env.extras["target_joint_pos"][env_ids[i]] = torch.tensor(
-                gj, device=env.device, dtype=torch.float32
-            )
-
     # ------------------------------------------------------------------
     # 2. Reset directly to the stored start grasp.
     #    No additional pose randomization or reset-time pose reshaping.
@@ -337,30 +325,7 @@ def reset_to_random_grasp(
     env.extras["last_action"][env_ids] = current_action
     env.extras["current_action"][env_ids] = current_action
 
-    # Reset reward delta buffers so post-reset first step starts from current err
-    from .rewards import _get_orn_error, _get_pos_error
-    cur_orn = _get_orn_error(env)
-    cur_pos = _get_pos_error(env)
-    if "_prev_rot_err" not in env.extras:
-        env.extras["_prev_rot_err"] = cur_orn.clone()
-    env.extras["_prev_rot_err"][env_ids] = cur_orn[env_ids]
-    if "_prev_pos_err" not in env.extras:
-        env.extras["_prev_pos_err"] = cur_pos.clone()
-    env.extras["_prev_pos_err"][env_ids] = cur_pos[env_ids]
-
-    # Finger match delta buffer
-    target_q = env.extras.get("target_joint_pos")
-    if target_q is not None:
-        cq = env.scene["robot"].data.joint_pos
-        n_dof = min(cq.shape[-1], target_q.shape[-1])
-        cur_finger_err = torch.norm(cq[:, :n_dof] - target_q[:, :n_dof], dim=-1)
-        if "_prev_finger_err" not in env.extras:
-            env.extras["_prev_finger_err"] = cur_finger_err.clone()
-        env.extras["_prev_finger_err"][env_ids] = cur_finger_err[env_ids]
-
-    # Backward compat
-    if "_prev_orn_error" in env.extras:
-        env.extras["_prev_orn_error"][env_ids] = cur_orn[env_ids]
+    # DeXtreme reward is stateless (no delta buffers needed)
     if "_best_rot_dist" in env.extras:
         env.extras["_best_rot_dist"][env_ids] = float("inf")
 

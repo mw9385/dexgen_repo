@@ -20,33 +20,23 @@ env:
   decimation: 8                  # 30 Hz control (240 Hz sim / 8), DeXtreme-aligned
   training_curriculum:
     enabled: true
-    # Time-based linear ramp over warmup_ratio × total_epochs
-    warmup_ratio: 0.10            # reach end values at 10% of training (5000/50000)
+    # Time-based linear ramp — relaxed for stable learning
+    warmup_ratio: 0.30            # reach end values at 30% of training (15000/50000)
     start_gravity: 1.0
     end_gravity: 9.81
     min_orn_start: 0.80           # rad (~45.8°)
     min_orn_end: 3.14             # rad (~180°)
 
   rewards:
-    # Delta-form primary rewards: do-nothing → 0, only progress earns reward
-    # r_t = w_rot × Δrot_err + w_pos × Δpos_err + w_finger × Δfinger_err
-    #     + reg + style + goal_bonus
-    #
-    # r_goal (delta):
-    rotation_weight: 500.0             # Δrot_err × weight  PRIMARY
-    distance_weight: 100.0             # Δpos_err × weight  auxiliary
-    finger_match_weight: 50.0          # Δfinger_err × weight
-    goal_bonus: 250.0                  # +250 sparse when reached
-    goal_thresh: 0.4                   # rad
-    pos_thresh: 0.05                   # m
-    # r_style:
-    fingertip_velocity_weight: -0.001
-    # r_reg:
-    action_penalty_weight: -0.0001     # Σ(a²) — raw policy output (pre-EMA)
+    # DeXtreme (Handa et al., ICRA 2023) exact weights
+    distance_weight: -10.0             # pos_err × weight
+    rotation_weight: 1.0               # 1/(|rot_err|+0.1) × weight
+    rotation_eps: 0.1
+    action_penalty_weight: -0.0001     # Σ(a²)
     action_delta_penalty_weight: -0.01 # Σ(Δa²)
     velocity_penalty_weight: -0.05     # Σ((v/4)²)
-    torque_penalty_weight: -0.0001     # Σ(τ²)
-    work_penalty_weight: -0.001        # Σ |τ × ω|
+    goal_bonus: 250.0                  # sparse bonus on success
+    goal_thresh: 0.4                   # rad (success_tolerance)
 
   terminations:
     object_drop_max_dist: 0.24         # m — DeXtreme fall_dist = 0.24
@@ -75,13 +65,14 @@ ppo:
   fixed_sigma: true
   sigma_init: -1.0
 
-  use_rnn: false
+  use_rnn: true                  # DeXtreme uses LSTM
   rnn:
     name: lstm
-    units: 256
+    units: 768                   # DeXtreme LSTM width
     layers: 1
     before_mlp: false
     concat_input: true
+    layer_norm: true
 
   learning_rate: 1.0e-4          # DeXtreme-aligned
   lr_schedule: adaptive

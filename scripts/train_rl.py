@@ -164,32 +164,24 @@ def apply_env_config(env_cfg, env_cfg_dict: dict):
 
     rewards_cfg = env_cfg_dict.get("rewards", {})
     if rewards_cfg:
-        # DexGen-aligned reward weights
-        if "rotation_weight" in rewards_cfg and hasattr(env_cfg.rewards, "rotation"):
-            env_cfg.rewards.rotation.weight = float(rewards_cfg["rotation_weight"])
+        # DeXtreme reward weights
         if "distance_weight" in rewards_cfg and hasattr(env_cfg.rewards, "distance"):
             env_cfg.rewards.distance.weight = float(rewards_cfg["distance_weight"])
-        if "finger_match_weight" in rewards_cfg and hasattr(env_cfg.rewards, "finger_match"):
-            env_cfg.rewards.finger_match.weight = float(rewards_cfg["finger_match_weight"])
-        if "fingertip_velocity_weight" in rewards_cfg and hasattr(env_cfg.rewards, "fingertip_velocity"):
-            env_cfg.rewards.fingertip_velocity.weight = float(rewards_cfg["fingertip_velocity_weight"])
+        if "rotation_weight" in rewards_cfg and hasattr(env_cfg.rewards, "rotation"):
+            env_cfg.rewards.rotation.weight = float(rewards_cfg["rotation_weight"])
+        if "rotation_eps" in rewards_cfg and hasattr(env_cfg.rewards, "rotation"):
+            env_cfg.rewards.rotation.params["rot_eps"] = float(rewards_cfg["rotation_eps"])
         if "action_penalty_weight" in rewards_cfg and hasattr(env_cfg.rewards, "action_penalty"):
             env_cfg.rewards.action_penalty.weight = float(rewards_cfg["action_penalty_weight"])
         if "action_delta_penalty_weight" in rewards_cfg and hasattr(env_cfg.rewards, "action_delta_penalty"):
             env_cfg.rewards.action_delta_penalty.weight = float(rewards_cfg["action_delta_penalty_weight"])
         if "velocity_penalty_weight" in rewards_cfg and hasattr(env_cfg.rewards, "velocity_penalty"):
             env_cfg.rewards.velocity_penalty.weight = float(rewards_cfg["velocity_penalty_weight"])
-        if "torque_penalty_weight" in rewards_cfg and hasattr(env_cfg.rewards, "torque_penalty"):
-            env_cfg.rewards.torque_penalty.weight = float(rewards_cfg["torque_penalty_weight"])
-        if "work_penalty_weight" in rewards_cfg and hasattr(env_cfg.rewards, "work_penalty"):
-            env_cfg.rewards.work_penalty.weight = float(rewards_cfg["work_penalty_weight"])
         if hasattr(env_cfg.rewards, "goal_bonus"):
             if "goal_bonus" in rewards_cfg:
                 env_cfg.rewards.goal_bonus.params["bonus"] = float(rewards_cfg["goal_bonus"])
             if "goal_thresh" in rewards_cfg:
                 env_cfg.rewards.goal_bonus.params["rot_thresh"] = float(rewards_cfg["goal_thresh"])
-            if "pos_thresh" in rewards_cfg:
-                env_cfg.rewards.goal_bonus.params["pos_thresh"] = float(rewards_cfg["pos_thresh"])
 
     term_cfg = env_cfg_dict.get("terminations", {})
     if term_cfg and hasattr(env_cfg.terminations, "object_drop"):
@@ -267,6 +259,7 @@ def _build_network_config(ppo_cfg: dict) -> dict:
             "layers": int(rnn_cfg.get("layers", 1)),
             "before_mlp": bool(rnn_cfg.get("before_mlp", False)),
             "concat_input": bool(rnn_cfg.get("concat_input", True)),
+            "layer_norm": bool(rnn_cfg.get("layer_norm", False)),
         }
 
     return net

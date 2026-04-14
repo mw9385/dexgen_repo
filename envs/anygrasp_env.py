@@ -377,40 +377,17 @@ if _ISAACLAB_AVAILABLE:
 if _ISAACLAB_AVAILABLE:
     @configclass
     class AnyGraspRewardsCfg:
-        # ── r_goal (delta forms — do-nothing → 0) ──
-        # PRIMARY: Δrot_err × big weight
-        rotation = RewTerm(
-            func=mdp_rewards.rotation_reward,
-            weight=500.0,
-            params={},
-        )
-        # Auxiliary: Δpos_err × weight
+        # DeXtreme (Handa et al., ICRA 2023) exact reward form
         distance = RewTerm(
             func=mdp_rewards.distance_reward,
-            weight=100.0,
+            weight=-10.0,
             params={},
         )
-        # Auxiliary: Δfinger_match × weight
-        finger_match = RewTerm(
-            func=mdp_rewards.finger_match_reward,
-            weight=50.0,
-            params={},
-        )
-        # Sparse: +250 when both rot AND pos within thresh
-        goal_bonus = RewTerm(
-            func=mdp_rewards.goal_bonus,
+        rotation = RewTerm(
+            func=mdp_rewards.rotation_reward,
             weight=1.0,
-            params={"rot_thresh": 0.4, "pos_thresh": 0.05, "bonus": 250.0},
+            params={"rot_eps": 0.1},
         )
-
-        # ── r_style ──
-        fingertip_velocity = RewTerm(
-            func=mdp_rewards.fingertip_velocity_penalty,
-            weight=-0.001,
-            params={},
-        )
-
-        # ── r_reg ──
         action_penalty = RewTerm(
             func=mdp_rewards.action_penalty,
             weight=-0.0001,
@@ -426,15 +403,10 @@ if _ISAACLAB_AVAILABLE:
             weight=-0.05,
             params={},
         )
-        torque_penalty = RewTerm(
-            func=mdp_rewards.torque_penalty,
-            weight=-0.0001,
-            params={},
-        )
-        work_penalty = RewTerm(
-            func=mdp_rewards.work_penalty,
-            weight=-0.001,
-            params={},
+        goal_bonus = RewTerm(
+            func=mdp_rewards.goal_bonus,
+            weight=1.0,
+            params={"rot_thresh": 0.4, "bonus": 250.0},
         )
 
 

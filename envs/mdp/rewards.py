@@ -1,14 +1,14 @@
 """
-Reward functions for in-hand object reorientation (delta-based primary).
+Reward functions for in-hand object reorientation (DeXtreme exact form).
 
-Primary signal (DexGen-style delta):
-  r_t = w_rot × (prev_rot_err - cur_rot_err)
-      + w_pos × (prev_pos_err - cur_pos_err)
-      + r_finger
-      + r_style + r_reg + goal_bonus
-
-Delta form ensures "do nothing" gives 0 reward (no free baseline).
-Only progress toward goal gives positive reward.
+DeXtreme (Handa et al., ICRA 2023) — AllegroHandDextremeManualDR:
+  dist_rew         = goal_dist × dist_reward_scale    (-10.0)
+  rot_rew          = 1.0 / (|rot_dist| + rot_eps) × rot_reward_scale  (+1.0)
+  action_penalty   = Σ(a²) × action_penalty_scale     (-0.0001)
+  action_delta     = Σ(Δa²) × action_delta_scale      (-0.01)
+  velocity_penalty = Σ((v/4)²) × velocity_coef        (-0.05)
+  reach_goal_bonus = +250  when rot_dist < success_tolerance
+  fall_penalty     = 0.0
 """
 
 from __future__ import annotations
@@ -50,50 +50,30 @@ def _get_pos_error(env):
     return torch.norm(cur_pos - target_pos, dim=-1)
 
 
-# ── Rotation delta reward: Δrot_err × weight (do-nothing → 0) ──
-
-def rotation_reward(env) -> torch.Tensor:
-    """(prev_rot_err - cur_rot_err) — positive when reducing orientation error.
-    Zero when stationary. Negative when moving away from goal.
-    """
-    cur_err = _get_orn_error(env)
-    prev_err = env.extras.get("_prev_rot_err")
-    if prev_err is None:
-        prev_err = cur_err.clone()
-    delta = prev_err - cur_err
-    env.extras["_prev_rot_err"] = cur_err.clone()
-    return delta
-
-
-# ── Distance delta reward: Δpos_err × weight (do-nothing → 0) ──
+# ── DeXtreme dist_rew: pos_err (multiply by -10 weight) ──
 
 def distance_reward(env) -> torch.Tensor:
-    """(prev_pos_err - cur_pos_err) — positive when reducing position error."""
-    cur_err = _get_pos_error(env)
-    prev_err = env.extras.get("_prev_pos_err")
-    if prev_err is None:
-        prev_err = cur_err.clone()
-    delta = prev_err - cur_err
-    env.extras["_prev_pos_err"] = cur_err.clone()
-    return delta
+    return _get_pos_error(env)
 
 
-# ── Action penalty: -scale × Σ(actions²) ──
-# NOTE: action here is raw policy output (pre-EMA, pre-clip).
-# EMA smoothing happens in the wrapper before env.step().
+# ── DeXtreme rot_rew: 1/(|rot_err| + rot_eps) ──
+
+def rotation_reward(env, rot_eps: float = 0.1) -> torch.Tensor:
+    return 1.0 / (_get_orn_error(env).abs() + rot_eps)
+
+
+# ── DeXtreme action_penalty: Σ(actions²) ──
 
 def action_penalty(env) -> torch.Tensor:
-    """L2 penalty on raw policy output magnitude."""
     action = env.extras.get("current_action")
     if action is None:
         return torch.zeros(env.num_envs, device=env.device)
     return (action ** 2).sum(dim=-1)
 
 
-# ── Action delta penalty: -scale × Σ(Δactions²) ──
+# ── DeXtreme action_delta_penalty: Σ((cur-prev)²) ──
 
 def action_delta_penalty(env) -> torch.Tensor:
-    """L2 penalty on action change between consecutive steps."""
     cur = env.extras.get("current_action")
     prev = env.extras.get("last_action")
     if cur is None or prev is None:
@@ -101,73 +81,18 @@ def action_delta_penalty(env) -> torch.Tensor:
     return ((cur - prev) ** 2).sum(dim=-1)
 
 
-# ── Velocity penalty ──
+# ── DeXtreme velocity_penalty: Σ((v/(vmax-vtol))²) ──
 
 def velocity_penalty(env) -> torch.Tensor:
-    """Joint velocity penalty."""
     hand = env.scene["robot"]
+    # DeXtreme uses max_velocity=5, vel_tolerance=1 → divisor = 4
     vel_normalised = hand.data.joint_vel / 4.0
     return (vel_normalised ** 2).sum(dim=-1)
 
 
-# ── Finger joint matching: (prev_err - cur_err) × weight (delta form) ──
+# ── DeXtreme reach_goal_bonus: +250 when rot_dist < success_tolerance ──
 
-def finger_match_reward(env) -> torch.Tensor:
-    """Δ joint-pos distance from current to target grasp.
-    Positive when hand shape approaches goal grasp."""
-    target_q = env.extras.get("target_joint_pos")
-    if target_q is None:
-        return torch.zeros(env.num_envs, device=env.device)
-    cur_q = env.scene["robot"].data.joint_pos
-    n = min(cur_q.shape[-1], target_q.shape[-1])
-    cur_err = torch.norm(cur_q[:, :n] - target_q[:, :n], dim=-1)
-    prev_err = env.extras.get("_prev_finger_err")
-    if prev_err is None:
-        prev_err = cur_err.clone()
-    delta = prev_err - cur_err
-    env.extras["_prev_finger_err"] = cur_err.clone()
-    return delta
-
-
-# ── Style: fingertip velocity penalty ──
-
-def fingertip_velocity_penalty(env) -> torch.Tensor:
-    """Σ ||v_tip||² for all fingertips."""
-    from .sim_utils import get_fingertip_body_ids_from_env
-    robot = env.scene["robot"]
-    try:
-        ft_ids = get_fingertip_body_ids_from_env(robot, env)
-    except Exception:
-        return torch.zeros(env.num_envs, device=env.device)
-    v_tip = robot.data.body_lin_vel_w[:, ft_ids, :]
-    return (v_tip ** 2).sum(dim=(-2, -1))
-
-
-# ── Regularization: torque penalty ──
-
-def torque_penalty(env) -> torch.Tensor:
-    """Σ τ²."""
-    robot = env.scene["robot"]
-    tau = robot.data.applied_torque
-    return (tau ** 2).sum(dim=-1)
-
-
-# ── Regularization: work penalty ──
-
-def work_penalty(env) -> torch.Tensor:
-    """Σ |τ × ω|."""
-    robot = env.scene["robot"]
-    tau = robot.data.applied_torque
-    omega = robot.data.joint_vel
-    return (tau * omega).abs().sum(dim=-1)
-
-
-# ── Sparse goal bonus (rotation + position) ──
-
-def goal_bonus(env, rot_thresh: float = 0.4, pos_thresh: float = 0.05,
-               bonus: float = 250.0) -> torch.Tensor:
-    """Sparse bonus when BOTH rotation and position errors are below threshold."""
+def goal_bonus(env, rot_thresh: float = 0.4, bonus: float = 250.0) -> torch.Tensor:
     rot_dist = _get_orn_error(env)
-    pos_dist = _get_pos_error(env)
-    reached = (rot_dist < rot_thresh) & (pos_dist < pos_thresh)
+    reached = rot_dist < rot_thresh
     return torch.where(reached, bonus, torch.zeros_like(rot_dist))
