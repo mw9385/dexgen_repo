@@ -830,22 +830,6 @@ class _IsaacLabVecEnv:
         obs, rew, terminated, truncated, info = self.env.step(delayed_actions)
         done = terminated | truncated
 
-        # Debug: log reward + state every step.
-        # Track our own prev buffers (separate from the reward function's
-        # internal _prev_*_err which we cannot read after step()).
-        from envs.mdp.rewards import _get_orn_error, _get_pos_error
-        try:
-            rot_err = _get_orn_error(self.env).mean().item()
-            pos_err = _get_pos_error(self.env).mean().item()
-            d_rot = (self._log_prev_rot_err - rot_err) if hasattr(self, "_log_prev_rot_err") else 0.0
-            d_pos = (self._log_prev_pos_err - pos_err) if hasattr(self, "_log_prev_pos_err") else 0.0
-            self._log_prev_rot_err = rot_err
-            self._log_prev_pos_err = pos_err
-            print(f"  [REW] total={rew.mean().item():+.4f}  "
-                  f"rot_err={rot_err:.3f}(Δ={d_rot:+.4f})  "
-                  f"pos_err={pos_err:.4f}(Δ={d_pos:+.5f})")
-        except Exception as e:
-            print(f"  [REW] total={rew.mean().item():+.4f}  state_err={e}")
 
 
         # Re-initialise action buffers for reset envs
