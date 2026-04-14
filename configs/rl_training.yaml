@@ -20,16 +20,12 @@ env:
   decimation: 12                 # control at 20 Hz (240 Hz sim / 12)
   training_curriculum:
     enabled: true
-    # Performance-gated: only advances when drop_ratio < threshold
-    advance_drop_thresh: 0.3      # advance curriculum when <30% drops
-    # Gravity: incremental steps when performing well
+    # Time-based linear ramp over warmup_ratio × total_epochs
+    warmup_ratio: 0.30            # reach end values at 30% of training
     start_gravity: 1.0
     end_gravity: 9.81
-    gravity_step: 0.1             # +0.1 m/s² per advance
-    # Goal difficulty: min orientation distance for kNN goal selection
     min_orn_start: 0.80           # rad (~45.8°)
     min_orn_end: 3.14             # rad (~180°)
-    orn_step: 0.05                # +0.05 rad per advance
 
   rewards:
     # DeXtreme (Handa et al., ICRA 2023)

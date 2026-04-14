@@ -548,99 +548,41 @@ def _get_cached_positions(graph) -> Optional[np.ndarray]:
 
 def update_curriculum(env, epoch: int, total_epochs: int = 10000):
     """
-    Update gravity and goal difficulty over training.
+    Time-based curriculum: linearly ramp gravity and min_orn over training.
 
-    - Gravity: ramp from start_gravity to end_gravity
-    - Goal difficulty (min_orn): ramp from min_orn_start to min_orn_end
-
-    Both ramp linearly over warmup_ratio fraction of total_epochs.
-    Call once per epoch from the training loop.
-
-    Performance-based: only advances when drop_ratio < threshold.
-    Gravity and min_orn increase by a fixed increment each time the
-    policy is performing well enough (like sharpa-rl-lab's adaptive
-    gravity curriculum).
+    Advances slowly and predictably so the policy has time to adapt.
+    Controlled by 'warmup_ratio' — fraction of total_epochs to reach end values.
     """
     cur_cfg = dict((getattr(env.cfg, "training_curriculum", None) or {})
                    or (getattr(env.cfg, "gravity_curriculum", None) or {}))
 
-    # Always initialize min_orn to start value (needed before first reset)
-    graph = _load_grasp_graph(env)
-    min_orn_start = float(cur_cfg.get("min_orn_start", 0.80))
-    if graph is not None and not hasattr(graph, "_curriculum_min_orn"):
-        graph._curriculum_min_orn = min_orn_start
+    warmup_ratio = float(cur_cfg.get("warmup_ratio", 0.30))
+    warmup_epochs = max(int(total_epochs * warmup_ratio), 1)
+    t = min(epoch / warmup_epochs, 1.0)
 
-    # Initialize gravity on first call
-    if cur_cfg.get("enabled", False) and not hasattr(env, "_curriculum_gravity"):
-        gravity_start = float(cur_cfg.get("start_gravity", 1.0))
-        env._curriculum_gravity = gravity_start
-        try:
-            import carb
-            import isaaclab.sim as sim_utils
-            sim_utils.SimulationContext.instance().physics_sim_view.set_gravity(
-                carb.Float3(0.0, 0.0, -gravity_start)
-            )
-        except Exception:
-            pass
-
-    # Check performance: only advance if recent drop ratio is low
-    # Use windowed stats, not cumulative (cumulative doesn't react to recent performance).
-    drop_thresh = float(cur_cfg.get("advance_drop_thresh", 0.3))
-
-    # Snapshot previous totals; compute delta since last curriculum call
-    prev = env.extras.get("_curriculum_prev_stats", {"resets": 0, "drops": 0})
-    stats = env.extras.get("_reset_log_stats", {})
-    total_resets = stats.get("total_resets", 0)
-    total_drops = stats.get("total_drops", 0)
-    window_resets = total_resets - prev["resets"]
-    window_drops = total_drops - prev["drops"]
-    drop_ratio = window_drops / max(window_resets, 1)
-
-    # Skip first few epochs (not enough data to judge performance)
-    if epoch < 5 or window_resets < 100:
-        return
-
-    # Update snapshot BEFORE advance check so next epoch sees fresh window
-    env.extras["_curriculum_prev_stats"] = {"resets": total_resets, "drops": total_drops}
-
-    if drop_ratio >= drop_thresh:
-        print(f"[Curriculum] HOLD (window drop_ratio={drop_ratio:.3f} >= {drop_thresh})")
-        return  # Policy not ready, don't advance
-
-    # --- Advance orientation curriculum ---
+    # --- Orientation curriculum ---
     graph = _load_grasp_graph(env)
     if graph is not None:
         min_orn_start = float(cur_cfg.get("min_orn_start", 0.80))
         min_orn_end = float(cur_cfg.get("min_orn_end", 3.14))
-        orn_step = float(cur_cfg.get("orn_step", 0.05))
-        cur = getattr(graph, "_curriculum_min_orn", min_orn_start)
-        new = min(cur + orn_step, min_orn_end)
-        if new != cur:
-            graph._curriculum_min_orn = new
-            print(f"[Curriculum] min_orn: {cur:.2f} → {new:.2f} rad "
-                  f"(drop_ratio={drop_ratio:.3f} < {drop_thresh})")
+        graph._curriculum_min_orn = min_orn_start + t * (min_orn_end - min_orn_start)
 
-    # --- Advance gravity curriculum ---
+    # --- Gravity curriculum ---
     if cur_cfg.get("enabled", False):
-        gravity_start = float(cur_cfg.get("start_gravity", 4.5))
+        gravity_start = float(cur_cfg.get("start_gravity", 1.0))
         gravity_end = float(cur_cfg.get("end_gravity", 9.81))
-        gravity_step = float(cur_cfg.get("gravity_step", 0.1))
-        cur_g = getattr(env, "_curriculum_gravity", gravity_start)
-        new_g = min(cur_g + gravity_step, gravity_end)
-        if new_g != cur_g:
-            try:
-                import carb
-                import isaaclab.sim as sim_utils
-                sim_utils.SimulationContext.instance().physics_sim_view.set_gravity(
-                    carb.Float3(0.0, 0.0, -new_g)
-                )
-                env._curriculum_gravity = new_g
-                print(f"[Curriculum] gravity: {cur_g:.2f} → {new_g:.2f} m/s² "
-                      f"(drop_ratio={drop_ratio:.3f} < {drop_thresh})")
-            except Exception as exc:
-                if not getattr(env, "_curriculum_gravity_warned", False):
-                    print(f"[WARNING] Gravity curriculum update failed: {exc}")
-                    env._curriculum_gravity_warned = True
+        gravity_mag = gravity_start + t * (gravity_end - gravity_start)
+        try:
+            import carb
+            import isaaclab.sim as sim_utils
+            sim_utils.SimulationContext.instance().physics_sim_view.set_gravity(
+                carb.Float3(0.0, 0.0, -gravity_mag)
+            )
+            env._curriculum_gravity = gravity_mag
+        except Exception as exc:
+            if not getattr(env, "_curriculum_gravity_warned", False):
+                print(f"[WARNING] Gravity curriculum update failed: {exc}")
+                env._curriculum_gravity_warned = True
 
 # ---------------------------------------------------------------------------
 # Rolling goal: update goal when current goal is achieved mid-episode
