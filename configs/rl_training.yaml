@@ -65,16 +65,16 @@ ppo:
   fixed_sigma: true
   sigma_init: -1.0
 
-  use_rnn: true                  # DeXtreme uses LSTM
+  use_rnn: false
   rnn:
     name: lstm
-    units: 768                   # DeXtreme LSTM width
+    units: 768
     layers: 1
     before_mlp: false
     concat_input: true
     layer_norm: true
 
-  learning_rate: 1.0e-4          # DeXtreme-aligned
+  learning_rate: 5.0e-4          # higher LR for MLP-only training
   lr_schedule: adaptive
   lr_threshold: 0.008
   gamma: 0.998                   # DeXtreme (longer horizon for sparse +250 bonus)
