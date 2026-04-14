@@ -377,11 +377,17 @@ if _ISAACLAB_AVAILABLE:
 if _ISAACLAB_AVAILABLE:
     @configclass
     class AnyGraspRewardsCfg:
-        # Dense: 1/(|rot_dist| + eps) × weight (positive → rewards alignment)
+        # Dense: 1/(|rot_dist| + eps) × weight (positive → primary signal)
         rotation = RewTerm(
             func=mdp_rewards.rotation_reward,
             weight=1.0,
             params={"rot_eps": 0.1},
+        )
+        # Dense: 1/(|pos_err| + eps) × weight (positive → auxiliary)
+        distance = RewTerm(
+            func=mdp_rewards.distance_reward,
+            weight=0.1,
+            params={"pos_eps": 0.02},
         )
         # Dense: Σ(actions²) × weight (negative → penalises large actions)
         action_penalty = RewTerm(
