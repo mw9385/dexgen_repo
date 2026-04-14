@@ -51,13 +51,13 @@ def _get_pos_error(env):
     return torch.norm(cur_pos - target_pos, dim=-1)
 
 
-# ── Distance reward: 1/(|pos_err| + eps) (dense, positive) ──
+# ── Distance reward: -pos_err × weight (DeXtreme linear negative form) ──
 
-def distance_reward(env, pos_eps: float = 0.02) -> torch.Tensor:
-    """Inverse position distance — auxiliary signal to keep object near target.
-    Uses same inverse form as rotation_reward for consistency."""
-    pos_err = _get_pos_error(env)
-    return 1.0 / (pos_err.abs() + pos_eps)
+def distance_reward(env) -> torch.Tensor:
+    """L2 distance between object and target position.
+    DeXtreme form: multiplied by negative weight → penalises distance.
+    At pos_err=0 the reward is 0 (no free baseline)."""
+    return _get_pos_error(env)
 
 
 # ── Rotation reward: 1/(|rot_dist| + eps) (dense, positive) ──

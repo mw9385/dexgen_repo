@@ -171,8 +171,6 @@ def apply_env_config(env_cfg, env_cfg_dict: dict):
             env_cfg.rewards.rotation.params["rot_eps"] = float(rewards_cfg["rotation_eps"])
         if "distance_weight" in rewards_cfg and hasattr(env_cfg.rewards, "distance"):
             env_cfg.rewards.distance.weight = float(rewards_cfg["distance_weight"])
-        if "distance_eps" in rewards_cfg and hasattr(env_cfg.rewards, "distance"):
-            env_cfg.rewards.distance.params["pos_eps"] = float(rewards_cfg["distance_eps"])
         if "action_penalty_weight" in rewards_cfg and hasattr(env_cfg.rewards, "action_penalty"):
             env_cfg.rewards.action_penalty.weight = float(rewards_cfg["action_penalty_weight"])
         if "action_delta_penalty_weight" in rewards_cfg and hasattr(env_cfg.rewards, "action_delta_penalty"):

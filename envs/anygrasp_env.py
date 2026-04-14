@@ -383,11 +383,11 @@ if _ISAACLAB_AVAILABLE:
             weight=1.0,
             params={"rot_eps": 0.1},
         )
-        # Dense: 1/(|pos_err| + eps) × weight (positive → auxiliary)
+        # Dense: pos_err × weight (DeXtreme linear negative → drift penalty)
         distance = RewTerm(
             func=mdp_rewards.distance_reward,
-            weight=0.1,
-            params={"pos_eps": 0.02},
+            weight=-10.0,
+            params={},
         )
         # Dense: Σ(actions²) × weight (negative → penalises large actions)
         action_penalty = RewTerm(
