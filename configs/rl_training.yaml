@@ -28,17 +28,26 @@ env:
     min_orn_end: 3.14             # rad (~180°)
 
   rewards:
-    # Inverse-form rewards (DeXtreme style):
-    # r_t = rot_rew + dist_rew + action_penalty + action_delta_penalty
-    #       + velocity_penalty + reach_goal_bonus
-    rotation_weight: 1.0               # 1/(|rot_err|+0.1)  PRIMARY (positive)
+    # DexterityGen (Yin et al., 2025) AnyGrasp-to-AnyGrasp:
+    # r_t = r_goal + r_style + r_reg
+    #
+    # r_goal:
+    rotation_weight: 1.0               # 1/(|rot_err|+0.1)  PRIMARY positive
     rotation_eps: 0.1
-    distance_weight: -10.0             # -10 × pos_err (DeXtreme linear negative)
-    action_penalty_weight: -0.0001     # Σ(a²) × weight (DeXtreme value)
-    action_delta_penalty_weight: -0.01 # Σ(Δa²) × weight
-    velocity_penalty_weight: -0.05     # Σ((v/4)²) × weight
-    goal_bonus: 250.0                  # +250 when rot_dist < goal_thresh
-    goal_thresh: 0.4                   # rad (~23°) — rotation only, no pos check
+    distance_weight: -10.0             # pos_err × weight (linear negative)
+    finger_match_weight: 0.5           # 1/(||q-q_target||+0.5)  auxiliary
+    finger_eps: 0.5
+    goal_bonus: 250.0                  # +250 when rot AND pos within thresh
+    goal_thresh: 0.4                   # rad (~23°)
+    pos_thresh: 0.05                   # m
+    # r_style:
+    fingertip_velocity_weight: -0.001  # Σ ||v_tip||²
+    # r_reg:
+    action_penalty_weight: -0.0001     # Σ(a²)
+    action_delta_penalty_weight: -0.01 # Σ(Δa²)
+    velocity_penalty_weight: -0.05     # Σ((v/4)²)
+    torque_penalty_weight: -0.0001     # Σ(τ²)
+    work_penalty_weight: -0.001        # Σ |τ × ω|
 
   terminations:
     object_drop_max_dist: 0.24         # m — DeXtreme fall_dist = 0.24

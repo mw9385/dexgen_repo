@@ -149,6 +149,7 @@ def reset_to_random_grasp(
 
     # Extract grasp data in batch (one pass per object name group)
     start_joints_list = [None] * n
+    goal_joints_list = [None] * n
     start_object_pos_hand_list = [None] * n
     start_object_quat_hand_list = [None] * n
     start_object_pose_frame_list = [None] * n
@@ -184,6 +185,7 @@ def reset_to_random_grasp(
         gi_arr = np.array([goal_idx_list[i] for i in env_indices])
 
         s_joints = g._cached_joints[si_arr]     # (B, 22)
+        gj_joints = g._cached_joints[gi_arr]    # (B, 22)  goal joints
         s_pos    = g._cached_obj_pos[si_arr]     # (B, 3)
         s_quat   = g._cached_obj_quat[si_arr]    # (B, 4)
         g_pos    = g._cached_obj_pos[gi_arr]     # (B, 3)
@@ -191,6 +193,7 @@ def reset_to_random_grasp(
 
         for j, local_i in enumerate(env_indices):
             start_joints_list[local_i] = s_joints[j]
+            goal_joints_list[local_i] = gj_joints[j]
             start_object_pos_hand_list[local_i] = s_pos[j]
             start_object_quat_hand_list[local_i] = s_quat[j]
             start_object_pose_frame_list[local_i] = "hand_root"
@@ -238,6 +241,18 @@ def reset_to_random_grasp(
         if gq is not None:
             env.extras["target_object_quat_hand"][env_ids[i]] = torch.tensor(
                 gq, device=env.device, dtype=torch.float32
+            )
+
+    # Store target joint positions for finger matching reward
+    if "target_joint_pos" not in env.extras:
+        n_dof = len(goal_joints_list[0]) if goal_joints_list[0] is not None else 22
+        env.extras["target_joint_pos"] = torch.zeros(
+            env.num_envs, n_dof, device=env.device
+        )
+    for i, gj in enumerate(goal_joints_list):
+        if gj is not None:
+            env.extras["target_joint_pos"][env_ids[i]] = torch.tensor(
+                gj, device=env.device, dtype=torch.float32
             )
 
     # ------------------------------------------------------------------

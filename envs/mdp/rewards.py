@@ -1,15 +1,12 @@
 """
-Reward functions for in-hand object reorientation (DeXtreme-aligned).
+Reward functions for in-hand object reorientation (DexterityGen-aligned).
 
-DeXtreme (Handa et al., ICRA 2023):
-  r_t = rot_rew + action_penalty + action_delta_penalty
-        + velocity_penalty + reach_goal_bonus
+DexterityGen (Yin et al., 2025) — AnyGrasp-to-AnyGrasp primitive:
+  r_t = r_goal + r_style + r_reg
 
-  - distance reward removed (start/goal pos differ in our grasp data;
-    pos_err pushes policy to drift instead of rotating)
-  - No explicit drop penalty (episode termination = opportunity cost of +250)
-  - No contact gating
-  - No position threshold for goal success (rotation only)
+  r_goal:  rotation, distance, finger_match, goal_bonus
+  r_style: fingertip_velocity penalty (manipulation diversity)
+  r_reg:   action, action_delta, torque, work, velocity penalties
 """
 
 from __future__ import annotations
@@ -97,6 +94,54 @@ def velocity_penalty(env) -> torch.Tensor:
     hand = env.scene["robot"]
     vel_normalised = hand.data.joint_vel / 4.0  # max_vel(5) - tolerance(1)
     return (vel_normalised ** 2).sum(dim=-1)
+
+
+# ── Finger joint matching (DexGen): 1/(||q_cur - q_target|| + eps) ──
+
+def finger_match_reward(env, finger_eps: float = 0.5) -> torch.Tensor:
+    """Inverse joint-pos distance from current to target grasp.
+    DexGen r_goal component — encourages adopting the goal hand shape."""
+    target_q = env.extras.get("target_joint_pos")
+    if target_q is None:
+        return torch.zeros(env.num_envs, device=env.device)
+    cur_q = env.scene["robot"].data.joint_pos
+    if cur_q.shape[-1] != target_q.shape[-1]:
+        cur_q = cur_q[:, -target_q.shape[-1]:]
+    err = torch.norm(cur_q - target_q, dim=-1)
+    return 1.0 / (err + finger_eps)
+
+
+# ── Style: fingertip velocity penalty (DexGen r_style) ──
+
+def fingertip_velocity_penalty(env) -> torch.Tensor:
+    """Σ ||v_tip||² for all fingertips. Negative weight encourages slower / diverse motion."""
+    from .sim_utils import get_fingertip_body_ids_from_env
+    robot = env.scene["robot"]
+    try:
+        ft_ids = get_fingertip_body_ids_from_env(robot, env)
+    except Exception:
+        return torch.zeros(env.num_envs, device=env.device)
+    v_tip = robot.data.body_lin_vel_w[:, ft_ids, :]   # (N, F, 3)
+    return (v_tip ** 2).sum(dim=(-2, -1))
+
+
+# ── Regularization: torque penalty (DexGen r_reg) ──
+
+def torque_penalty(env) -> torch.Tensor:
+    """Σ τ² — penalises large applied torques."""
+    robot = env.scene["robot"]
+    tau = robot.data.applied_torque
+    return (tau ** 2).sum(dim=-1)
+
+
+# ── Regularization: work penalty (DexGen r_reg) ──
+
+def work_penalty(env) -> torch.Tensor:
+    """Σ |τ × ω| — penalises mechanical work (energy use)."""
+    robot = env.scene["robot"]
+    tau = robot.data.applied_torque
+    omega = robot.data.joint_vel
+    return (tau * omega).abs().sum(dim=-1)
 
 
 # ── +250 goal bonus (rotation + position) ──

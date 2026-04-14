@@ -377,41 +377,64 @@ if _ISAACLAB_AVAILABLE:
 if _ISAACLAB_AVAILABLE:
     @configclass
     class AnyGraspRewardsCfg:
-        # Dense: 1/(|rot_dist| + eps) × weight (positive → primary signal)
+        # ── r_goal ──
+        # Dense: 1/(|rot_dist| + eps) × weight (PRIMARY positive signal)
         rotation = RewTerm(
             func=mdp_rewards.rotation_reward,
             weight=1.0,
             params={"rot_eps": 0.1},
         )
-        # Dense: pos_err × weight (DeXtreme linear negative → drift penalty)
+        # Dense: pos_err × weight (linear negative → drift penalty)
         distance = RewTerm(
             func=mdp_rewards.distance_reward,
             weight=-10.0,
             params={},
         )
-        # Dense: Σ(actions²) × weight (negative → penalises large actions)
+        # Dense: 1/(||q-q_target|| + eps) × weight (DexGen finger matching)
+        finger_match = RewTerm(
+            func=mdp_rewards.finger_match_reward,
+            weight=0.5,
+            params={"finger_eps": 0.5},
+        )
+        # Sparse: +250 when rot_dist < 0.4 AND pos_err < 0.05
+        goal_bonus = RewTerm(
+            func=mdp_rewards.goal_bonus,
+            weight=1.0,
+            params={"rot_thresh": 0.4, "pos_thresh": 0.05, "bonus": 250.0},
+        )
+
+        # ── r_style (DexGen fingertip velocity) ──
+        fingertip_velocity = RewTerm(
+            func=mdp_rewards.fingertip_velocity_penalty,
+            weight=-0.001,
+            params={},
+        )
+
+        # ── r_reg ──
         action_penalty = RewTerm(
             func=mdp_rewards.action_penalty,
             weight=-0.0001,
             params={},
         )
-        # Dense: Σ(Δactions²) × weight (negative → penalises jerky motion)
         action_delta_penalty = RewTerm(
             func=mdp_rewards.action_delta_penalty,
             weight=-0.01,
             params={},
         )
-        # Dense: Σ((dof_vel/4)²) × weight (negative → penalises high velocity)
         velocity_penalty = RewTerm(
             func=mdp_rewards.velocity_penalty,
             weight=-0.05,
             params={},
         )
-        # Sparse: +250 when rot_dist < 0.4 rad AND pos_err < 0.05 m
-        goal_bonus = RewTerm(
-            func=mdp_rewards.goal_bonus,
-            weight=1.0,
-            params={"rot_thresh": 0.4, "pos_thresh": 0.05, "bonus": 250.0},
+        torque_penalty = RewTerm(
+            func=mdp_rewards.torque_penalty,
+            weight=-0.0001,
+            params={},
+        )
+        work_penalty = RewTerm(
+            func=mdp_rewards.work_penalty,
+            weight=-0.001,
+            params={},
         )
 
 
