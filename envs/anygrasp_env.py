@@ -457,7 +457,7 @@ if _ISAACLAB_AVAILABLE:
             super().__post_init__()
             self.sim.dt = 1.0 / 240.0
             self.sim.render_interval = self.decimation
-            self.sim.gravity = (0.0, 0.0, -0.05)  # reduced gravity (sharpa default)
+            self.sim.gravity = (0.0, 0.0, -9.81)  # full gravity (no curriculum)
 
             # --- PhysX GPU buffer sizing ---
             # In-hand manip: ~20 rigid bodies/env, ~80 contacts/env at peak.

@@ -19,13 +19,11 @@ env:
     schedule_steps: 0            # 0 = no annealing, fixed at 0.3
   decimation: 8                  # 30 Hz control (240 Hz sim / 8), DeXtreme-aligned
   training_curriculum:
-    enabled: true
-    # Time-based linear ramp — slower for stable learning
-    warmup_ratio: 0.60            # reach end values at 60% of training (30000/50000)
-    start_gravity: 1.0
+    enabled: false                # No curriculum — fixed gravity and min_orn
+    start_gravity: 9.81           # full gravity from start
     end_gravity: 9.81
-    min_orn_start: 0.50           # rad (~28.6°) — above rot_thresh 0.4
-    min_orn_end: 3.14             # rad (~180°) — full flip eventually
+    min_orn_start: 1.50           # fixed min orientation distance for kNN goal (~85.9°)
+    min_orn_end: 1.50
 
   rewards:
     # DeXtreme (Handa et al., ICRA 2023) exact weights

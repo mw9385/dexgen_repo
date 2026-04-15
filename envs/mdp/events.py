@@ -538,42 +538,14 @@ def _get_cached_positions(graph) -> Optional[np.ndarray]:
 # ---------------------------------------------------------------------------
 
 def update_curriculum(env, epoch: int, total_epochs: int = 10000):
-    """
-    Time-based curriculum: linearly ramp gravity and min_orn over training.
-
-    Advances slowly and predictably so the policy has time to adapt.
-    Controlled by 'warmup_ratio' — fraction of total_epochs to reach end values.
-    """
+    """No curriculum — gravity and min_orn use fixed values from config."""
     cur_cfg = dict((getattr(env.cfg, "training_curriculum", None) or {})
                    or (getattr(env.cfg, "gravity_curriculum", None) or {}))
 
-    warmup_ratio = float(cur_cfg.get("warmup_ratio", 0.30))
-    warmup_epochs = max(int(total_epochs * warmup_ratio), 1)
-    t = min(epoch / warmup_epochs, 1.0)
-
-    # --- Orientation curriculum ---
+    # Set min_orn ONCE on first call so kNN goal sampling has a value
     graph = _load_grasp_graph(env)
-    if graph is not None:
-        min_orn_start = float(cur_cfg.get("min_orn_start", 0.80))
-        min_orn_end = float(cur_cfg.get("min_orn_end", 3.14))
-        graph._curriculum_min_orn = min_orn_start + t * (min_orn_end - min_orn_start)
-
-    # --- Gravity curriculum ---
-    if cur_cfg.get("enabled", False):
-        gravity_start = float(cur_cfg.get("start_gravity", 1.0))
-        gravity_end = float(cur_cfg.get("end_gravity", 9.81))
-        gravity_mag = gravity_start + t * (gravity_end - gravity_start)
-        try:
-            import carb
-            import isaaclab.sim as sim_utils
-            sim_utils.SimulationContext.instance().physics_sim_view.set_gravity(
-                carb.Float3(0.0, 0.0, -gravity_mag)
-            )
-            env._curriculum_gravity = gravity_mag
-        except Exception as exc:
-            if not getattr(env, "_curriculum_gravity_warned", False):
-                print(f"[WARNING] Gravity curriculum update failed: {exc}")
-                env._curriculum_gravity_warned = True
+    if graph is not None and not hasattr(graph, "_curriculum_min_orn"):
+        graph._curriculum_min_orn = float(cur_cfg.get("min_orn_start", 0.80))
 
 # ---------------------------------------------------------------------------
 # Rolling goal: update goal when current goal is achieved mid-episode
