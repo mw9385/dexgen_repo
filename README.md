@@ -3,8 +3,8 @@
 In-hand object reorientation with the **Sharpa Wave Hand** (22 DOF) in Isaac Lab.
 
 Based on:
-- [DeXtreme (Handa et al., 2023)](https://arxiv.org/abs/2210.13702) — reward + observation structure
-- [DexterityGen](https://arxiv.org/abs/2502.04307) — grasp graph + curriculum RL
+- [DeXtreme (Handa et al., ICRA 2023)](https://arxiv.org/abs/2210.13702) — reward, action, hyperparameters
+- [DexterityGen (Yin et al., 2025)](https://arxiv.org/abs/2502.04307) — grasp graph AnyGrasp-to-AnyGrasp
 - [sharpa-rl-lab](https://github.com/sharpa-robotics/sharpa-rl-lab) — Sharpa Hand env + tactile temporal stacking
 
 ## Pipeline
@@ -17,25 +17,26 @@ Stage 1   train_rl.py     →  logs/rl/sharpa_anygrasp_v1/
 
 ## Quick Start
 
-```bash
-# Alias (optional)
-echo 'alias ilab="/workspace/IsaacLab/isaaclab.sh -p"' >> ~/.bashrc && source ~/.bashrc
+The Docker container exposes an `isaacpy` alias that runs `/isaac-sim/python.sh`:
 
+```bash
 # Stage 0: Generate grasp cache (per shape×size, random object orientation)
-ilab scripts/gen_grasp.py --shapes cube --sizes 0.06 --num_grasps 10000 --num_envs 4096 --headless
+isaacpy scripts/gen_grasp.py --shapes cube --sizes 0.06 --num_grasps 10000 --num_envs 4096 --headless
 
 # Stage 1: Train RL (multiple grasp files → multi-object)
-ilab scripts/train_rl.py \
+isaacpy scripts/train_rl.py \
     --grasp_graph data/sharpa_grasp_cube_060.npy \
     --grasp_graph data/sharpa_grasp_sphere_060.npy \
     --grasp_graph data/sharpa_grasp_cylinder_060.npy \
-    --num_envs 4096 --headless
+    --num_envs 16384 --headless
 
 # Evaluate
-ilab scripts/evaluate.py \
+isaacpy scripts/evaluate.py \
     --checkpoint logs/rl/sharpa_anygrasp_v1/<run>/nn/last.pth \
     --num_envs 16 --num_episodes 50
 ```
+
+`/workspace/IsaacLab/isaaclab.sh -p <script>` is the equivalent long form.
 
 ## Hand
 
@@ -57,14 +58,14 @@ Contact sensors: 5 elastomer (one per fingertip).
 2. Object spawned with **uniform random SO(3) orientation** (full rotation coverage)
 3. Small position jitter (±1 cm) on object spawn
 4. Step physics with 6-direction gravity cycling (40 steps each)
-5. Validate: all fingertips < 0.1m from object + ≥3 fingers with contact > 0.5N
+5. Validate: all fingertips < 0.1 m from object + ≥3 fingers with contact > 0.5 N
 6. Episode survives → save state
 
 ```bash
 # Per shape×size (one file each)
-ilab scripts/gen_grasp.py --shapes cube     --sizes 0.06 --num_grasps 10000 --headless
-ilab scripts/gen_grasp.py --shapes sphere   --sizes 0.06 --num_grasps 10000 --headless
-ilab scripts/gen_grasp.py --shapes cylinder --sizes 0.06 --num_grasps 10000 --headless
+isaacpy scripts/gen_grasp.py --shapes cube     --sizes 0.06 --num_grasps 10000 --headless
+isaacpy scripts/gen_grasp.py --shapes sphere   --sizes 0.06 --num_grasps 10000 --headless
+isaacpy scripts/gen_grasp.py --shapes cylinder --sizes 0.06 --num_grasps 10000 --headless
 
 # Output: data/sharpa_grasp_{shape}_{size_mm}.npy
 # Format: (N, 29) = [joint_pos(22) | obj_pos_hand(3) | obj_quat_hand(4)]
@@ -73,17 +74,17 @@ ilab scripts/gen_grasp.py --shapes cylinder --sizes 0.06 --num_grasps 10000 --he
 ### Dataset analysis
 
 ```bash
-python scripts/analyze_grasp_graph.py --path data/sharpa_grasp_cube_060.npy
+isaacpy scripts/analyze_grasp_graph.py --path data/sharpa_grasp_cube_060.npy
 ```
 
 Reports orientation / position distribution and effective kNN neighbor
-count at various curriculum thresholds.
+count at various `min_orn` thresholds.
 
 ## Stage 1: RL Training
 
-### Observation (309 dims, symmetric actor = critic)
+### Observation — 309 dims (symmetric actor = critic)
 
-**Temporal block** (3 frames × 86 dims = 258) — sharpa-rl-lab style:
+**Temporal block** (3 frames × 86 dims = 258) — sharpa-rl-lab style stacking:
 ```
 joint_pos_normalized    22   ([-1,1] + noise)
 joint_vel_normalized    22   (÷5.0, clamp [-1,1])
@@ -113,88 +114,85 @@ smoothed = 0.3 × action + 0.7 × prev_action            (fixed EMA)
 
 - `action_mode: absolute`, `action_scale: 1.0` (full joint range)
 - `actions_moving_average: 0.3` (fixed, no annealing)
-- Control rate: 20 Hz (240 Hz sim / decimation 12)
+- Control rate: **30 Hz** (240 Hz sim / decimation 8)
 
-### Reward (DeXtreme, Handa et al. 2023)
+### Reward (DeXtreme, exact weights)
 
 ```
-r_t = -10   × ||pos_err||                distance (penalty)
-    +  1   × 1/(|rot_err| + 0.1)         rotation alignment (dense positive)
-    +  -0.0002 × Σ(a²)                   action magnitude penalty
-    +  -0.01   × Σ(Δa²)                  action smoothness penalty
-    +  -0.05   × Σ((v/4)²)               joint velocity penalty
-    + 250   × (rot_err < 0.4)            sparse goal bonus
+r_t = -10.0   × ||pos_err||                distance (penalty)
+    +  1.0   × 1/(|rot_err| + 0.1)         rotation alignment (dense positive)
+    +  -0.0001 × Σ(a²)                     action magnitude penalty
+    +  -0.01   × Σ(Δa²)                    action smoothness penalty
+    +  -0.05   × Σ((v/4)²)                 joint velocity penalty
+    + 250.0   × (rot_err < 0.4 rad)        sparse goal bonus
 ```
 
 - **No drop penalty** — episode termination is the implicit cost (you lose future +250 bonuses)
-- **No contact gating** — rotation reward is dense positive, avoids "do nothing" local optimum
-- **Goal = orientation only** (no position check)
+- **No contact gating** — rotation reward is dense positive
+- **Goal condition = orientation only** (`rot_err < 0.4 rad`) — DeXtreme exact
+- All values are wall-clock normalised via Isaac Lab's `dt` multiplication
 
 ### Termination
 
 | Condition | Trigger |
 |---|---|
-| `object_drop` | palm-to-object distance > **0.24 m** (DeXtreme fall_dist) |
-| `time_out` | episode length > **10 s** (200 steps at 20 Hz) |
+| `object_drop` | palm-to-object distance > **0.24 m** (DeXtreme `fall_dist`) |
+| `time_out` | episode length > **8 s** (240 steps at 30 Hz) |
 
 ### Reset / Rolling goal
 
-1. **Reset**: sample start grasp from `.npy` + kNN goal with `min_orn ≥ curriculum value`
-2. **Rolling goal**: when `rot_err < 0.4` and object not dropped, sample new kNN goal
-3. Goals are re-based: `target = actual_pos + (new_goal - old_goal)` (not absolute)
-
-### Curriculum (time-based linear ramp)
-
-```
-warmup_ratio = 0.30  →  reach max difficulty at epoch 3000/10000
-gravity:   1.0  →  9.81 m/s²   (+0.003/epoch)
-min_orn:   0.80 →  3.14 rad    (+0.0008/epoch)
-```
-
-Slow and predictable so the policy has time to adapt. Configured under
-`training_curriculum` in `configs/rl_training.yaml`.
+1. **Reset**: sample start grasp from `.npy` + kNN goal with `min_orn ≥ 0.7 rad`
+2. **Rolling goal**: when `rot_err < 0.4` and object not dropped, sample a new
+   kNN goal with the same `min_orn` constraint
+3. Goal poses are absolute (start / goal grasps come from the same graph)
+4. **No curriculum** — gravity and `min_orn` are fixed for the entire run
 
 ### PPO (rl_games)
 
 ```
-Network:  MLP [512, 512] + ELU, symmetric actor/critic
-Sigma:    fixed, learned log-sigma init -1.0
+Network:  MLP [512, 512] + ELU, symmetric actor/critic (no LSTM)
+Sigma:    fixed, log-sigma init -1.0
 Input:    309-dim observation (normalized)
 Output:   22-dim action (normalized)
 
 learning_rate:     5e-4 (adaptive)
-gamma / tau:       0.99 / 0.95
+gamma / tau:       0.998 / 0.95
 e_clip:            0.2
 entropy_coef:      0.0
-bounds_loss_coef:  0.0001
+bounds_loss_coef:  0.005
 critic_coef:       4.0
 
 horizon_length:    16
-minibatch_size:    4096
-mini_epochs:       8
-max_iterations:    10000
+minibatch_size:    16384   (batch = num_envs × horizon)
+mini_epochs:       4
+max_iterations:    50000
 ```
+
+LSTM is disabled (`use_rnn: false`): temporal stacking already provides
+short-term history and the sim observation includes ground-truth
+velocities / contact forces, so the MDP is fully observable. Enable LSTM
+later for sim-to-real where partial observation matters.
 
 ### Training
 
 ```bash
-ilab scripts/train_rl.py \
+isaacpy scripts/train_rl.py \
     --grasp_graph data/sharpa_grasp_cube_060.npy \
     --grasp_graph data/sharpa_grasp_sphere_060.npy \
-    --num_envs 4096 --headless
+    --num_envs 16384 --headless
 ```
 
 ### Evaluation
 
 ```bash
 # Auto-detects checkpoint epoch and applies matching curriculum state
-ilab scripts/evaluate.py \
+isaacpy scripts/evaluate.py \
     --checkpoint logs/rl/sharpa_anygrasp_v1/<run>/nn/last.pth \
     --grasp_graph data/sharpa_grasp_cube_060.npy \
     --num_envs 16 --num_episodes 50
 
 # Watch in viewer (4 envs, GUI)
-ilab scripts/evaluate.py --checkpoint <path> --num_envs 4
+isaacpy scripts/evaluate.py --checkpoint <path> --num_envs 4
 ```
 
 ## Files
@@ -211,8 +209,8 @@ envs/
   anygrasp_env.py           ManagerBasedRLEnv config (Sharpa Hand)
   mdp/
     observations.py         Temporal stacking + tactile
-    rewards.py              DeXtreme rewards (dist, rot, penalties, bonus)
-    events.py               Reset + rolling goal + time-based curriculum
+    rewards.py              DeXtreme rewards (dist, rot, action, velocity, bonus)
+    events.py               Reset + rolling goal + (no-op) curriculum
     sim_utils.py            FK, IK, palm body lookup
     math_utils.py           Quaternion ops, rotation noise
     domain_rand.py          DR (object/robot physics, action delay)
@@ -228,6 +226,9 @@ configs/
   grasp_generation.yaml
   rl_training.yaml
   dexgen.yaml
+
+docker/
+  Dockerfile                Exposes `isaacpy`, `islab`, `proj` aliases
 ```
 
 ## Config
@@ -238,25 +239,24 @@ Key settings in `configs/rl_training.yaml`:
 env:
   action_mode: "absolute"
   actions_moving_average: 0.3
-  decimation: 12                    # 20 Hz control
+  decimation: 8                      # 30 Hz control
 
   training_curriculum:
-    enabled: true
-    warmup_ratio: 0.30              # time-based linear ramp
-    start_gravity: 1.0
+    enabled: false                   # fixed values, no ramp
+    start_gravity: 9.81
     end_gravity: 9.81
-    min_orn_start: 0.80
-    min_orn_end: 3.14
+    min_orn_start: 0.70              # kNN goal min orientation distance
+    min_orn_end: 0.70
 
   rewards:
     distance_weight: -10.0
     rotation_weight: 1.0
     rotation_eps: 0.1
-    action_penalty_weight: -0.0002
+    action_penalty_weight: -0.0001
     action_delta_penalty_weight: -0.01
     velocity_penalty_weight: -0.05
     goal_bonus: 250.0
-    goal_thresh: 0.4
+    goal_thresh: 0.4                 # rad
 
   terminations:
     object_drop_max_dist: 0.24
@@ -266,11 +266,10 @@ env:
 
 | Problem | Fix |
 |---------|-----|
-| All episodes end on step 1 | `object_drop_max_dist` too tight — object resting distance from palm exceeds it. Check with `analyze_grasp_graph.py` |
-| Goal hits = 0/0 | `min_orn_start` < `goal_thresh` → goals instantly reached. Ensure `min_orn_start > rot_thresh` |
-| Reward collapses mid-training | Curriculum advanced too fast. Increase `warmup_ratio` |
-| Policy learns "do nothing" | Happens with sparse-only rewards. DeXtreme reward avoids this via dense `1/(rot_err+0.1)` positive signal |
+| All episodes end on step 1 | `object_drop_max_dist` too tight. Object resting distance from palm exceeds it — check with `analyze_grasp_graph.py` |
+| `min_orn_start` < 0.4 | Goals are instantly reached (`min_orn` must stay above `goal_thresh` 0.4 rad) |
+| `bounds_loss` keeps climbing | Raise `bounds_loss_coef` (already 0.005) or lower `learning_rate` |
+| Policy learns "do nothing" | Check that `rotation_reward` dominates — with DeXtreme weights a stationary object still gets `1/(rot_err+0.1)` baseline; large enough gradient pulls toward the goal |
 | "performance/" duplicate metrics in TensorBoard | `_FilteredWriter` drops lowercase rl_games metrics, only uppercase `Performance/` passes |
-| Slow env startup with multi-object | Set `replicate_physics=False` auto when loading multi-object graphs |
-| Grasp gen stuck at 0 | Early steps fail frequently, success rate ramps up over time |
-```
+| Slow env startup with multi-object | `replicate_physics` is auto-set to False for multi-object runs |
+| Grasp gen stuck at 0 | Early steps fail frequently; success rate ramps up over time |
