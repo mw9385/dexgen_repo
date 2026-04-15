@@ -22,8 +22,8 @@ env:
     enabled: false                # No curriculum — fixed gravity and min_orn
     start_gravity: 9.81           # full gravity from start
     end_gravity: 9.81
-    min_orn_start: 0.50           # rad (~28.6°) — just above goal rot_thresh 0.4
-    min_orn_end: 0.50
+    min_orn_start: 0.70           # rad (~40.1°)
+    min_orn_end: 0.70
 
   rewards:
     # DeXtreme (Handa et al., ICRA 2023) exact weights

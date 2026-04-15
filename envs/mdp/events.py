@@ -632,7 +632,8 @@ def update_rolling_goal(
             w1*w2-x1*x2-y1*y2-z1*z2, w1*x2+x1*w2+y1*z2-z1*y2,
             w1*y2-x1*z2+y1*w2+z1*x2, w1*z2+x1*y2-y1*x2+z1*w2], dim=-1)
 
-    success_mask = (orn_err < rot_threshold) & (pos_err < pos_threshold) & ~object_dropped(env)
+    # DeXtreme-style: rotation-only success (matches goal_bonus reward criterion)
+    success_mask = (orn_err < rot_threshold) & ~object_dropped(env)
 
     # Store per-env success mask so evaluate.py can read it after step().
     # Must be stored BEFORE the target is updated below.
