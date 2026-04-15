@@ -575,15 +575,9 @@ def goal_rot_thresh_from_env(env, default: float = 0.4) -> float:
     return _goal_bonus_params_get(env, "rot_thresh", default)
 
 
-def goal_pos_thresh_from_env(env, default: float = 0.05) -> float:
-    """``pos_thresh`` from ``env.cfg.rewards.goal_bonus`` (matches ``goal_bonus`` reward)."""
-    return _goal_bonus_params_get(env, "pos_thresh", default)
-
-
 def update_rolling_goal(
     env,
     rot_threshold: float | None = None,
-    pos_threshold: float | None = None,
 ) -> int:
     """
     Called every control step from train_rl / evaluate after env.step().
@@ -596,8 +590,6 @@ def update_rolling_goal(
     """
     if rot_threshold is None:
         rot_threshold = goal_rot_thresh_from_env(env)
-    if pos_threshold is None:
-        pos_threshold = goal_pos_thresh_from_env(env)
 
     _zero_mask = torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
 
@@ -618,7 +610,6 @@ def update_rolling_goal(
     from . import rewards as mdp_rewards
 
     orn_err = mdp_rewards._get_orn_error(env)
-    pos_err = mdp_rewards._get_pos_error(env)
 
     robot = env.scene["robot"]
     obj = env.scene["object"]
